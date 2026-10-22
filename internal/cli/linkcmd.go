@@ -183,7 +183,7 @@ func (a *App) chooseHost(ctx context.Context) (string, error) {
 	var items []string
 	var hosts []string
 	for _, c := range cands {
-		if c.Linked {
+		if c.Linked || unsupportedPlatform(c.Detail) {
 			continue
 		}
 		label := c.Host
@@ -249,4 +249,15 @@ func (a *App) addInternalLink(internal *cobra.Command) {
 			},
 		})
 	}
+}
+
+// unsupportedPlatform hides Tailscale devices kran cannot run on.
+func unsupportedPlatform(detail string) bool {
+	d := strings.ToLower(detail)
+	for _, os := range []string{"ios", "android", "windows", "tvos", "ipados"} {
+		if strings.HasPrefix(d, os+",") || strings.HasPrefix(d, os+" ") || d == os {
+			return true
+		}
+	}
+	return false
 }
