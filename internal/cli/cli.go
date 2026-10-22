@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
-	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -91,9 +89,7 @@ func selfPath() (string, error) {
 // Main runs the CLI with os.Args and returns the process exit code.
 func Main(args []string) int {
 	a := NewApp()
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
-	defer stop()
-	return a.Execute(ctx, args[1:])
+	return a.Execute(context.Background(), args[1:])
 }
 
 // Execute runs one command line (without argv[0]) and returns the exit code.
@@ -168,5 +164,28 @@ machines has room, and never makes a job worse than running it locally.
 		a.hookCommand(),
 	)
 	a.addPlatformCommands(root)
+	root.Args = func(c *cobra.Command, args []string) error {
+		if len(args) > 0 {
+			return usagef("unknown command %q; see `kran --help`", args[0])
+		}
+		return nil
+	}
+	usageArgs(root)
 	return root
+}
+
+// usageArgs turns cobra's argument-count errors into usage errors (exit 2)
+// that say how to get help.
+func usageArgs(c *cobra.Command) {
+	if v := c.Args; v != nil && c.Parent() != nil {
+		c.Args = func(cmd *cobra.Command, args []string) error {
+			if err := v(cmd, args); err != nil {
+				return usagef("%s (see `%s --help`)", err.Error(), cmd.CommandPath())
+			}
+			return nil
+		}
+	}
+	for _, sub := range c.Commands() {
+		usageArgs(sub)
+	}
 }
