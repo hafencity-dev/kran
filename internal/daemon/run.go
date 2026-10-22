@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 	"github.com/hafencity-dev/kran/internal/store"
 	"github.com/hafencity-dev/kran/internal/transport"
 	"github.com/hafencity-dev/kran/internal/ui"
+	"github.com/hafencity-dev/kran/internal/version"
 	"github.com/hafencity-dev/kran/internal/workspace"
 )
 
@@ -99,7 +102,13 @@ func run(ctx context.Context, opts Options) error {
 
 	self, _ := os.Executable()
 	var ex execenv.Manager
-	if m, err := execenv.New(execenv.Options{StateDir: dirs.State, NodeName: cfg.Name, Self: self, Logf: logf}); err != nil {
+	if m, err := execenv.New(execenv.Options{
+		StateDir: dirs.State, NodeName: cfg.Name, Self: self, Logf: logf,
+		Container: cfg.ContainerEnabled,
+		// Placed there by `kran link`/`kran upgrade`; the Docker VM runs the
+		// host's architecture (Apple Silicon → linux/arm64).
+		LinuxBinary: linuxBinary(),
+	}); err != nil {
 		logf("execenv: %v; this node will not run jobs for other nodes", err)
 	} else {
 		ex = m
@@ -186,4 +195,21 @@ func orderAddresses(addrs []string, preferred string) []string {
 		}
 	}
 	return out
+}
+
+// linuxBinary is the Linux kran for the container runtime's sync helper on
+// macOS ("" when absent: execenv then reports the runtime unavailable).
+func linuxBinary() string {
+	if runtime.GOOS == "linux" {
+		return ""
+	}
+	p := paths.BinaryCache(strings.TrimPrefix(version.Version, "v"), "linux", runtime.GOARCH)
+	if _, err := os.Stat(p); err != nil {
+		if p2 := paths.BinaryCache(version.Version, "linux", runtime.GOARCH); p2 != p {
+			if _, err := os.Stat(p2); err == nil {
+				return p2
+			}
+		}
+	}
+	return p
 }
