@@ -259,12 +259,18 @@ func TestE2EQueueReasonAndCancel(t *testing.T) {
 	if j, _ := a.job(id); j.State != proto.JobSyncing {
 		t.Fatalf("job left syncing despite the stall: %s", j.State)
 	}
+	canceledAt := time.Now()
 	if r := a.kran(runOpts{}, "cancel", id); r.code != 0 {
 		t.Fatalf("kran cancel syncing: %s", r)
 	}
 	r = p.wait()
 	if r.code != 143 || strings.Contains(string(r.stdout), "must not run") {
 		t.Errorf("canceled syncing job: %s", r)
+	}
+	// The link is still stalled: the job ends at once all the same, it does
+	// not wait for the link to be declared dead.
+	if took := time.Since(canceledAt); took > 20*time.Second {
+		t.Errorf("cancel while syncing over a stalled link took %v", took.Round(time.Second))
 	}
 	b.proxy.Stall(false)
 	a.proxy.Stall(false)

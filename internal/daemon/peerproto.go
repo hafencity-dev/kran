@@ -298,13 +298,37 @@ func peerCall(ctx context.Context, s transport.Session, method, jobID string, bo
 	} else {
 		c.SetDeadline(time.Now().Add(30 * time.Second))
 	}
-	if err := pc.writeJSON(proto.PeerRequest{Method: method, JobID: jobID, Body: body}); err != nil {
-		c.Close()
-		return nil, fmt.Errorf("%s: send: %w", method, ctxErr(ctx, err))
+	// The exchange runs aside so that the call ends with ctx even when a
+	// write is stuck on a stalled link: yamux then waits for the
+	// connection itself and ignores the stream's deadline.
+	type answer struct {
+		resp rawPeerResponse
+		err  error
 	}
-	if err := pc.readResponse(method, out); err != nil {
+	ch := make(chan answer, 1)
+	go func() {
+		var a answer
+		if err := pc.writeJSON(proto.PeerRequest{Method: method, JobID: jobID, Body: body}); err != nil {
+			a.err = fmt.Errorf("%s: send: %w", method, err)
+		} else if err := pc.readJSON(&a.resp); err != nil {
+			a.err = fmt.Errorf("%s: read answer: %w", method, err)
+		}
+		ch <- a
+	}()
+	var a answer
+	select {
+	case a = <-ch:
+	case <-ctx.Done():
+		go func() { <-ch; c.Close() }()
 		c.Close()
-		return nil, ctxErr(ctx, err)
+		return nil, fmt.Errorf("%s: %w", method, ctx.Err())
+	}
+	if a.err == nil {
+		a.err = a.resp.decode(method, out)
+	}
+	if a.err != nil {
+		c.Close()
+		return nil, ctxErr(ctx, a.err)
 	}
 	if !stop() {
 		c.Close()
@@ -319,6 +343,11 @@ func (c *peerConn) readResponse(method string, out any) error {
 	if err := c.readJSON(&resp); err != nil {
 		return fmt.Errorf("%s: read answer: %w", method, err)
 	}
+	return resp.decode(method, out)
+}
+
+// decode turns an answer into its error or fills out from its body.
+func (resp rawPeerResponse) decode(method string, out any) error {
 	if !resp.OK {
 		return &peerError{Method: method, Code: resp.Code, Msg: resp.Error}
 	}

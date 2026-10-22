@@ -13,6 +13,8 @@ All notable changes to kran. Versions follow [semantic versioning](https://semve
 
 ### Fixes
 
+- Canceling a job while it syncs over a stalled link ends it at once instead of when the link is declared dead (up to 2 minutes on a loaded machine): peer calls, the manifest exchange and uploads no longer wait for writes stuck on the connection.
+
 - A job sized by an estimate may use at least 8 GiB before kran stops it (the cap only kills, it reserves nothing), so the first `go test` of a large package no longer hits a cap sized from its smaller siblings. An explicit `--mem` keeps its exact cap.
 - On macOS, where kran enforces a memory cap by measuring, a capped job is measured every 200 ms instead of every second.
 

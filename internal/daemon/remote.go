@@ -75,17 +75,29 @@ func (d *Daemon) runRemote(ctx context.Context, e *jobEntry, p scheduler.Placeme
 		defer c()
 		peerOneShot(cctx, sess, proto.PeerJobCancel, e.id, nil, nil)
 	}
+	// leave abandons the placement before job.start was sent. A canceled
+	// job ends now and frees the target in the background: over a stalled
+	// link the call can hang until the link is declared dead. A job that
+	// may be placed again waits, so a late cancel cannot reach its next
+	// admission.
+	leave := func() {
+		if c, _, _ := e.canceled(); c {
+			go abandon()
+			return
+		}
+		abandon()
+	}
 
 	e.setState(proto.JobSyncing, "syncing to "+node)
 	e.phase(proto.Phase{State: proto.JobSyncing, Message: "scanning workspace"})
 	if d.deps.Scanner == nil {
-		abandon()
+		leave()
 		return fail(errors.New("this node cannot scan workspaces"))
 	}
 	syncStart := d.now()
 	m, err := d.deps.Scanner.Scan(pctx, spec.Workspace, spec.SyncInclude, spec.SyncExclude)
 	if err != nil {
-		abandon()
+		leave()
 		return fail(fmt.Errorf("scan workspace: %w", err))
 	}
 	repoID := m.RepoID
@@ -103,18 +115,18 @@ func (d *Daemon) runRemote(ctx context.Context, e *jobEntry, p scheduler.Placeme
 	slot := acq.SlotRef
 	cancel()
 	if err != nil {
-		abandon()
+		leave()
 		return fail(fmt.Errorf("workspace slot: %w", err))
 	}
 
 	plan, err := d.remoteDiff(pctx, sess, e.id, node, acq.Sync, m)
 	if err != nil {
-		abandon()
+		leave()
 		return fail(fmt.Errorf("sync: %w", err))
 	}
 	sent, err := d.uploadBlobs(pctx, sess, e, node, m, plan)
 	if err != nil {
-		abandon()
+		leave()
 		return fail(fmt.Errorf("sync: %w", err))
 	}
 	if !plan.Committed { // a 1.1 target that had every blob already committed
@@ -123,7 +135,7 @@ func (d *Daemon) runRemote(ctx context.Context, e *jobEntry, p scheduler.Placeme
 		err = peerOneShot(cctx, sess, proto.PeerSlotCommit, e.id, nil, nil)
 		cancel()
 		if err != nil {
-			abandon()
+			leave()
 			return fail(fmt.Errorf("sync: %w", err))
 		}
 	}

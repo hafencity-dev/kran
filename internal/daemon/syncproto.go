@@ -123,26 +123,46 @@ func (d *Daemon) sendDiff(ctx context.Context, sess transport.Session, id string
 	defer pc.Close()
 	stop := context.AfterFunc(dctx, func() { pc.SetDeadline(time.Unix(1, 0)) })
 	defer stop()
-	if body == nil || body.Format != proto.ManifestSame {
-		enc, err := zstd.NewWriter(frameWriter{pc}, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderConcurrency(1))
-		if err != nil {
-			return plan, err
-		}
-		if err := write(enc); err != nil {
-			enc.Close()
-			return plan, fmt.Errorf("send manifest: %w", ctxErr(dctx, err))
-		}
-		if err := enc.Close(); err != nil {
-			return plan, fmt.Errorf("send manifest: %w", ctxErr(dctx, err))
-		}
+	// Aside, like peerCall: a write stuck on a stalled link ignores the
+	// deadline, and the job must not wait for the link to be declared dead.
+	type result struct {
+		plan proto.SyncPlan
+		err  error
 	}
-	if err := pc.writeFrame(pfEnd, nil); err != nil {
-		return plan, fmt.Errorf("send manifest: %w", ctxErr(dctx, err))
+	ch := make(chan result, 1)
+	go func() {
+		var r result
+		r.err = func() error {
+			if body == nil || body.Format != proto.ManifestSame {
+				enc, err := zstd.NewWriter(frameWriter{pc}, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderConcurrency(1))
+				if err != nil {
+					return err
+				}
+				if err := write(enc); err != nil {
+					enc.Close()
+					return fmt.Errorf("send manifest: %w", err)
+				}
+				if err := enc.Close(); err != nil {
+					return fmt.Errorf("send manifest: %w", err)
+				}
+			}
+			if err := pc.writeFrame(pfEnd, nil); err != nil {
+				return fmt.Errorf("send manifest: %w", err)
+			}
+			return pc.readResponse(proto.PeerSlotDiff, &r.plan)
+		}()
+		ch <- r
+	}()
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			return r.plan, ctxErr(dctx, r.err)
+		}
+		return r.plan, nil
+	case <-dctx.Done():
+		go func() { <-ch; pc.Close() }()
+		return plan, fmt.Errorf("%s: %w", proto.PeerSlotDiff, dctx.Err())
 	}
-	if err := pc.readResponse(proto.PeerSlotDiff, &plan); err != nil {
-		return plan, ctxErr(dctx, err)
-	}
-	return plan, nil
 }
 
 // manifestKey scopes the target's cache to the origin that sent it.

@@ -105,7 +105,16 @@ feed:
 		}
 	}
 	close(work)
-	wg.Wait()
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-parent.Done():
+		// Canceled: do not wait for the workers. A write stuck on a stalled
+		// link ignores the stream's deadline (yamux waits for the
+		// connection itself), so it ends only with the link; the job must
+		// not.
+	}
 	cancel()
 	<-progDone
 	if firstErr == nil && parent.Err() != nil {
