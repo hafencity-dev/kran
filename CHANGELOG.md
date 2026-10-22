@@ -11,6 +11,11 @@ All notable changes to kran. Versions follow [semantic versioning](https://semve
 - `docker` and `docker-compose` are also in `/usr/bin`, for scripts with a fixed `PATH`; the compose and buildx plugins work from there too.
 - Container jobs are refused with reason `disk` while the Docker disk is below the node's floor, and kran trims its caches at once.
 
+### Fixes
+
+- A remote job's first output byte can no longer overtake its "running" notice, which the origin uses to decide between falling back and exit 125.
+- The test suites pass on macOS (path symlinks, process lookup, a root-only test path) and tolerate a heavily loaded CI runner.
+
 ## 0.1.0 - first release
 
 kran moves heavy dev jobs to whichever of your machines has room, and never makes a job worse than running it locally.
