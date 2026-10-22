@@ -32,12 +32,13 @@ type jobState struct {
 	done chan struct{}
 	exit proto.Exit
 
-	evMu    sync.Mutex // serializes readEvents and its callbacks
-	mu      sync.Mutex
-	onPhase func(proto.Phase)
-	evOff   int64
-	ready   bool
-	running bool
+	evMu             sync.Mutex // serializes readEvents and its callbacks
+	mu               sync.Mutex
+	onPhase          func(proto.Phase)
+	evOff            int64
+	ready            bool
+	running          bool
+	runningDelivered bool // OnPhase(running) has returned (readEvents)
 	// Two connections to the supervisor: stdin may block for as long as
 	// the job does not read it, signals and resizes must never wait
 	// behind it.
@@ -152,6 +153,14 @@ func (js *jobState) readEvents() {
 			cb(p)
 		}
 	}
+	// Only now may output be handed out (Output's beforeFrame): a reader
+	// that saw running set by a concurrent readEvents would otherwise pass
+	// the first byte on before OnPhase(running) has been delivered.
+	js.mu.Lock()
+	if js.running {
+		js.runningDelivered = true
+	}
+	js.mu.Unlock()
 }
 
 func (js *jobState) finish(exit proto.Exit) {
@@ -307,9 +316,11 @@ func (p *process) Output(offset int64) io.ReadCloser {
 	// OnPhase(running) precedes the command's first byte.
 	r.beforeFrame = func() {
 		p.js.mu.Lock()
-		running := p.js.running
+		delivered := p.js.runningDelivered
 		p.js.mu.Unlock()
-		if !running {
+		if !delivered {
+			// Reads the running event itself, or waits (evMu) for a
+			// concurrent reader to finish delivering it.
 			p.js.readEvents()
 		}
 	}
