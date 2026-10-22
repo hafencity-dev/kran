@@ -96,8 +96,18 @@ func (d *Daemon) drive(ctx context.Context, e *jobEntry, mode driveMode) {
 		}
 		return
 	case driveResubmit:
-		e.setState(proto.JobQueued, "queued again after a daemon restart")
-		go d.cancelWithoutCLI(ctx, e)
+		// The job had not started. Its kran run saw the daemon go away and
+		// ran the command itself (or gave up with --no-fallback): placing
+		// it again unasked would run it twice. Only a CLI that reattaches
+		// gets it back.
+		e.setState(proto.JobQueued, "waiting for its kran run to reconnect after a daemon restart")
+		if !d.waitForCLI(ctx, e) {
+			if ctx.Err() == nil {
+				e.requestCancel("its kran run did not reconnect after the daemon restarted", "TERM")
+				d.finishCanceledBeforeStart(e)
+			}
+			return
+		}
 	}
 
 	j := e.snapshot()
