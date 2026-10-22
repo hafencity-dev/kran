@@ -60,8 +60,10 @@ type runner struct {
 	local     *localProc
 	localNode string // the daemon's node name for a local placement
 	localCh   <-chan proto.Exit
-	fallback  bool
-	lastInt   time.Time
+	// pendingExit: the local job ended while reconnecting to the daemon.
+	pendingExit *proto.Exit
+	fallback    bool
+	lastInt     time.Time
 
 	// notices
 	pending   string
@@ -359,6 +361,12 @@ func (r *runner) loop(ctx context.Context) int {
 				r.send(proto.FrameStdin, b)
 			}
 		case ex := <-r.localCh:
+			if r.sess == nil && r.reconnectOn {
+				// The daemon is restarting: report the exit once we are
+				// back (or the reconnect gives up), so its record is right.
+				r.localCh, r.pendingExit = nil, &ex
+				continue
+			}
 			return r.onLocalDone(ex)
 		case <-r.noteC:
 			r.noteTimer, r.noteC = nil, nil
@@ -594,6 +602,9 @@ func (r *runner) reconnect() {
 func (r *runner) onReconnect(ctx context.Context, rr reconnectResult) (int, bool) {
 	r.reconnectOn = false
 	if rr.err != nil || rr.sess == nil {
+		if r.pendingExit != nil {
+			return r.onLocalDone(*r.pendingExit), true
+		}
 		if r.local != nil {
 			return 0, false // keep running locally; the exit code is still ours
 		}
@@ -609,6 +620,9 @@ func (r *runner) onReconnect(ctx context.Context, rr reconnectResult) (int, bool
 	r.cl = rr.cl
 	r.attach(rr.sess)
 	r.sendJSON(proto.FrameReattach, proto.Reattach{JobID: r.jobID, Offset: r.offset})
+	if r.pendingExit != nil {
+		return r.onLocalDone(*r.pendingExit), true
+	}
 	return 0, false
 }
 

@@ -426,3 +426,84 @@ func TestE2ELongQueueStaysQueued(t *testing.T) {
 	hold.wait()
 	a.waitIdle(10 * time.Second)
 }
+
+// TestE2EOriginRestartBeforeStart: the origin daemon restarts while a job
+// waits; its CLI runs the job locally, so the restarted daemon must not
+// run it a second time.
+func TestE2EOriginRestartBeforeStart(t *testing.T) {
+	c := newCluster(t, []string{"a", "b"}, map[string]nodeOpts{"b": {MaxJobs: 1}})
+	a, b := c.node("a"), c.node("b")
+	repo := makeRepo(t, filepath.Join(c.base, "repo"), map[string]string{"f": "x"})
+	marks := filepath.Join(c.base, "marks")
+	env := []string{"MARKS=" + marks}
+	hold := a.startKran(runOpts{dir: repo, env: env}, "run", "-n", "b", "--", "sh", "-c", `echo hold >> "$MARKS"; echo ready; sleep 6`)
+	if !hold.waitStdout("ready", 60*time.Second) {
+		t.Fatal(hold.wait())
+	}
+	waiting := a.startKran(runOpts{dir: repo, env: env}, "run", "-n", "b", "--", "sh", "-c", `echo "${KRAN_NODE:-here}" >> "$MARKS"`)
+	poll(10*time.Second, func() bool { st, _ := a.state(); return st != nil && len(st.Queue) == 1 })
+	a.restart()
+	if r := waiting.wait(); r.code != 0 {
+		t.Errorf("waiting job: %s", r)
+	}
+	if r := hold.wait(); r.code != 0 {
+		t.Errorf("running job across the restart: %s", r)
+	}
+	time.Sleep(25 * time.Second) // CLI reattach window + placement
+	data, _ := os.ReadFile(marks)
+	if got := strings.Fields(string(data)); strings.Join(got, ",") != "hold,here" {
+		t.Errorf("runs %v, want [hold here]: the waiting job must run exactly once", got)
+	}
+	a.waitIdle(30 * time.Second)
+	b.waitIdle(30 * time.Second)
+}
+
+// TestE2EStdinIntactAfterFallback: input is forwarded only once the
+// command runs remotely; a fallback before that gets all of it.
+func TestE2EStdinIntactAfterFallback(t *testing.T) {
+	c := newCluster(t, []string{"a", "b"}, nil)
+	b := c.node("b")
+	a := c.node("a")
+	repo := slowSetupRepo(t, c, "4")
+	in := strings.Repeat("0123456789abcdef", 8<<10) // 128 KiB
+	p := a.startKran(runOpts{dir: repo, stdin: strings.NewReader(in)}, "run", "--json-events", "-i", "-n", "b", "--",
+		"sh", "-c", `wc -c | tr -d ' '`)
+	if waitPhase(p, "setup", 60*time.Second) == nil {
+		t.Fatalf("no setup phase: %s", p.wait())
+	}
+	b.crash()
+	r := p.wait()
+	if r.code != 0 || strings.TrimSpace(string(r.stdout)) != "131072" {
+		t.Errorf("fallback after a failed remote start must get all of stdin: %s", r)
+	}
+	b.start()
+	c.waitMesh(60 * time.Second)
+	// And a normal remote run still gets everything.
+	r = a.kran(runOpts{dir: repo, stdin: strings.NewReader(in)}, "run", "-i", "-n", "b", "--", "sh", "-c", `wc -c | tr -d ' '`)
+	if r.code != 0 || strings.TrimSpace(string(r.stdout)) != "131072" {
+		t.Errorf("remote stdin: %s", r)
+	}
+}
+
+// TestE2ELocalJobEndsWhileDaemonDown: a local job that finishes while its
+// daemon restarts still gets its real result recorded.
+func TestE2ELocalJobEndsWhileDaemonDown(t *testing.T) {
+	c := newCluster(t, []string{"a"}, nil)
+	a := c.node("a")
+	repo := makeRepo(t, filepath.Join(c.base, "repo"), map[string]string{"f": "x"})
+	p := a.startKran(runOpts{dir: repo}, "run", "--json-events", "--local", "--", "sh", "-c", "echo started; sleep 1; exit 3")
+	id := p.jobID(30 * time.Second)
+	if !p.waitStdout("started", 30*time.Second) {
+		t.Fatal(p.wait())
+	}
+	a.crash()
+	time.Sleep(3 * time.Second)
+	a.start()
+	if r := p.wait(); r.code != 3 {
+		t.Errorf("local job across a daemon crash: %s", r)
+	}
+	j := a.waitJob(id, 40*time.Second, func(j proto.Job) bool { return j.State.Terminal() })
+	if j.State != proto.JobFailed || j.ExitCode == nil || *j.ExitCode != 3 {
+		t.Errorf("record %s exit %v (%s), want failed 3", j.State, j.ExitCode, j.Reason)
+	}
+}

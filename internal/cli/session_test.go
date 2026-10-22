@@ -587,6 +587,36 @@ func TestReattachAfterDrop(t *testing.T) {
 	}
 }
 
+// TestLocalExitReportedAfterReconnect: a local job that ends while the
+// daemon restarts has its exit reported once the daemon is back.
+func TestLocalExitReportedAfterReconnect(t *testing.T) {
+	s1, s2 := newFakeSession(), newFakeSession()
+	cl := &fakeClient{sessions: []*fakeSession{s1}}
+	h := newHarness(t, cl, "sh", "-c", "sleep 0.2; exit 3")
+	go func() {
+		s1.push(proto.FrameDecision, proto.Decision{JobID: "jl", Mode: "local", Envelope: &proto.LocalEnvelope{}})
+		waitFor(t, func() bool { return s1.count(proto.FrameStarted) == 1 })
+		s1.drop()                          // the daemon goes away
+		time.Sleep(400 * time.Millisecond) // the job ends meanwhile
+		cl.mu.Lock()
+		cl.sessions = append(cl.sessions, s2) // and the daemon is back
+		cl.mu.Unlock()
+	}()
+	if code := h.run(t); code != 3 {
+		t.Fatal(code)
+	}
+	types := s2.sentTypes()
+	if len(types) < 2 || types[0] != proto.FrameReattach || types[len(types)-1] != proto.FrameExit {
+		t.Fatalf("frames after reconnect: %v", types)
+	}
+	f, _ := s2.find(proto.FrameExit)
+	var ex proto.Exit
+	json.Unmarshal(f.payload, &ex)
+	if ex.Code != 3 || ex.JobID != "jl" {
+		t.Fatalf("%+v", ex)
+	}
+}
+
 func TestReconnectGivesUpWith125(t *testing.T) {
 	s1 := newFakeSession()
 	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s1}}, "x")
