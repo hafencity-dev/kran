@@ -142,10 +142,10 @@ func (r *runner) event(name string, fields map[string]any) {
 // pendNote holds a waiting/progress message until it has lasted NoticeDelay,
 // then prints it; changes afterwards print immediately.
 func (r *runner) pendNote(text string) {
-	if text == "" || text == r.lastSaid {
-		return
+	if text == "" || text == r.lastSaid || r.flags.JSONEvents {
+		return // JSON mode already gets every notice and phase as an event
 	}
-	if r.noteShown || r.flags.JSONEvents {
+	if r.noteShown {
 		r.printNote(text)
 		return
 	}
