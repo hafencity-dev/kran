@@ -371,3 +371,26 @@ type APIError struct {
 	Error string `json:"error"`
 	Hint  string `json:"hint,omitempty"` // what to do next
 }
+
+// QueueEvent is the Data of an EventQueue event.
+// added by A: typed payload so the client, TUI and UI decode the same shape.
+type QueueEvent struct {
+	Queue []string `json:"queue"`
+}
+
+// LogEvent is the Data of an EventLog event.
+// added by A: typed payload for notable daemon log lines.
+type LogEvent struct {
+	Level string    `json:"level"` // "info" | "warn" | "error"
+	Msg   string    `json:"msg"`
+	Time  time.Time `json:"time"`
+}
+
+// OutputChunk is one event of the followed job log (GET
+// /api/v1/jobs/{id}/log?follow=1, SSE event "output").
+// added by A: binary-safe log streaming for the CLI and the UI.
+type OutputChunk struct {
+	Stream string `json:"stream"` // "stdout" | "stderr"
+	Offset int64  `json:"offset"` // payload offset of the first byte
+	B64    string `json:"b64"`    // data, base64 (std encoding)
+}
