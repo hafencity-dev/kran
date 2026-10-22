@@ -33,9 +33,9 @@ type scanner struct {
 }
 
 type blobRef struct {
-	path  string
-	size  int64
-	mtime int64
+	root, rel string // joined only when opened
+	size      int64
+	mtime     int64
 }
 
 func newScanner(cacheDir string) (Scanner, error) {
@@ -171,12 +171,22 @@ func (s *scanner) collect(ctx context.Context, root string, gitMode bool, names 
 		var batch []string
 		for _, n := range pending {
 			n = strings.TrimSuffix(n, "/")
-			if n == "" || seen[n] || !keep(n) || throughSymlink(root, n, realDir) {
+			if n == "" || seen[n] || !keep(n) {
 				continue
 			}
 			seen[n] = true
 			batch = append(batch, n)
 		}
+		if err := statDirs(ctx, root, batch, realDir); err != nil {
+			return nil, err
+		}
+		kept := batch[:0]
+		for _, n := range batch {
+			if !throughSymlink(root, n, realDir) {
+				kept = append(kept, n)
+			}
+		}
+		batch = kept
 		fis, err := lstatAll(ctx, root, batch)
 		if err != nil {
 			return nil, err
@@ -228,6 +238,34 @@ func throughSymlink(root, rel string, known map[string]bool) bool {
 		}
 	}
 	return false
+}
+
+// statDirs fills known with the verdict for every parent directory of
+// rels not seen yet, with the lstats in parallel (a repository has
+// thousands of directories; one by one they cost tens of milliseconds).
+func statDirs(ctx context.Context, root string, rels []string, known map[string]bool) error {
+	var dirs []string
+	for _, rel := range rels {
+		for i := len(rel) - 1; i >= 0; i-- {
+			if rel[i] != '/' {
+				continue
+			}
+			d := rel[:i]
+			if _, ok := known[d]; ok {
+				break // and so are its parents
+			}
+			known[d] = false // placeholder, set below
+			dirs = append(dirs, d)
+		}
+	}
+	fis, err := lstatAll(ctx, root, dirs)
+	if err != nil {
+		return err
+	}
+	for i, d := range dirs {
+		known[d] = fis[i] != nil && fis[i].IsDir()
+	}
+	return nil
 }
 
 // lstatAll stats rel paths in parallel; missing files yield nil.
@@ -401,7 +439,7 @@ func (s *scanner) remember(root string, entries []proto.ManifestEntry) {
 	m := make(map[string]blobRef, len(entries))
 	for _, e := range entries {
 		if e.Kind == proto.EntryFile && e.Hash != "" {
-			m[e.Hash] = blobRef{path: filepath.Join(root, filepath.FromSlash(e.Path)), size: e.Size, mtime: e.MTime}
+			m[e.Hash] = blobRef{root: root, rel: e.Path, size: e.Size, mtime: e.MTime}
 		}
 	}
 	s.mu.Lock()
@@ -427,7 +465,8 @@ func (s *scanner) Open(hash string) (ReadSeekCloser, int64, error) {
 	}
 	var last error
 	for _, r := range refs {
-		f, err := os.Open(r.path)
+		p := filepath.Join(r.root, filepath.FromSlash(r.rel))
+		f, err := os.Open(p)
 		if err != nil {
 			last = err
 			continue
@@ -435,7 +474,7 @@ func (s *scanner) Open(hash string) (ReadSeekCloser, int64, error) {
 		fi, err := f.Stat()
 		if err != nil || fi.Size() != r.size || fi.ModTime().UnixNano() != r.mtime {
 			f.Close()
-			last = fmt.Errorf("%s: %w", r.path, ErrBlobChanged)
+			last = fmt.Errorf("%s: %w", p, ErrBlobChanged)
 			continue
 		}
 		return f, r.size, nil
