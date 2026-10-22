@@ -29,15 +29,6 @@ import (
 	"github.com/hafencity-dev/kran/internal/workspace"
 )
 
-// TestMain makes the test binary act as `kran internal supervise`, which
-// execenv launches for every remote job.
-func TestMain(m *testing.M) {
-	if len(os.Args) >= 3 && os.Args[1] == "internal" && os.Args[2] == "supervise" {
-		os.Exit(execenv.Supervise(os.Args[3:]))
-	}
-	os.Exit(m.Run())
-}
-
 type staticPeers []daemon.PeerConfig
 
 func (p staticPeers) Stamp() string                      { return "1" }

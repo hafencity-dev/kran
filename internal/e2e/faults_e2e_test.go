@@ -1,0 +1,428 @@
+//go:build e2e
+
+package e2e
+
+import (
+	"crypto/rand"
+	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/hafencity-dev/kran/internal/proto"
+)
+
+// slowSetupRepo is a repo whose project setup runs for a while on the
+// target, so a job sits in phase `setup` (before the user's command).
+func slowSetupRepo(t *testing.T, c *cluster, secs string) string {
+	return makeRepo(t, filepath.Join(c.base, "repo"), map[string]string{
+		".kran.toml": "[setup]\nrun = \"sleep " + secs + "\"\nkey = [\"setup.key\"]\n",
+		"setup.key":  "v1\n",
+	})
+}
+
+// TestE2EFallbackWhenTargetDiesBeforeStart: the target daemon dies while
+// the job is still in setup → the job runs locally instead, exactly once.
+func TestE2EFallbackWhenTargetDiesBeforeStart(t *testing.T) {
+	c := newCluster(t, []string{"a", "b"}, nil)
+	a, b := c.node("a"), c.node("b")
+	repo := slowSetupRepo(t, c, "4")
+	marks := filepath.Join(c.base, "marks")
+	p := a.startKran(runOpts{dir: repo, env: []string{"MARKS=" + marks}}, "run", "--json-events", "-n", "b", "--",
+		"sh", "-c", `echo "${KRAN_NODE:-here}" >> "$MARKS"; echo "ran on ${KRAN_NODE:-here}"`)
+	if ev := waitPhase(p, "setup", 60*time.Second); ev == nil {
+		t.Fatalf("job never reached setup on b:\n%s", p.wait())
+	}
+	b.crash()
+	r := p.wait()
+	// Pinned to b, so the daemon hands the job back to the CLI, which runs
+	// it itself (no daemon envelope, no KRAN_NODE).
+	if r.code != 0 || string(r.stdout) != "ran on here\n" {
+		t.Fatalf("fallback run: %s", r)
+	}
+	if event(r.events(), "fallback") == nil && !strings.Contains(string(r.stderr), "failed before the job started") {
+		t.Errorf("no fallback notice on stderr: %q", r.stderr)
+	}
+	// b comes back; the abandoned job must not run its command there.
+	b.start()
+	c.waitMesh(60 * time.Second)
+	time.Sleep(execLease + 8*time.Second)
+	data, _ := os.ReadFile(marks)
+	if string(data) != "here\n" {
+		t.Errorf("command ran on %q, want exactly once, locally", strings.Fields(string(data)))
+	}
+	a.waitIdle(30 * time.Second)
+	b.waitIdle(30 * time.Second)
+}
+
+// execLease is the supervisor's lease (SPEC §6.2).
+const execLease = 15 * time.Second
+
+func waitPhase(p *cliProc, state string, d time.Duration) map[string]any {
+	var ev map[string]any
+	poll(d, func() bool {
+		for _, e := range parseEvents(p.stderr.Bytes()) {
+			if e["kran"] == "phase" && e["state"] == state {
+				ev = e
+				return true
+			}
+		}
+		return p.exited()
+	})
+	return ev
+}
+
+// TestE2EDrainAndNoFallback: a drained node takes nothing new (jobs
+// pinned to it wait with a reason); --remote/--no-fallback never run
+// locally and fail with 125 when the target dies before the command.
+func TestE2EDrainAndNoFallback(t *testing.T) {
+	c := newCluster(t, []string{"a", "b"}, nil)
+	a, b := c.node("a"), c.node("b")
+	repo := makeRepo(t, filepath.Join(c.base, "repo"), map[string]string{"f": "x"})
+	marks := filepath.Join(c.base, "marks")
+	cmd := []string{"sh", "-c", `echo "${KRAN_NODE:-here}" >> "$MARKS"`}
+	env := []string{"MARKS=" + marks}
+
+	// A running job on b survives the drain.
+	long := a.startKran(runOpts{dir: repo}, "run", "-n", "b", "--", "sh", "-c", "echo started; sleep 4; echo finished")
+	if !long.waitStdout("started", 60*time.Second) {
+		t.Fatal(long.wait())
+	}
+	if r := a.kran(runOpts{}, "drain", "b"); r.code != 0 || !strings.Contains(string(r.stdout), "draining") {
+		t.Fatalf("kran drain b: %s", r)
+	}
+	c.waitNodeStatus("a", "b", 10*time.Second, proto.NodeDraining)
+	// Nothing new starts there: --remote waits with the reason.
+	p := a.startKran(runOpts{dir: repo, env: env}, append([]string{"run", "--remote", "--"}, cmd...)...)
+	poll(10*time.Second, func() bool { return strings.Contains(p.stderr.String(), "draining") })
+	if !strings.Contains(p.stderr.String(), "kran: ") || !strings.Contains(p.stderr.String(), "draining") || p.exited() {
+		t.Errorf("--remote with b draining should wait and say why: %q", p.stderr.String())
+	}
+	if r := long.wait(); r.code != 0 || !strings.Contains(string(r.stdout), "finished") {
+		t.Errorf("running job did not survive the drain: %s", r)
+	}
+	if r := a.kran(runOpts{}, "resume", "b"); r.code != 0 {
+		t.Fatalf("kran resume b: %s", r)
+	}
+	if r := p.wait(); r.code != 0 {
+		t.Errorf("--remote after resume: %s", r)
+	}
+
+	// Target dies before the command starts: 125, nothing runs locally.
+	repo2 := makeRepo(t, filepath.Join(c.base, "repo2"), map[string]string{
+		".kran.toml": "[setup]\nrun = \"sleep 4\"\nkey = [\"k\"]\n", "k": "1",
+	})
+	p = a.startKran(runOpts{dir: repo2, env: env}, append([]string{"run", "--json-events", "--remote", "-n", "b", "--"}, cmd...)...)
+	if waitPhase(p, "setup", 60*time.Second) == nil {
+		t.Fatalf("no setup phase: %s", p.wait())
+	}
+	b.crash()
+	r := p.wait()
+	if r.code != 125 {
+		t.Errorf("--remote, target died in setup: %s", r)
+	}
+
+	// No daemon at all.
+	a.stop()
+	r = a.kran(runOpts{dir: repo, env: env}, append([]string{"run", "--no-fallback", "--"}, cmd...)...)
+	if r.code != 125 || !strings.Contains(string(r.stderr), "kran: ") {
+		t.Errorf("--no-fallback without daemon: %s", r)
+	}
+	r = a.kran(runOpts{dir: repo, env: env}, append([]string{"run", "--"}, cmd...)...)
+	if r.code != 0 || !strings.Contains(string(r.stderr), "kran: daemon not running") {
+		t.Errorf("no daemon, plain run must run locally: %s", r)
+	}
+	b.start()
+	a.start()
+	c.waitMesh(60 * time.Second)
+	time.Sleep(execLease + 5*time.Second)
+	data, _ := os.ReadFile(marks)
+	// --remote after resume on b, then the no-daemon run here.
+	if got := strings.Fields(string(data)); strings.Join(got, ",") != "b,here" {
+		t.Errorf("runs: %v, want [b here]", got)
+	}
+	a.waitIdle(30 * time.Second)
+	b.waitIdle(30 * time.Second)
+}
+
+// TestE2EQueueReasonAndCancel: a node at its job limit queues with a
+// reason; queued, syncing and running jobs can be canceled.
+func TestE2EQueueReasonAndCancel(t *testing.T) {
+	c := newCluster(t, []string{"a", "b"}, map[string]nodeOpts{"a": {MaxJobs: 1}, "b": {MaxJobs: 1}})
+	a, b := c.node("a"), c.node("b")
+	repo := makeRepo(t, filepath.Join(c.base, "repo"), map[string]string{"f": "x"})
+
+	first := a.startKran(runOpts{dir: repo}, "run", "--json-events", "--local", "--", "sh", "-c", "echo started; sleep 8")
+	firstID := first.jobID(30 * time.Second)
+	if !first.waitStdout("started", 30*time.Second) {
+		t.Fatalf("first job: %s", first.wait())
+	}
+	second := a.startKran(runOpts{dir: repo}, "run", "--local", "--", "echo", "second ran")
+	var queued proto.Job
+	poll(20*time.Second, func() bool {
+		for _, j := range a.statusJSON().Jobs {
+			if j.State == proto.JobQueued && j.Reason != "" {
+				queued = j
+				return true
+			}
+		}
+		return false
+	})
+	if queued.Spec.ID == "" {
+		t.Fatalf("second job never showed as queued with a reason")
+	}
+	if !strings.Contains(queued.Reason, "limit") {
+		t.Errorf("queue reason %q does not say why", queued.Reason)
+	}
+	// The CLI tells the user after 2 s.
+	poll(10*time.Second, func() bool { return strings.Contains(second.stderr.String(), "kran: ") })
+	if !strings.Contains(second.stderr.String(), "kran: waiting") && !strings.Contains(second.stderr.String(), "limit") {
+		t.Errorf("queued CLI stderr: %q", second.stderr.String())
+	}
+	// Cancel while queued.
+	if r := a.kran(runOpts{}, "cancel", queued.Spec.ID); r.code != 0 {
+		t.Fatalf("kran cancel: %s", r)
+	}
+	r := second.wait()
+	if r.code != 143 || strings.Contains(string(r.stdout), "second ran") {
+		t.Errorf("canceled queued job: %s", r)
+	}
+	if j, _ := a.job(queued.Spec.ID); j.State != proto.JobCanceled {
+		t.Errorf("canceled queued job record: %s", j.State)
+	}
+	// Cancel while running (local job).
+	if r := a.kran(runOpts{}, "cancel", firstID); r.code != 0 {
+		t.Fatalf("kran cancel running: %s", r)
+	}
+	r = first.wait()
+	if r.code != 143 {
+		t.Errorf("canceled running local job: %s", r)
+	}
+	if j, _ := a.job(firstID); j.State != proto.JobCanceled {
+		t.Errorf("canceled local job record: %s", j.State)
+	}
+
+	// Cancel while running (remote job): the process tree on b dies.
+	p := a.startKran(runOpts{dir: repo}, "run", "--json-events", "-n", "b", "--", "sh", "-c", "echo started; sleep 60 & wait")
+	id := p.jobID(30 * time.Second)
+	if !p.waitStdout("started", 60*time.Second) {
+		t.Fatalf("remote job: %s", p.wait())
+	}
+	if procs := processesWithJobID(id); len(procs) == 0 {
+		t.Errorf("no processes with KRAN_JOB_ID=%s while it runs", id)
+	}
+	if r := a.kran(runOpts{}, "cancel", id[:9]); r.code != 0 {
+		t.Fatalf("kran cancel <prefix>: %s", r)
+	}
+	r = p.wait()
+	if r.code != 143 {
+		t.Errorf("canceled remote job: %s", r)
+	}
+	if !poll(15*time.Second, func() bool { return len(processesWithJobID(id)) == 0 }) {
+		t.Errorf("processes of canceled job survive: %v", processesWithJobID(id))
+	}
+	if j, _ := a.job(id); j.State != proto.JobCanceled {
+		t.Errorf("canceled remote job record: %s", j.State)
+	}
+
+	// Cancel while syncing: the link to b stalls in the middle of the
+	// upload of a large file.
+	big := make([]byte, 48<<20)
+	rand.Read(big)
+	must(t, os.WriteFile(filepath.Join(repo, "big.bin"), big, 0o644))
+	p = a.startKran(runOpts{dir: repo}, "run", "--json-events", "-n", "b", "--", "echo", "must not run")
+	id = p.jobID(30 * time.Second)
+	if id == "" {
+		t.Fatalf("no decision: %s", p.wait())
+	}
+	a.proxy.StallAfter(4 << 20)
+	b.proxy.StallAfter(4 << 20)
+	a.waitJob(id, 30*time.Second, func(j proto.Job) bool { return j.State == proto.JobSyncing })
+	time.Sleep(time.Second)
+	if j, _ := a.job(id); j.State != proto.JobSyncing {
+		t.Fatalf("job left syncing despite the stall: %s", j.State)
+	}
+	if r := a.kran(runOpts{}, "cancel", id); r.code != 0 {
+		t.Fatalf("kran cancel syncing: %s", r)
+	}
+	r = p.wait()
+	if r.code != 143 || strings.Contains(string(r.stdout), "must not run") {
+		t.Errorf("canceled syncing job: %s", r)
+	}
+	b.proxy.Stall(false)
+	a.proxy.Stall(false)
+	c.waitMesh(60 * time.Second)
+	if j, _ := a.job(id); j.State != proto.JobCanceled {
+		t.Errorf("canceled syncing job record: %s %q", j.State, j.Reason)
+	}
+	a.waitIdle(60 * time.Second)
+	b.waitIdle(60 * time.Second)
+}
+
+// TestE2ECtrlC: SIGINT to the CLI reaches the job; a second one within
+// 2 s kills it.
+func TestE2ECtrlC(t *testing.T) {
+	c := newCluster(t, []string{"a", "b"}, map[string]nodeOpts{"a": {MaxJobs: 1}})
+	a, b := c.node("a"), c.node("b")
+	repo := makeRepo(t, filepath.Join(c.base, "repo"), map[string]string{"f": "x"})
+	trap := `trap 'echo got INT' INT; echo ready; while :; do sleep 0.2; done`
+
+	for _, where := range [][]string{{"-n", "b"}, {"--local"}} {
+		// One Ctrl-C: the job's own handling decides (here: exit 130).
+		p := a.startKran(runOpts{dir: repo}, append(append([]string{"run"}, where...), "--", "sh", "-c", "echo ready; sleep 30")...)
+		if !p.waitStdout("ready", 60*time.Second) {
+			t.Fatalf("%v: %s", where, p.wait())
+		}
+		p.signal(syscall.SIGINT)
+		if r := p.wait(); r.code != 130 {
+			t.Errorf("%v single Ctrl-C: %s", where, r)
+		}
+		// A job that traps INT: the second Ctrl-C within 2 s kills it.
+		p = a.startKran(runOpts{dir: repo}, append(append([]string{"run"}, where...), "--", "sh", "-c", trap)...)
+		if !p.waitStdout("ready", 60*time.Second) {
+			t.Fatalf("%v: %s", where, p.wait())
+		}
+		p.signal(syscall.SIGINT)
+		if !p.waitStdout("got INT", 10*time.Second) {
+			t.Errorf("%v: first INT not delivered: %q", where, p.stdout.String())
+		}
+		time.Sleep(300 * time.Millisecond)
+		p.signal(syscall.SIGINT)
+		if r := p.wait(); r.code != 137 {
+			t.Errorf("%v double Ctrl-C: want 137, %s", where, r)
+		}
+	}
+	// Ctrl-C while queued: 130 at once, the job never runs.
+	hold := a.startKran(runOpts{dir: repo}, "run", "--local", "--", "sh", "-c", "echo ready; sleep 20")
+	if !hold.waitStdout("ready", 30*time.Second) {
+		t.Fatal(hold.wait())
+	}
+	q := a.startKran(runOpts{dir: repo}, "run", "--json-events", "--local", "--", "echo", "must not run")
+	poll(10*time.Second, func() bool { return event(parseEvents(q.stderr.Bytes()), "notice") != nil })
+	q.signal(syscall.SIGINT)
+	if r := q.wait(); r.code != 130 || strings.Contains(string(r.stdout), "must not run") {
+		t.Errorf("Ctrl-C while queued: %s", r)
+	}
+	hold.signal(syscall.SIGINT)
+	hold.wait()
+	a.waitIdle(30 * time.Second)
+	b.waitIdle(30 * time.Second)
+}
+
+// TestE2EReattachAfterOriginRestart: the origin daemon dies mid-run; the
+// CLI reconnects and the output continues complete.
+func TestE2EReattachAfterOriginRestart(t *testing.T) {
+	c := newCluster(t, []string{"a", "b"}, nil)
+	a, b := c.node("a"), c.node("b")
+	repo := makeRepo(t, filepath.Join(c.base, "repo"), map[string]string{"f": "x"})
+	for _, kill := range []struct {
+		name string
+		fn   func()
+	}{{"graceful", a.stop}, {"crash", a.crash}} {
+		script, want := counter(60, "0.1")
+		p := a.startKran(runOpts{dir: repo}, "run", "-n", "b", "--", "sh", "-c", script+"; exit 3")
+		if !p.waitStdout("tick 10\n", 60*time.Second) {
+			t.Fatalf("%s: %s", kill.name, p.wait())
+		}
+		kill.fn()
+		time.Sleep(time.Second)
+		a.start()
+		r := p.wait()
+		if r.code != 3 || string(r.stdout) != want {
+			t.Errorf("%s restart of the origin: %s", kill.name, r)
+		}
+	}
+	a.waitIdle(30 * time.Second)
+	b.waitIdle(30 * time.Second)
+}
+
+// TestE2ETargetRestartMidRun: the target daemon dies mid-run; the
+// supervisor keeps the job alive and the origin reattaches.
+func TestE2ETargetRestartMidRun(t *testing.T) {
+	c := newCluster(t, []string{"a", "b"}, nil)
+	a, b := c.node("a"), c.node("b")
+	repo := makeRepo(t, filepath.Join(c.base, "repo"), map[string]string{"f": "x"})
+	for _, kill := range []struct {
+		name string
+		fn   func()
+	}{{"graceful", b.stop}, {"crash", b.crash}} {
+		script, want := counter(60, "0.1")
+		p := a.startKran(runOpts{dir: repo}, "run", "-n", "b", "--", "sh", "-c", script)
+		if !p.waitStdout("tick 10\n", 60*time.Second) {
+			t.Fatalf("%s: %s", kill.name, p.wait())
+		}
+		kill.fn()
+		time.Sleep(time.Second)
+		b.start()
+		r := p.wait()
+		if r.code != 0 || string(r.stdout) != want {
+			t.Errorf("%s restart of the target: %s", kill.name, r)
+		}
+	}
+	a.waitIdle(30 * time.Second)
+	b.waitIdle(30 * time.Second)
+}
+
+// TestE2ELeaseExpiryAfterNetworkCut: the link dies for good mid-run; the
+// target kills the job after the lease and the CLI exits 125.
+func TestE2ELeaseExpiryAfterNetworkCut(t *testing.T) {
+	c := newCluster(t, []string{"a", "b"}, nil)
+	a, b := c.node("a"), c.node("b")
+	repo := makeRepo(t, filepath.Join(c.base, "repo"), map[string]string{"f": "x"})
+	p := a.startKran(runOpts{dir: repo}, "run", "--json-events", "-n", "b", "--", "sh", "-c", "echo started; sleep 300 & wait")
+	id := p.jobID(30 * time.Second)
+	if !p.waitStdout("started", 60*time.Second) {
+		t.Fatalf("%s", p.wait())
+	}
+	cut := time.Now()
+	a.proxy.SetDown(true)
+	b.proxy.SetDown(true)
+	r := p.wait()
+	if r.code != 125 {
+		t.Errorf("CLI after a permanent cut: %s", r)
+	}
+	if d := time.Since(cut); d > 45*time.Second {
+		t.Errorf("CLI took %v to give up", d)
+	}
+	if !poll(execLease+15*time.Second-time.Since(cut), func() bool { return len(processesWithJobID(id)) == 0 }) {
+		t.Errorf("job processes survive the lease: %v", processesWithJobID(id))
+	}
+	a.proxy.SetDown(false)
+	b.proxy.SetDown(false)
+	c.waitMesh(90 * time.Second)
+	j := a.waitJob(id, 10*time.Second, func(j proto.Job) bool { return j.State.Terminal() })
+	if j.State != proto.JobInfraErr && j.State != proto.JobLost {
+		t.Errorf("job record after cut: %s %q", j.State, j.Reason)
+	}
+	a.waitIdle(30 * time.Second)
+	b.waitIdle(30 * time.Second)
+	// The mesh still works.
+	if r := a.kran(runOpts{dir: repo}, "run", "-n", "b", "--", "echo", "ok"); r.code != 0 || string(r.stdout) != "ok\n" {
+		t.Errorf("after the cut healed: %s", r)
+	}
+}
+
+// TestE2ELongQueueStaysQueued: a job that waits longer than the CLI's
+// 10 s silence window keeps waiting for its turn (daemon heartbeats keep
+// the session alive) instead of being run locally behind the daemon's back.
+func TestE2ELongQueueStaysQueued(t *testing.T) {
+	c := newCluster(t, []string{"a"}, map[string]nodeOpts{"a": {MaxJobs: 1}})
+	a := c.node("a")
+	repo := makeRepo(t, filepath.Join(c.base, "repo"), map[string]string{"f": "x"})
+	hold := a.startKran(runOpts{dir: repo}, "run", "--local", "--", "sh", "-c", "echo ready; sleep 16")
+	if !hold.waitStdout("ready", 30*time.Second) {
+		t.Fatal(hold.wait())
+	}
+	start := time.Now()
+	r := a.kran(runOpts{dir: repo}, "run", "--local", "--", "sh", "-c", `echo "job=$KRAN_JOB_ID"`)
+	if r.code != 0 || strings.Contains(string(r.stderr), "running locally") || string(r.stdout) == "job=\n" {
+		t.Errorf("queued job did not wait for its turn: %s", r)
+	}
+	if d := time.Since(start); d < 12*time.Second {
+		t.Errorf("queued job ran after %v, before the first one ended: %s", d, r)
+	}
+	hold.wait()
+	a.waitIdle(10 * time.Second)
+}
