@@ -218,11 +218,10 @@ func (r *runner) Run(ctx context.Context) int {
 func (r *runner) noSession(ctx context.Context, why string, cause error) int {
 	if r.spec.NoFallback {
 		msg := strings.SplitN(why, " — ", 2)[0]
-		hint := "start it with: kran service start"
-		if cause != nil {
-			msg += ": " + cause.Error()
+		if cause != nil && !errors.Is(cause, client.ErrNoDaemon) {
+			msg += " (" + cause.Error() + ")"
 		}
-		r.sayAlways("%s; --remote/--no-fallback forbids running locally (%s)", msg, hint)
+		r.sayAlways("%s, and --remote/--no-fallback forbids running locally; check the daemon with `kran doctor` or start it with `kran service start`", msg)
 		r.event("exit", map[string]any{"code": proto.ExitInfra, "state": proto.JobInfraErr})
 		return proto.ExitInfra
 	}

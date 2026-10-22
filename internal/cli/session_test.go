@@ -135,7 +135,9 @@ func (c *fakeClient) next() (*fakeSession, bool) {
 
 func (c *fakeClient) Version(context.Context) (proto.VersionInfo, error) { return c.version, c.verErr }
 func (c *fakeClient) State(context.Context) (*proto.State, error)        { return nil, errors.New("n/a") }
-func (c *fakeClient) Events(context.Context) (<-chan proto.Event, error) { return nil, errors.New("n/a") }
+func (c *fakeClient) Events(context.Context) (<-chan proto.Event, error) {
+	return nil, errors.New("n/a")
+}
 func (c *fakeClient) Jobs(context.Context, int) ([]proto.Job, error)     { return nil, nil }
 func (c *fakeClient) Job(context.Context, string) (*proto.Job, error)    { return nil, nil }
 func (c *fakeClient) Log(context.Context, string, bool, io.Writer) error { return nil }
