@@ -44,8 +44,35 @@ func (s *sched) dispatch(now time.Time) {
 	queue := s.ordered(now)
 	holds := map[string]hold{}
 	order := s.order[:0]
+	// Within a pass free resources only shrink, so a job shape that fits
+	// nowhere keeps fitting nowhere until a placement or hold changes the
+	// numbers its reason quotes. Deep queues of similar jobs (agent
+	// bursts) then cost one evaluation per shape, not per job.
+	memo := map[string]string{}
 	for _, j := range queue {
-		if s.tryPlace(j, views, names, now, holds) {
+		key := ""
+		if j.rejects == 0 && now.Sub(j.queuedAt) < s.opts.StarvationAfter {
+			if j.shape == "" {
+				j.shape = j.shapeKey()
+			}
+			key = j.shape
+			if r, ok := memo[key]; ok {
+				j.reason = r
+				order = append(order, j.id)
+				j.t.push(j.reason)
+				continue
+			}
+		}
+		res := s.tryPlace(j, views, names, now, holds)
+		switch res {
+		case placedJob, heldNode:
+			clear(memo)
+		case noFitAnywhere:
+			if key != "" {
+				memo[key] = j.reason
+			}
+		}
+		if res == placedJob {
 			continue
 		}
 		order = append(order, j.id)
@@ -220,9 +247,36 @@ func better(a, b *cand) bool {
 	return a.v.name < b.v.name
 }
 
+type outcome int
+
+const (
+	placedJob     outcome = iota
+	heldNode              // not placed; a starving job now holds a node
+	noFitAnywhere         // not placed; the verdict depends only on the job's shape
+	deferred              // not placed; chose to wait for a better node
+)
+
+// shapeKey identifies jobs that admission and reasons treat identically.
+func (j *sjob) shapeKey() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%g|%d|%t|%s|%s|%t|%s|%t|%s|%s", j.est.CPUs, j.est.Mem, j.est.Duration < shortJobSeconds,
+		j.req.Prefer, j.req.Node, j.req.GPU, j.req.OS, j.req.OriginOnly, j.req.OriginOnlyReason, j.prio)
+	if len(j.req.Toolchains) > 0 {
+		keys := make([]string, 0, len(j.req.Toolchains))
+		for k := range j.req.Toolchains {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			b.WriteString("|" + k + "@" + j.req.Toolchains[k])
+		}
+	}
+	return b.String()
+}
+
 // tryPlace evaluates one queued job against current views; it places the
-// job (updating views) or sets j.reason. Returns true when placed.
-func (s *sched) tryPlace(j *sjob, views map[string]*nodeView, names []string, now time.Time, holds map[string]hold) bool {
+// job (updating views) or sets j.reason.
+func (s *sched) tryPlace(j *sjob, views map[string]*nodeView, names []string, now time.Time, holds map[string]hold) outcome {
 	var cands []*cand
 	var whys []*ineligible
 	for _, name := range names {
@@ -238,7 +292,7 @@ func (s *sched) tryPlace(j *sjob, views map[string]*nodeView, names []string, no
 	}
 	if len(cands) == 0 {
 		j.reason = s.ineligibleReason(j, whys)
-		return false
+		return noFitAnywhere
 	}
 
 	var fits []*cand
@@ -257,12 +311,14 @@ func (s *sched) tryPlace(j *sjob, views map[string]*nodeView, names []string, no
 	if selfCand != nil && j.est.Duration < shortJobSeconds && j.req.Node == "" && !selfCand.oversize {
 		if selfCand.fits {
 			s.place(j, selfCand, now, fmt.Sprintf("here: est. %s, too short to send elsewhere", fmtDur(j.est.Duration)))
-			return true
+			return placedJob
 		}
 		j.reason = "waiting: est. " + fmtDur(j.est.Duration) + ", too short to send elsewhere; " +
 			strings.TrimPrefix(s.resourceReason(j, []*cand{selfCand}), "waiting: ")
-		s.maybeHold(j, []*cand{selfCand}, starving, holds)
-		return false
+		if s.maybeHold(j, []*cand{selfCand}, starving, holds) {
+			return heldNode
+		}
+		return noFitAnywhere
 	}
 
 	if len(fits) == 0 {
@@ -294,16 +350,16 @@ func (s *sched) tryPlace(j *sjob, views map[string]*nodeView, names []string, no
 		if bw != nil && bw.wait+bw.total() < deferGain*best.total()-2 {
 			j.reason = fmt.Sprintf("waiting: %s should free up in ~%s; est. %s there vs %s on %s",
 				bw.label(), fmtDur(bw.wait), fmtDur(bw.total()), fmtDur(best.total()), best.label())
-			return false
+			return deferred
 		}
 	}
 
 	s.place(j, best, now, s.placeReason(j, best, selfCand, fits, whys))
-	return true
+	return placedJob
 }
 
 // noFit handles a job that fits nowhere right now.
-func (s *sched) noFit(j *sjob, cands []*cand, whys []*ineligible, starving bool, now time.Time, holds map[string]hold) bool {
+func (s *sched) noFit(j *sjob, cands []*cand, whys []*ineligible, starving bool, now time.Time, holds map[string]hold) outcome {
 	allOversize := true
 	for _, c := range cands {
 		if !c.oversize {
@@ -324,19 +380,21 @@ func (s *sched) noFit(j *sjob, cands []*cand, whys []*ineligible, starving bool,
 			big.mem = capMem
 			s.place(j, big, now, fmt.Sprintf("%s: needs %s, more than any node has; runs alone on the largest (%s)",
 				big.label(), fmtBytes(j.est.Mem), fmtBytes(capMem)))
-			return true
+			return placedJob
 		}
 		j.reason = fmt.Sprintf("waiting: needs %s, more than any node has; will run alone on %s (%s) once its %d running jobs finish",
 			fmtBytes(j.est.Mem), big.label(), fmtBytes(capMem), big.v.running)
-		if starving {
-			s.holdAll(j, big, holds)
+		if starving && s.holdAll(j, big, holds) {
 			j.reason += "; holding it"
+			return heldNode
 		}
-		return false
+		return noFitAnywhere
 	}
 	j.reason = s.resourceReason(j, cands) + otherReasons(whys)
-	s.maybeHold(j, cands, starving, holds)
-	return false
+	if s.maybeHold(j, cands, starving, holds) {
+		return heldNode
+	}
+	return noFitAnywhere
 }
 
 // otherReasons lists nodes that are out for a temporary reason (status,
@@ -361,9 +419,9 @@ func otherReasons(whys []*ineligible) string {
 // maybeHold makes a starving job's best node keep freed resources for it:
 // later jobs in the pass see them as taken, so the starving job fits as
 // soon as enough running jobs end (no starvation by a stream of small jobs).
-func (s *sched) maybeHold(j *sjob, cands []*cand, starving bool, holds map[string]hold) {
+func (s *sched) maybeHold(j *sjob, cands []*cand, starving bool, holds map[string]hold) bool {
 	if !starving {
-		return
+		return false
 	}
 	var target *cand
 	for _, c := range cands {
@@ -379,7 +437,7 @@ func (s *sched) maybeHold(j *sjob, cands []*cand, starving bool, holds map[strin
 		}
 	}
 	if target == nil {
-		return
+		return false
 	}
 	res := proto.Resources{CPUs: target.cpu, Mem: target.mem}
 	for _, p := range target.v.pools(target.rt) {
@@ -388,11 +446,12 @@ func (s *sched) maybeHold(j *sjob, cands []*cand, starving bool, holds map[strin
 	}
 	holds[target.v.name] = hold{job: j.id, res: res, vm: target.rt.vm}
 	j.reason += "; next in line on " + target.v.name
+	return true
 }
 
-func (s *sched) holdAll(j *sjob, c *cand, holds map[string]hold) {
+func (s *sched) holdAll(j *sjob, c *cand, holds map[string]hold) bool {
 	if _, taken := holds[c.v.name]; taken {
-		return
+		return false
 	}
 	res := proto.Resources{CPUs: c.v.capCPU(c.rt), Mem: c.v.capMem(c.rt)}
 	for _, p := range c.v.pools(c.rt) {
@@ -400,6 +459,7 @@ func (s *sched) holdAll(j *sjob, c *cand, holds map[string]hold) {
 		p.holdMem += p.capMem
 	}
 	holds[c.v.name] = hold{job: j.id, res: res, vm: c.rt.vm}
+	return true
 }
 
 func (s *sched) place(j *sjob, c *cand, now time.Time, reason string) {

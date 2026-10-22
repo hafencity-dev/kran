@@ -63,6 +63,7 @@ type sjob struct {
 	rejects  int
 	requeued bool
 	reason   string
+	shape    string // cached shapeKey; reset when priority changes
 }
 
 type allocation struct {
@@ -494,6 +495,7 @@ func (s *sched) SetPriority(jobID string, p proto.Priority) {
 		return
 	}
 	j.prio = p
+	j.shape = ""
 	s.dispatch(s.opts.Now())
 }
 
