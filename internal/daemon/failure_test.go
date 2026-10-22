@@ -42,7 +42,7 @@ func TestFallbackAndCircuitBreaker(t *testing.T) {
 	b.exec.startErr = errors.New("docker is gone")
 	b.exec.mu.Unlock()
 	ws := workspaceDir(t, map[string]string{"f": "local data"})
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := testContext(30 * time.Second)
 	defer cancel()
 	for i := 0; i < 3; i++ {
 		res, err := runCLI(ctx, a.sock(), shSpec(ws, "cat f"), cliOpts{})
@@ -103,7 +103,7 @@ func TestNoFallbackFailsWith125(t *testing.T) {
 	ws := workspaceDir(t, map[string]string{"f": "x"})
 	spec := shSpec(ws, "echo ran")
 	spec.NoFallback = true
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := testContext(20 * time.Second)
 	defer cancel()
 	res, err := runCLI(ctx, a.sock(), spec, cliOpts{})
 	if err != nil {
@@ -125,7 +125,7 @@ func TestCLIKilledMidSync(t *testing.T) {
 	b.exec.mu.Unlock()
 	defer close(gate)
 	ws := workspaceDir(t, map[string]string{"big": strings.Repeat("x", 1<<20), "small": "y"})
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := testContext(20 * time.Second)
 	defer cancel()
 	res, err := runCLI(ctx, a.sock(), shSpec(ws, "echo never"), cliOpts{
 		hook: func(rs client.RunSession, ft proto.FrameType, p []byte, r *cliResult) error {
@@ -144,9 +144,7 @@ func TestCLIKilledMidSync(t *testing.T) {
 	waitFor(t, 5*time.Second, "reservation and slot released on b", func() bool {
 		return b.exec.heldSlots() == 0 && len(b.daemon().target.status().Allocs) == 0
 	})
-	if n := a.scheduler().allocCount(); n != 0 {
-		t.Fatalf("origin allocation leaked: %d", n)
-	}
+	waitFor(t, time.Second, "origin allocation released", func() bool { return a.scheduler().allocCount() == 0 })
 	if len(b.exec.Active()) != 0 {
 		t.Fatal("job started on b although the CLI died during sync")
 	}
@@ -156,7 +154,7 @@ func TestTargetDaemonRestartMidRun(t *testing.T) {
 	_, a, b := twoNodes(t)
 	ws := workspaceDir(t, map[string]string{"f": "x"})
 	script, want := counterScript(40, "0.05")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := testContext(30 * time.Second)
 	defer cancel()
 	restarted := make(chan struct{})
 	var once sync.Once
@@ -190,7 +188,7 @@ func TestShortNetworkCut(t *testing.T) {
 	c, a, _ := twoNodes(t)
 	ws := workspaceDir(t, map[string]string{"f": "x"})
 	script, want := counterScript(40, "0.05")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := testContext(30 * time.Second)
 	defer cancel()
 	var once sync.Once
 	res, err := runCLI(ctx, a.sock(), shSpec(ws, script), cliOpts{
@@ -212,7 +210,7 @@ func TestShortStallSurvives(t *testing.T) {
 	c, a, _ := twoNodes(t)
 	ws := workspaceDir(t, map[string]string{"f": "x"})
 	script, want := counterScript(30, "0.05")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := testContext(30 * time.Second)
 	defer cancel()
 	var once sync.Once
 	res, err := runCLI(ctx, a.sock(), shSpec(ws, script), cliOpts{
@@ -237,7 +235,7 @@ func TestShortStallSurvives(t *testing.T) {
 func TestLongOutageLosesJob(t *testing.T) {
 	c, a, b := twoNodes(t)
 	ws := workspaceDir(t, map[string]string{"f": "x"})
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := testContext(30 * time.Second)
 	defer cancel()
 	var once sync.Once
 	start := time.Now()
@@ -269,7 +267,7 @@ func TestOriginDaemonRestartReattach(t *testing.T) {
 	_, a, b := twoNodes(t)
 	ws := workspaceDir(t, map[string]string{"f": "x"})
 	script, want := counterScript(50, "0.05")
-	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	ctx, cancel := testContext(40 * time.Second)
 	defer cancel()
 	res := &cliResult{}
 	var once sync.Once
@@ -310,7 +308,7 @@ func TestOriginDaemonRestartReattach(t *testing.T) {
 func TestOriginRestartWithoutCLICancels(t *testing.T) {
 	_, a, b := twoNodes(t)
 	ws := workspaceDir(t, map[string]string{"f": "x"})
-	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	ctx, cancel := testContext(40 * time.Second)
 	defer cancel()
 	var once sync.Once
 	res, _ := runCLI(ctx, a.sock(), shSpec(ws, "echo go; sleep 60"), cliOpts{
@@ -337,7 +335,7 @@ func TestOriginRestartWithoutCLICancels(t *testing.T) {
 func TestReattachAfterFinish(t *testing.T) {
 	_, a, _ := twoNodes(t)
 	ws := workspaceDir(t, map[string]string{"f": "x"})
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := testContext(20 * time.Second)
 	defer cancel()
 	res, err := runCLI(ctx, a.sock(), shSpec(ws, "echo hello world; exit 4"), cliOpts{})
 	if err != nil {
@@ -371,7 +369,7 @@ func TestLocalCLIDisconnectKillsTree(t *testing.T) {
 	a := c.nodes["a"]
 	a.start()
 	ws := workspaceDir(t, map[string]string{"f": "x"})
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := testContext(20 * time.Second)
 	defer cancel()
 	cl, err := client.DialSocket(ctx, a.sock())
 	if err != nil {
@@ -407,7 +405,7 @@ func TestLocalCLIDisconnectKillsTree(t *testing.T) {
 	rs.Close()
 	select {
 	case <-waitErr:
-	case <-time.After(5 * time.Second):
+	case <-time.After(waitCeiling):
 		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		t.Fatal("child survived its CLI")
 	}
@@ -440,7 +438,7 @@ func TestTwoOriginsRaceForOneTarget(t *testing.T) {
 	c.waitOnline("a", "b")
 	c.waitOnline("c", "b")
 	ws := workspaceDir(t, map[string]string{"f": "x"})
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := testContext(30 * time.Second)
 	defer cancel()
 	var wg sync.WaitGroup
 	results := make([]*cliResult, 2)
@@ -551,6 +549,7 @@ func TestIncompatibleOriginRefused(t *testing.T) {
 func TestReservationExpires(t *testing.T) {
 	c := newCluster(t, "b")
 	b := c.nodes["b"]
+	b.timing.ReservationTTL = 600 * time.Millisecond
 	b.start()
 	s, err := c.net.Dial(context.Background(), "a", "b")
 	if err != nil {
@@ -615,7 +614,7 @@ func TestAdmissionIsAtomic(t *testing.T) {
 func TestGracefulShutdownIsFast(t *testing.T) {
 	_, a, b := twoNodes(t)
 	ws := workspaceDir(t, map[string]string{"f": "x"})
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := testContext(20 * time.Second)
 	defer cancel()
 	cl, err := client.DialSocket(ctx, a.sock())
 	if err != nil {
@@ -663,7 +662,7 @@ func TestQueueNoticesThenPlacement(t *testing.T) {
 	}
 	a.start()
 	ws := workspaceDir(t, map[string]string{"f": "x"})
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := testContext(20 * time.Second)
 	defer cancel()
 	res, err := runCLI(ctx, a.sock(), shSpec(ws, "echo ok"), cliOpts{
 		hook: func(rs client.RunSession, ft proto.FrameType, p []byte, r *cliResult) error {

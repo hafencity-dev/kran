@@ -25,7 +25,7 @@ func TestCancelDuringStartLeavesNoOrphan(t *testing.T) {
 	b.exec.startGate = gate
 	b.exec.mu.Unlock()
 	ws := workspaceDir(t, map[string]string{"f": "x"})
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := testContext(20 * time.Second)
 	defer cancel()
 	sent := false
 	res, err := runCLI(ctx, a.sock(), shSpec(ws, "echo started; sleep 30"), cliOpts{
@@ -82,7 +82,7 @@ func TestEndedBeforeStartFallsBack(t *testing.T) {
 		Reason: "command not found on b: mytool"}
 	b.exec.mu.Unlock()
 	ws := workspaceDir(t, map[string]string{"f": "local data"})
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := testContext(20 * time.Second)
 	defer cancel()
 	res, err := runCLI(ctx, a.sock(), shSpec(ws, "cat f"), cliOpts{})
 	if err != nil {
@@ -199,7 +199,7 @@ func TestTargetJobRecordLastWriteWins(t *testing.T) {
 func TestTargetRestartReleasesSlotOfJobThatEndedMeanwhile(t *testing.T) {
 	_, a, b := twoNodes(t)
 	ws := workspaceDir(t, map[string]string{"f": "x"})
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := testContext(30 * time.Second)
 	defer cancel()
 	var once sync.Once
 	restarted := make(chan struct{})
@@ -238,7 +238,7 @@ func TestRestartedOriginDoesNotRerunPrestartJobWithoutCLI(t *testing.T) {
 	b.exec.acquireGate = gate
 	b.exec.mu.Unlock()
 	ws := workspaceDir(t, map[string]string{"f": "x"})
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := testContext(30 * time.Second)
 	defer cancel()
 	var once sync.Once
 	res, _ := runCLI(ctx, a.sock(), shSpec(ws, "echo ran"), cliOpts{
@@ -280,7 +280,7 @@ func TestRestartedOriginStopsJobStillInSetup(t *testing.T) {
 	b.exec.mu.Unlock()
 	ws := workspaceDir(t, map[string]string{"f": "x"})
 	marker := filepath.Join(shortDir(t), "ran")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := testContext(30 * time.Second)
 	defer cancel()
 	var once sync.Once
 	res, _ := runCLI(ctx, a.sock(), shSpec(ws, "touch "+marker), cliOpts{

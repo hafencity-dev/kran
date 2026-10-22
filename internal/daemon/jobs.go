@@ -425,13 +425,15 @@ func (e *jobEntry) finish(x proto.Exit) {
 	d.bus.publish(proto.EventJob, publicJob(final))
 	e.mu.Unlock()
 
-	e.sendFrame(proto.FrameExit, x)
-	e.spool.finish()
-	e.spool.close() // readers keep their own handles
+	// Free the allocation before the CLI learns the exit: `kran run a &&
+	// kran run b` must not see a's resources still taken.
 	if placed {
 		u := x.Usage
 		d.deps.Sched.Release(e.id, &u)
 	}
+	e.sendFrame(proto.FrameExit, x)
+	e.spool.finish()
+	e.spool.close() // readers keep their own handles
 	if final.State == proto.JobSucceeded || final.State == proto.JobFailed {
 		d.deps.Est.Observe(&final)
 	}

@@ -39,7 +39,7 @@ func TestSpoolKeepsFramesWhenTheDiskIsFull(t *testing.T) {
 	}
 	a.start()
 	ws := workspaceDir(t, map[string]string{"f": "x"})
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := testContext(5 * time.Second)
 	defer cancel()
 	res, err := runCLI(ctx, a.sock(), shSpec(ws, "echo hi; exit 4"), cliOpts{})
 	if err != nil {

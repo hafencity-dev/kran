@@ -219,6 +219,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.peers.reload()
 	}
 
+	// The scheduler knows this node's capacity before the first admit or
+	// submit arrives (otherwise it would see "0 B free" until selfLoop's
+	// first pass).
+	d.publishSelf()
+
 	var listeners []func()
 	if !d.deps.NoListen {
 		stop, err := d.listen()

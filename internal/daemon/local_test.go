@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"context"
 	"os/exec"
 	"syscall"
 	"testing"
@@ -18,7 +17,7 @@ func TestCancelBeforeLocalStartedKillsChild(t *testing.T) {
 	a := c.nodes["a"]
 	a.start()
 	ws := workspaceDir(t, map[string]string{"f": "x"})
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := testContext(20 * time.Second)
 	defer cancel()
 	cl, err := client.DialSocket(ctx, a.sock())
 	if err != nil {
@@ -57,7 +56,7 @@ func TestCancelBeforeLocalStartedKillsChild(t *testing.T) {
 	rs.SendJSON(proto.FrameStarted, proto.Started{JobID: dc.JobID, PID: cmd.Process.Pid, PGID: cmd.Process.Pid})
 	select {
 	case <-waitErr:
-	case <-time.After(3 * time.Second):
+	case <-time.After(waitCeiling):
 		t.Fatal("the canceled job's child kept running")
 	}
 }

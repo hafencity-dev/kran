@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,7 +45,7 @@ func TestRemoteRunOverSSH(t *testing.T) {
 	c.waitOnline("a", "b")
 
 	ws := workspaceDir(t, map[string]string{"src/main.txt": "over ssh\n"})
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := testContext(30 * time.Second)
 	defer cancel()
 	res, err := runCLI(ctx, a.sock(), shSpec(ws, "cat src/main.txt; exit 9"), cliOpts{})
 	if err != nil {

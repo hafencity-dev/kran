@@ -1,13 +1,14 @@
 package daemon
 
 import (
-	"context"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/hafencity-dev/kran/internal/client"
 	"github.com/hafencity-dev/kran/internal/proto"
+	"github.com/hafencity-dev/kran/internal/scheduler"
 )
 
 func TestLocalRun(t *testing.T) {
@@ -15,7 +16,7 @@ func TestLocalRun(t *testing.T) {
 	a := c.nodes["a"]
 	a.start()
 	ws := workspaceDir(t, map[string]string{"f.txt": "hi"})
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := testContext(20 * time.Second)
 	defer cancel()
 	res, err := runCLI(ctx, a.sock(), shSpec(ws, "cat f.txt; echo oops >&2; exit 3"), cliOpts{})
 	if err != nil {
@@ -56,7 +57,7 @@ func TestRemoteRun(t *testing.T) {
 	a.start()
 	c.waitOnline("a", "b")
 	ws := workspaceDir(t, map[string]string{"data/in.txt": "payload\n", "run.sh": "echo script"})
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := testContext(20 * time.Second)
 	defer cancel()
 	res, err := runCLI(ctx, a.sock(), shSpec(ws, "cat data/in.txt; sh run.sh; echo to-stderr >&2; exit 7"), cliOpts{})
 	if err != nil {
@@ -100,7 +101,7 @@ func TestRemoteStdinAndSignal(t *testing.T) {
 	a.start()
 	c.waitOnline("a", "b")
 	ws := workspaceDir(t, map[string]string{"x": "x"})
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := testContext(20 * time.Second)
 	defer cancel()
 
 	spec := shSpec(ws, "tr a-z A-Z")
@@ -143,7 +144,7 @@ func TestCtrlCWhileQueued(t *testing.T) {
 	a.place = preferRemote("b") // b never starts: the job waits
 	a.start()
 	ws := workspaceDir(t, map[string]string{"x": "x"})
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := testContext(20 * time.Second)
 	defer cancel()
 	res, err := runCLI(ctx, a.sock(), shSpec(ws, "true"), cliOpts{
 		hook: func(rs client.RunSession, ft proto.FrameType, p []byte, r *cliResult) error {
@@ -163,5 +164,49 @@ func TestCtrlCWhileQueued(t *testing.T) {
 	}
 	if n := len(a.scheduler().Snapshot().Queue); n != 0 {
 		t.Fatalf("queue not empty: %d", n)
+	}
+}
+
+// The first container job on a node waits for its runtime image: the CLI
+// is told why (setup phase) before the slot is acquired.
+func TestFirstContainerJobSaysTheRuntimeIsBeingPrepared(t *testing.T) {
+	c := newCluster(t, "a", "b")
+	a, b := c.nodes["a"], c.nodes["b"]
+	b.exec.runtimes = []proto.Runtime{
+		{Kind: proto.RuntimeNative, OS: runtime.GOOS, Arch: runtime.GOARCH, CPUs: 16, Available: true},
+		{Kind: proto.RuntimeContainer, OS: "linux", Arch: runtime.GOARCH, CPUs: 8, Available: true, FirstUse: true},
+	}
+	a.place = func(job *proto.Job, nodes map[string]proto.NodeState, rejected map[string]bool) (scheduler.Placement, string, bool) {
+		if n, ok := nodes["b"]; !ok || n.Status != proto.NodeOnline {
+			return scheduler.Placement{}, "waiting for b", false
+		}
+		return scheduler.Placement{Node: "b", Runtime: proto.RuntimeContainer, Reason: "test"}, "", true
+	}
+	b.start()
+	a.start()
+	c.waitOnline("a", "b")
+	waitFor(t, 2*time.Second, "b's runtimes known at a", func() bool {
+		p := a.daemon().peers.get("b")
+		r := runtimeInfo(p.nodeState().Info, proto.RuntimeContainer)
+		return r != nil && r.FirstUse
+	})
+	ws := workspaceDir(t, map[string]string{"f": "x"})
+	ctx, cancel := testContext(20 * time.Second)
+	defer cancel()
+	res, err := runCLI(ctx, a.sock(), shSpec(ws, "echo ok"), cliOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.exit == nil || res.exit.Code != 0 {
+		t.Fatalf("exit %+v", res.exit)
+	}
+	found := false
+	for _, ph := range res.phases {
+		if ph.State == proto.JobSetup && ph.Message == "preparing the Linux runtime on b (first use, ~30 s)" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("phases %+v", res.phases)
 	}
 }
