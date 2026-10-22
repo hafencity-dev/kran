@@ -118,6 +118,10 @@ type sched struct {
 	// syncCost learns seconds of sync+setup per repo\x00node.
 	syncCost map[string]*costEWMA
 
+	// ignorePressure scores without memory/I/O contention (simulator
+	// baseline only).
+	ignorePressure bool
+
 	// Results of the last dispatch pass.
 	order []string
 	holds map[string]hold // node → resources held for a starving job

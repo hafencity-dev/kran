@@ -20,6 +20,7 @@ type cand struct {
 	fitsNoHold bool
 	oversize   bool    // larger than the runtime could ever hold
 	run        float64 // expected run seconds there
+	press      pressure
 	overhead   float64 // sync + setup seconds
 	wait       float64 // seconds until it fits (0 when it fits)
 }
@@ -215,8 +216,13 @@ func (s *sched) candidate(j *sjob, v *nodeView, rt rtView, now time.Time) *cand 
 		c.fits = v.fits(rt, c.cpu, c.mem, false)
 		c.fitsNoHold = c.fits || v.fits(rt, c.cpu, c.mem, true)
 	}
-	// A job squeezed onto fewer cores than it would use runs longer.
-	c.run = j.est.Duration * s.speed(j, v) * (j.est.CPUs / c.cpu)
+	// A job squeezed onto fewer cores than it would use runs longer, and
+	// so does one on a node thrashing on memory or I/O.
+	c.press = noPressure()
+	if !s.ignorePressure {
+		c.press = v.pressure(rt)
+	}
+	c.run = j.est.Duration * s.speed(j, v) * (j.est.CPUs / c.cpu) * c.press.slow
 	c.overhead = s.syncSeconds(j, v)
 	switch {
 	case c.fits:
@@ -527,21 +533,23 @@ func (s *sched) placeReason(j *sjob, best, selfCand *cand, fits []*cand, whys []
 				break
 			}
 		}
+		here := "here: est. " + fmtDur(best.run) + paren(best.press.note())
 		if other != nil {
-			return fmt.Sprintf("here: est. %s; %s would take %s plus ~%s to sync", fmtDur(best.run),
-				other.label(), fmtDur(other.run), fmtDur(other.overhead))
+			return fmt.Sprintf("%s; %s would take %s%s plus ~%s to sync", here,
+				other.label(), fmtDur(other.run), paren(other.press.note()), fmtDur(other.overhead))
 		}
 		if len(fits) == 1 {
-			return fmt.Sprintf("here: est. %s; no other node has room", fmtDur(best.run))
+			return here + "; no other node has room"
 		}
-		return fmt.Sprintf("here: est. %s", fmtDur(best.run))
+		return here
 	}
-	r := fmt.Sprintf("%s: %s free, est. %s", best.label(), fmtCPUs(nonNeg(best.v.freeCPUFor(best.rt))), fmtDur(best.total()))
+	r := fmt.Sprintf("%s: %s free, est. %s%s", best.label(), fmtCPUs(nonNeg(best.v.freeCPUFor(best.rt))), fmtDur(best.total()),
+		paren(best.press.note()))
 	switch {
 	case j.req.Node != "":
 		r += " (--node)"
 	case selfCand != nil && selfCand.fits:
-		r += " vs " + fmtDur(selfCand.total()) + " here"
+		r += " vs " + fmtDur(selfCand.total()) + " here" + paren(selfCand.press.note())
 	case selfCand != nil:
 		r += "; here: " + strings.TrimPrefix(s.resourceReason(j, []*cand{selfCand}), "waiting: ")
 	default:
@@ -557,6 +565,14 @@ func (s *sched) placeReason(j *sjob, best, selfCand *cand, fits []*cand, whys []
 		}
 	}
 	return r
+}
+
+// paren wraps a non-empty note: " (note)".
+func paren(note string) string {
+	if note == "" {
+		return ""
+	}
+	return " (" + note + ")"
 }
 
 func (s *sched) gpuNodes() []string {

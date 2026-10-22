@@ -272,9 +272,22 @@ any node's total schedulable memory is admitted alone on the largest node
 (reason shown) rather than queued forever.
 
 Scoring among admissible nodes — minimize expected completion:
-`wait + sync_bytes/bandwidth + setup_estimate + duration_estimate × speed(node)`
+`wait + sync_bytes/bandwidth + setup_estimate + duration_estimate × speed(node) × slowdown(node)`
 where `speed` is learned per (fingerprint, node) and starts from the node's
 single-core benchmark ratio; `bandwidth` is measured on blob uploads (EWMA).
+`slowdown` is contention that free CPUs do not show (a node thrashing on
+memory runs every job slower with cores idle): `1 / (1 − stall)`, stall
+combined from independent sources as `1 − Π(1 − s)` and capped at 0.8 (5×).
+Linux: PSI "some" avg10 — memory × 1.0, CPU × 0.5, I/O × 0.5 (with many
+cores or one busy disk "some task waited" overstates what a new job waits);
+swap ≥ 90% used while memory is tight (memory PSI ≥ 10 or < 10% available)
+adds 0.2; without PSI, run-queue oversubscription `1 − cpus/load1`. macOS:
+`1 − cpus/load1` and memory pressure (100 − memorystatus level) above 75
+scaled to at most 0.6; swap is not used (it grows on demand). A Linux VM's
+container runtime takes the host's slowdown plus its own CPU saturation.
+Reasons name a slowdown of 1.2× or more: "devmac (Linux container): 15.8
+CPUs free, est. 1m3s vs 2m32s here (slowed ~2.5x by memory pressure 40%,
+full swap)".
 Tie-break: origin first, then lowest load. Jobs with estimated duration under
 5 s or sync cost greater than estimated savings stay local.
 
