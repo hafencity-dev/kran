@@ -49,7 +49,8 @@ func (c *httpClient) Run(ctx context.Context) (RunSession, error) {
 		conn.Close()
 		return nil, fmt.Errorf("open run session: %w", err)
 	}
-	br := bufio.NewReaderSize(conn, 64<<10)
+	sr := &stallReader{conn: conn}
+	br := bufio.NewReaderSize(sr, 64<<10)
 	resp, err := http.ReadResponse(br, req)
 	if err != nil {
 		conn.Close()
@@ -64,12 +65,42 @@ func (c *httpClient) Run(ctx context.Context) (RunSession, error) {
 		return nil, ctx.Err()
 	}
 	conn.SetDeadline(time.Time{})
-	return newRunSession(conn, br), nil
+	rs := newRunSession(conn, br)
+	rs.sr = sr
+	return rs, nil
+}
+
+// stallReader tells a silent daemon from a process that did not run: when
+// a read deadline expired long ago (the process was stopped with Ctrl-Z or
+// the machine slept), what the daemon sent meanwhile is waiting in the
+// socket, so the read is retried once with a fresh short deadline.
+type stallReader struct {
+	conn     net.Conn
+	deadline time.Time
+	timeout  time.Duration
+}
+
+// arm sets the read deadline for the next frame (Recv goroutine only).
+func (r *stallReader) arm(timeout time.Duration) {
+	r.timeout = timeout
+	r.deadline = time.Now().Add(timeout)
+	r.conn.SetReadDeadline(r.deadline)
+}
+
+func (r *stallReader) Read(p []byte) (int, error) {
+	n, err := r.conn.Read(p)
+	var ne net.Error
+	if n == 0 && r.timeout > 0 && errors.As(err, &ne) && ne.Timeout() && time.Since(r.deadline) > r.timeout/2 {
+		r.arm(r.timeout / 2)
+		n, err = r.conn.Read(p)
+	}
+	return n, err
 }
 
 type runSession struct {
 	conn net.Conn
 	br   *bufio.Reader
+	sr   *stallReader // nil: plain read deadlines
 	buf  []byte
 
 	// Captured at creation so tests can tune the package vars safely.
@@ -126,7 +157,11 @@ func (s *runSession) SendJSON(t proto.FrameType, v any) error {
 
 func (s *runSession) Recv() (proto.FrameType, []byte, error) {
 	for {
-		s.conn.SetReadDeadline(time.Now().Add(s.recvTimeout))
+		if s.sr != nil {
+			s.sr.arm(s.recvTimeout)
+		} else {
+			s.conn.SetReadDeadline(time.Now().Add(s.recvTimeout))
+		}
 		t, p, err := proto.ReadFrame(s.br, s.buf)
 		if err != nil {
 			var ne net.Error
