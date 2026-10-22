@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/hafencity-dev/kran/internal/proto"
 	"github.com/hafencity-dev/kran/internal/transport"
@@ -75,5 +76,29 @@ func TestBlobPutNeedsReservation(t *testing.T) {
 	s := helloAs(t, c, "a", "b")
 	if err := peerOneShot(context.Background(), s, proto.PeerBlobPut, "", nil, nil); peerCode(err) != codeBadRequest {
 		t.Fatalf("blob.put without a job: %v", err)
+	}
+}
+
+// The forwarded env is only needed while a job may still run; history in
+// kran.db is kept for days and must not hold it.
+func TestFinishedJobStoredWithoutEnv(t *testing.T) {
+	c := newCluster(t, "a")
+	a := c.nodes["a"]
+	a.start()
+	ws := workspaceDir(t, map[string]string{"f": "x"})
+	spec := shSpec(ws, "true")
+	spec.Env = map[string]string{"DATABASE_URL": "postgres://u:pw@db/x"}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	res, err := runCLI(ctx, a.sock(), spec, cliOpts{})
+	if err != nil || res.exit == nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 2*time.Second, "job stored as finished", func() bool {
+		j, err := a.store.GetJob(context.Background(), res.jobID)
+		return err == nil && j.State.Terminal()
+	})
+	if j := storedJob(t, a, res.jobID); len(j.Spec.Env) != 0 {
+		t.Fatalf("finished job stored with env %v", j.Spec.Env)
 	}
 }

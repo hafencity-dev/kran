@@ -229,6 +229,11 @@ func (e *jobEntry) snapshot() proto.Job {
 
 func (e *jobEntry) persistLocked() {
 	j := cloneJob(e.job)
+	if j.State.Terminal() {
+		// History is kept for days; the forwarded env (secret-filtered,
+		// but personal) is only needed while the job may still run.
+		j.Spec.Env = nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := e.d.deps.Store.PutJob(ctx, &j); err != nil {
