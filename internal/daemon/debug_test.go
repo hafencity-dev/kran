@@ -28,3 +28,14 @@ func TestDebugGoroutinesOnlyWhenEnabled(t *testing.T) {
 		}
 	}
 }
+
+func TestNamespaceFromEnv(t *testing.T) {
+	for _, tc := range []struct{ env, ns, slice string }{
+		{"", "", ""}, {"kran-dev", "kran-dev", "kran_dev.slice"}, {"Bad NS", "", ""}, {"kran;rm", "", ""},
+	} {
+		t.Setenv("KRAN_NAMESPACE", tc.env)
+		if ns, slice := namespace(t.Logf); ns != tc.ns || slice != tc.slice {
+			t.Errorf("%q: %q %q", tc.env, ns, slice)
+		}
+	}
+}

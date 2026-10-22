@@ -262,6 +262,9 @@ func (n *knode) env(extra ...string) []string {
 		"KRAN_RUNTIME_DIR="+n.runDir,
 		"KRAN_CACHE_DIR="+n.cacheDir,
 		"KRAN_NO_AUTOSTART=1",
+		// Own systemd slice/scopes and Docker names: a real kran may run on
+		// this machine too.
+		"KRAN_NAMESPACE=kran-e2e",
 		"KRAN_NO_HOOK=1",
 		"GORACE=log_path="+filepath.Join(raceDir, "race")+" halt_on_error=0",
 	)
@@ -649,7 +652,7 @@ func leftoverUnits(ids map[string]bool) []string {
 		return nil
 	}
 	out, err := exec.Command("systemctl", "--user", "list-units", "--all", "--plain", "--no-legend", "--no-pager",
-		"kran-job-*", "kran-local-*").Output()
+		"kran-e2e-job-*", "kran-local-*").Output()
 	if err != nil {
 		return nil
 	}
@@ -660,7 +663,7 @@ func leftoverUnits(ids map[string]bool) []string {
 			continue
 		}
 		unit := f[0]
-		id := strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(unit, "kran-job-"), "kran-local-"), ".scope")
+		id := strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(unit, "kran-e2e-job-"), "kran-local-"), ".scope")
 		if ids[id] {
 			res = append(res, unit)
 		}
