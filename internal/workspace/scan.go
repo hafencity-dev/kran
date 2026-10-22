@@ -370,22 +370,28 @@ func LinkStaysInside(rel, target string) bool {
 	if dir == "." {
 		dir = ""
 	}
-	// Walk components so "a/../../x" is caught even though Clean would
-	// collapse intermediate escapes of deeper links.
+	// Only "../" steps first, then names: the link's own parent dirs are
+	// real directories, but a name in the target may itself be a link
+	// (d/up -> ..), so a ".." after it (x -> d/up/..) would climb out.
+	// Links reached through names are checked by this same rule.
 	depth := 0
 	if dir != "" {
 		depth = strings.Count(dir, "/") + 1
 	}
+	named := false
 	for _, c := range strings.Split(target, "/") {
 		switch c {
 		case "", ".":
 		case "..":
+			if named {
+				return false
+			}
 			depth--
 			if depth < 0 {
 				return false
 			}
 		default:
-			depth++
+			named = true
 		}
 	}
 	return true

@@ -89,9 +89,16 @@ func TestLinkStaysInside(t *testing.T) {
 		{"a/link", "../../b", false},
 		{"link", "..", false},
 		{"link", "/etc/passwd", false},
-		{"a/b/link", "../../c/../d", true},
+		// ".." after a name: that name may itself be a link (d/up -> ..),
+		// so x -> d/up/.. would reach the slot's parent.
+		{"a/b/link", "../../c/../d", false},
+		{"x", "d/up/..", false},
+		{"x", "a/b/c/up/../../..", false},
+		{"a/b/link", "../../c/d", true},
+		{"d/up", "..", true},
 		{"a/b/link", "../../../x", false},
-		{"a/link", "./x/../y", true},
+		{"a/link", "./x/../y", false},
+		{"a/link", "./x/y", true},
 		{"a/link", "", false},
 	}
 	for _, c := range cases {
