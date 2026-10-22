@@ -102,6 +102,8 @@ type testNode struct {
 	timing  Timing
 	log     *safeLog
 	cfg     NodeConfig
+	dialer  PeerDialer   // nil = in-memory network
+	src     PeerSource   // nil = peers
 
 	mu     sync.Mutex
 	d      *Daemon
@@ -163,6 +165,14 @@ func newCluster(t *testing.T, names ...string) *cluster {
 func (n *testNode) start() *Daemon {
 	n.t.Helper()
 	sched := newFakeSched(n.name, n.place)
+	var dialer PeerDialer = memDialer{n.net, n.name}
+	if n.dialer != nil {
+		dialer = n.dialer
+	}
+	var src PeerSource = n.peers
+	if n.src != nil {
+		src = n.src
+	}
 	d, err := New(Deps{
 		Config:  n.cfg,
 		Dirs:    n.dirs,
@@ -172,8 +182,8 @@ func (n *testNode) start() *Daemon {
 		Prober:  n.prober,
 		Exec:    n.exec,
 		Scanner: n.scanner,
-		Peers:   n.peers,
-		Dialer:  memDialer{n.net, n.name},
+		Peers:   src,
+		Dialer:  dialer,
 		Session: testSessionConfig(),
 		Logf:    n.log.logf(n.name),
 		Timing:  n.timing,
