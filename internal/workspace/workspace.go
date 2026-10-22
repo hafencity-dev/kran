@@ -38,8 +38,8 @@ func Toolchains(root string) map[string]string { return toolchains(root) }
 
 // ProjectConfig is `.kran.toml` (all fields optional).
 type ProjectConfig struct {
-	OS    proto.OSPolicy `toml:"os"`
-	Sync  struct {
+	OS   proto.OSPolicy `toml:"os"`
+	Sync struct {
 		Include []string `toml:"include"`
 		Exclude []string `toml:"exclude"`
 	} `toml:"sync"`
