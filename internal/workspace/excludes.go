@@ -1,6 +1,9 @@
 package workspace
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // DefaultKeep lists target-side dirs that survive slot updates although they
 // are not synced: dependency and cache dirs that setup or the tools maintain
@@ -14,12 +17,10 @@ var hardExcludedDir = map[string]bool{
 	".kran":        true,
 }
 
-// sshKeyNames are private key file names (id_* in SPEC §6.7). Matching the
-// whole id_* prefix would also drop source files like id_test.go.
-var sshKeyNames = map[string]bool{
-	"id_rsa": true, "id_dsa": true, "id_ecdsa": true, "id_ed25519": true,
-	"id_ecdsa_sk": true, "id_ed25519_sk": true, "id_xmss": true,
-}
+// sshKeyName matches private ssh key file names (id_* in SPEC §6.7),
+// including copies like id_rsa_deploy or id_ed25519.bak. Matching the whole
+// id_* prefix would also drop source files like id_test.go.
+var sshKeyName = regexp.MustCompile(`^id_(rsa|dsa|ecdsa|ed25519|xmss)(_sk)?([._-].*)?$`)
 
 // HardExcluded reports whether rel (slash form) must never leave the origin:
 // VCS internals, dependency dirs and secrets. It applies even to paths that
@@ -28,7 +29,9 @@ func HardExcluded(rel string, isDir bool) bool {
 	start := 0
 	for i := 0; i <= len(rel); i++ {
 		if i == len(rel) || rel[i] == '/' {
-			comp := rel[start:i]
+			// Lower case: macOS file systems ignore case, so .ENV is .env
+			// and .GIT is the repository.
+			comp := strings.ToLower(rel[start:i])
 			last := i == len(rel)
 			// Also matches files and symlinks of that name: a ".git" file
 			// links a submodule or worktree, a node_modules symlink points
@@ -45,6 +48,7 @@ func HardExcluded(rel string, isDir bool) bool {
 	return false
 }
 
+// secretFile matches a lower-cased file name.
 func secretFile(name string) bool {
 	if name == ".env" {
 		return true
@@ -62,5 +66,5 @@ func secretFile(name string) bool {
 			return true
 		}
 	}
-	return sshKeyNames[name]
+	return sshKeyName.MatchString(name) && !strings.HasSuffix(name, ".pub")
 }
