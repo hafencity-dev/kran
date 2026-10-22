@@ -2,11 +2,13 @@ package tui
 
 import (
 	"fmt"
+
+	tea "charm.land/bubbletea/v2"
 	"math"
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/hafencity-dev/kran/internal/proto"
 )
@@ -38,7 +40,15 @@ func clip(s string, w int) string {
 	return ansi.Truncate(s, w, "")
 }
 
-func (m *Model) View() string {
+// View implements tea.Model; the content always fills the alternate screen.
+func (m *Model) View() tea.View {
+	v := tea.NewView(m.render())
+	v.AltScreen = true
+	return v
+}
+
+// render is the whole screen as text (tests inspect it directly).
+func (m *Model) render() string {
 	if m.log != nil {
 		return m.viewLog()
 	}
