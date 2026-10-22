@@ -193,3 +193,32 @@ func TestBuildSpecNoDocker(t *testing.T) {
 		t.Fatal(".kran.toml docker = false ignored")
 	}
 }
+
+// A repo's .kran.toml may forward secrets (its choice), but the user hears
+// about it on every run; --env is the user's own choice and stays silent.
+func TestBuildSpecNoticesForwardedSecrets(t *testing.T) {
+	run := func(forward, extra []string) []string {
+		in := testInput("go", "test", "./...")
+		in.Env = append(in.Env, "DB_PASSWORD=pw", "PLAIN=1")
+		in.Project = func(string) (*workspace.ProjectConfig, error) {
+			pc := &workspace.ProjectConfig{}
+			pc.Env.Forward = forward
+			return pc, nil
+		}
+		in.Flags.ExtraEnv = extra
+		var notes []string
+		in.Notice = func(s string) { notes = append(notes, s) }
+		if _, err := BuildSpec(context.Background(), in); err != nil {
+			t.Fatal(err)
+		}
+		return notes
+	}
+	got := run([]string{"GITHUB_TOKEN", "DB_PASSWORD", "PLAIN", "MISSING_TOKEN"}, nil)
+	want := []string{".kran.toml forwards GITHUB_TOKEN to other machines", ".kran.toml forwards DB_PASSWORD to other machines"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("notices %q", got)
+	}
+	if got := run([]string{"GITHUB_TOKEN"}, []string{"GITHUB_TOKEN"}); len(got) != 0 {
+		t.Fatalf("--env must stay silent: %q", got)
+	}
+}

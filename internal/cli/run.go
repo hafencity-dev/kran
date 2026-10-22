@@ -107,6 +107,7 @@ func (a *App) doRun(ctx context.Context, f RunFlags, args []string) int {
 		Flags: f, Argv: args, Cwd: cwd, Env: env, Home: home, TTY: tty, Now: time.Now(), PID: os.Getpid(),
 		Owner:  DetectOwner(OwnerInput{Env: envMap(env), PID: os.Getpid(), User: userName(), TTY: ttyName(), Procs: newProcReader()}),
 		Config: cfg,
+		Notice: func(msg string) { a.errorf("%s", msg) },
 	})
 	if err != nil {
 		var ue *UsageError
