@@ -42,7 +42,7 @@ func TestLatestRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := LatestRelease(ctx, Options{Runner: noGh})
-	if err == nil || !strings.Contains(err.Error(), "gh auth login") || !strings.Contains(err.Error(), "GITHUB_TOKEN") {
+	if err == nil || !strings.Contains(err.Error(), "no kran release has been published") || !strings.Contains(err.Error(), "GITHUB_TOKEN") {
 		t.Fatal(err)
 	}
 }
@@ -132,7 +132,7 @@ func TestFetchRelease(t *testing.T) {
 	o.Runner = scripted{func(Cmd) (Output, error) { return Output{}, &ExitError{Code: 1} }}
 	t.Setenv("GITHUB_TOKEN", "")
 	t.Setenv("GH_TOKEN", "")
-	if _, err := FetchRelease(context.Background(), o, "3.0.0", goos, arch); err == nil || !strings.Contains(err.Error(), "gh auth login") {
+	if _, err := FetchRelease(context.Background(), o, "3.0.0", goos, arch); err == nil || !strings.Contains(err.Error(), "anonymous download failed") {
 		t.Fatal(err)
 	}
 }

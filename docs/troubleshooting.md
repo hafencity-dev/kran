@@ -14,7 +14,7 @@ Run `kran doctor` first. Add `--fix` to repair permissions, a missing key, and t
 
 - `kran link` needs working `ssh <host>`. Try it by hand first; the error is then yours to read.
 - "Linked one direction": the other machine cannot reach this one. Enable Remote Login / start sshd here, make sure the address is reachable (Tailscale helps), then run `kran link <host>` again.
-- Wrong or missing kran binary on the other side: `kran link` installs it from the binary cache (`make install` fills it), a GitHub release (needs `gh auth login` or `GITHUB_TOKEN`), or a source build when run from a checkout.
+- Wrong or missing kran binary on the other side: `kran link` installs it from the binary cache (`make install` fills it), a GitHub release (downloaded anonymously; `gh auth login` or `GITHUB_TOKEN` only help when GitHub rate limits you), or a source build when run from a checkout.
 - `kran unlink <node>` undoes a link on both sides. If the other machine is unreachable it tells you which lines to remove from its `authorized_keys` (they end in `kran@<node>`).
 
 ## Jobs

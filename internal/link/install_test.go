@@ -237,3 +237,124 @@ func TestPushLinuxBinaryForMacRemote(t *testing.T) {
 		t.Fatal("re-uploaded identical binary")
 	}
 }
+
+// publicRelease serves a public release: assets at /<repo>/releases/download/v<ver>/<name>
+// and the latest tag at the API path, all without credentials. It fails the
+// test when a request carries an Authorization header.
+func publicRelease(t *testing.T, ver string, files map[string][]byte, hits *[]string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			t.Errorf("anonymous request carried credentials: %s", r.URL.Path)
+		}
+		if hits != nil {
+			*hits = append(*hits, r.URL.Path)
+		}
+		if r.URL.Path == "/repos/hafencity-dev/kran/releases/latest" {
+			fmt.Fprintf(w, `{"tag_name":"v%s"}`, ver)
+			return
+		}
+		prefix := "/hafencity-dev/kran/releases/download/v" + ver + "/"
+		if strings.HasPrefix(r.URL.Path, prefix) {
+			if b, ok := files[strings.TrimPrefix(r.URL.Path, prefix)]; ok {
+				w.Write(b)
+				return
+			}
+		}
+		http.NotFound(w, r)
+	}))
+}
+
+func TestFetchAnonymous(t *testing.T) {
+	t.Setenv("KRAN_CACHE_DIR", t.TempDir())
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
+	goos, arch := otherPlatform()
+	asset := assetName("4.0.0", goos, arch)
+	tgz := tarball(t, "kran", "ANON")
+	mustNotRun := scripted{func(c Cmd) (Output, error) { return Output{}, fmt.Errorf("must not run %s", c.Name) }}
+
+	// success: no gh, no token
+	srv := publicRelease(t, "4.0.0", map[string][]byte{asset: tgz, "checksums.txt": []byte(sha256hex(tgz) + "  " + asset + "\n")}, nil)
+	defer srv.Close()
+	o := Options{Runner: mustNotRun, DownloadBase: srv.URL, HTTPClient: srv.Client()}
+	p, err := FetchRelease(context.Background(), o, "4.0.0", goos, arch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != "ANON" {
+		t.Fatalf("%q", b)
+	}
+
+	// checksum mismatch is refused and not cached
+	bad := publicRelease(t, "4.1.0", map[string][]byte{
+		assetName("4.1.0", goos, arch): tgz,
+		"checksums.txt":                []byte(strings.Repeat("0", 64) + "  " + assetName("4.1.0", goos, arch) + "\n"),
+	}, nil)
+	defer bad.Close()
+	o.DownloadBase, o.HTTPClient = bad.URL, bad.Client()
+	if _, err := FetchRelease(context.Background(), o, "4.1.0", goos, arch); err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("%v", err)
+	}
+	if _, err := os.Stat(paths.BinaryCache("4.1.0", goos, arch)); err == nil {
+		t.Fatal("unverified download must not be cached")
+	}
+}
+
+func TestFetchAnonymousFailureFallsBack(t *testing.T) {
+	t.Setenv("KRAN_CACHE_DIR", t.TempDir())
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
+	goos, arch := otherPlatform()
+	asset := assetName("5.0.0", goos, arch)
+	tgz := tarball(t, "kran", "VIA-GH")
+	empty := publicRelease(t, "5.0.0", nil, nil) // anonymous: everything 404s
+	defer empty.Close()
+	gh := scripted{func(c Cmd) (Output, error) {
+		if c.Name == "gh" && c.Args[0] == "release" {
+			dir := c.Args[len(c.Args)-2]
+			if c.Args[6] == asset {
+				os.WriteFile(filepath.Join(dir, asset), tgz, 0o644)
+			} else {
+				os.WriteFile(filepath.Join(dir, "checksums.txt"), []byte(sha256hex(tgz)+"  "+asset+"\n"), 0o644)
+			}
+		}
+		return Output{}, nil
+	}}
+	o := Options{Runner: gh, DownloadBase: empty.URL, HTTPClient: empty.Client()}
+	p, err := FetchRelease(context.Background(), o, "5.0.0", goos, arch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != "VIA-GH" {
+		t.Fatalf("%q", b)
+	}
+
+	// no gh, no token: the error names the anonymous failure and the fallbacks
+	o = Options{Runner: scripted{func(Cmd) (Output, error) { return Output{}, &ExitError{Code: 1} }}, DownloadBase: empty.URL, HTTPClient: empty.Client()}
+	_, err = FetchRelease(context.Background(), o, "5.1.0", goos, arch)
+	if err == nil || !strings.Contains(err.Error(), "anonymous download failed") || !strings.Contains(err.Error(), "404") || !strings.Contains(err.Error(), "GITHUB_TOKEN") {
+		t.Fatal(err)
+	}
+}
+
+func TestLatestReleaseAnonymous(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
+	var hits []string
+	srv := publicRelease(t, "6.0.0", nil, &hits)
+	defer srv.Close()
+	mustNotRun := scripted{func(c Cmd) (Output, error) { return Output{}, fmt.Errorf("must not run %s", c.Name) }}
+	v, err := LatestRelease(context.Background(), Options{Runner: mustNotRun, APIBase: srv.URL, HTTPClient: srv.Client()})
+	if err != nil || v != "6.0.0" {
+		t.Fatal(v, err)
+	}
+	// rate limited, no gh, no token: says so
+	rl := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "limit", 403) }))
+	defer rl.Close()
+	noGh := scripted{func(Cmd) (Output, error) { return Output{}, &ExitError{Code: 1} }}
+	_, err = LatestRelease(context.Background(), Options{Runner: noGh, APIBase: rl.URL, HTTPClient: rl.Client()})
+	if err == nil || !strings.Contains(err.Error(), "rate limit") {
+		t.Fatal(err)
+	}
+}

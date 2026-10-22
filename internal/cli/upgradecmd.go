@@ -44,8 +44,8 @@ func (a *App) upgradeCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "upgrade",
 		Short: "Update kran here and on all linked machines",
-		Long: `Download the newest kran release (needs gh auth login or GITHUB_TOKEN, the
-repository is private), replace this binary, restart the local service once
+		Long: `Download the newest kran release from GitHub (no login needed; gh or
+GITHUB_TOKEN are used only as a fallback, e.g. when rate limited), replace this binary, restart the local service once
 running jobs have finished, then do the same on every linked machine.`,
 		Example: "  kran upgrade\n  kran upgrade --check\n  kran upgrade --version 0.4.1 --force",
 		Args:    cobra.NoArgs,

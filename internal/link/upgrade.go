@@ -5,14 +5,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 )
 
 // LatestRelease returns the newest release version of hafencity-dev/kran
-// without the leading "v". The repository is private, so it needs either an
-// authenticated gh or a GitHub token.
+// without the leading "v". It asks the public GitHub API anonymously first,
+// then gh, then the API with a token (higher rate limits).
 func LatestRelease(ctx context.Context, o Options) (string, error) {
 	b := binarySource{o: &o, r: o.runner()}
+	hc, base := b.apiClient()
+	v, anonErr := latestViaAPI(ctx, hc, "", fmt.Sprintf("%s/repos/%s/releases/latest", base, repoSlug))
+	if anonErr == nil {
+		return v, nil
+	}
 	if b.ghReady(ctx) {
 		out, err := b.r.Run(ctx, Cmd{Name: "gh", Args: []string{"release", "view", "-R", repoSlug, "--json", "tagName", "-q", ".tagName"}})
 		if err == nil {
@@ -22,27 +28,37 @@ func LatestRelease(ctx context.Context, o Options) (string, error) {
 		}
 	}
 	if tok := b.token(); tok != "" {
-		hc, base := b.apiClient()
-		resp, err := apiGet(ctx, hc, tok, fmt.Sprintf("%s/repos/%s/releases/latest", base, repoSlug), "application/vnd.github+json")
-		if err != nil {
-			return "", err
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != 200 {
-			return "", fmt.Errorf("GitHub answered %s asking for the latest kran release (is the token allowed to read %s?)", resp.Status, repoSlug)
-		}
-		var rel struct {
-			Tag string `json:"tag_name"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
-			return "", err
-		}
-		if v := strings.TrimPrefix(rel.Tag, "v"); v != "" {
-			return v, nil
-		}
-		return "", errors.New("GitHub returned a release without a tag")
+		return latestViaAPI(ctx, hc, tok, fmt.Sprintf("%s/repos/%s/releases/latest", base, repoSlug))
 	}
-	return "", errors.New("cannot look up the latest kran release: the repository is private. Run `gh auth login` (GitHub CLI) or set GITHUB_TOKEN to a token that can read hafencity-dev/kran")
+	return "", fmt.Errorf("cannot look up the latest kran release: %w. If GitHub is rate limiting you, run `gh auth login` or set GITHUB_TOKEN, or pass --version", anonErr)
+}
+
+// latestViaAPI reads tag_name from the latest-release endpoint; token may be "".
+func latestViaAPI(ctx context.Context, hc *http.Client, token, url string) (string, error) {
+	resp, err := apiGet(ctx, hc, token, url, "application/vnd.github+json")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case 200:
+	case 404:
+		return "", fmt.Errorf("GitHub answered %s: no kran release has been published yet", resp.Status)
+	case 403, 429:
+		return "", fmt.Errorf("GitHub answered %s (rate limited?)", resp.Status)
+	default:
+		return "", fmt.Errorf("GitHub answered %s asking for the latest kran release", resp.Status)
+	}
+	var rel struct {
+		Tag string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+		return "", err
+	}
+	if v := strings.TrimPrefix(rel.Tag, "v"); v != "" {
+		return v, nil
+	}
+	return "", errors.New("GitHub returned a release without a tag")
 }
 
 // FetchRelease downloads release `version` for goos/goarch into the binary
@@ -52,7 +68,7 @@ func FetchRelease(ctx context.Context, o Options, version, goos, goarch string) 
 	b := binarySource{o: &o, r: o.runner()}
 	p, err := b.fetch(ctx, version, goos, goarch)
 	if err != nil {
-		return "", fmt.Errorf("download kran %s for %s/%s: %w. Run `gh auth login` or set GITHUB_TOKEN so kran can read the private release", strings.TrimPrefix(version, "v"), goos, goarch, err)
+		return "", fmt.Errorf("download kran %s for %s/%s: %w. Check your network access to github.com; if GitHub is rate limiting you, run `gh auth login` or set GITHUB_TOKEN", strings.TrimPrefix(version, "v"), goos, goarch, err)
 	}
 	return p, nil
 }
