@@ -610,10 +610,19 @@ func waitUntil(cond func() bool, d time.Duration) bool {
 func (s *supervisor) watchLease() {
 	every := min(time.Second, s.spec.LeaseTTL/5)
 	path := filepath.Join(s.dir, fileLease)
+	// A renewal is a change of the mtime, timed with this process's
+	// monotonic clock: the wall-clock age of the file means nothing once
+	// the clock is stepped (forward: every job looks expired; back: an
+	// abandoned job lives until the clock catches up).
+	var seen time.Time
+	renewed := time.Now()
 	for {
 		time.Sleep(every)
 		fi, err := os.Stat(path)
-		if err != nil || time.Since(fi.ModTime()) > s.spec.LeaseTTL {
+		if err == nil && !fi.ModTime().Equal(seen) {
+			seen, renewed = fi.ModTime(), time.Now()
+		}
+		if err != nil || time.Since(renewed) > s.spec.LeaseTTL {
 			s.logf("lease expired (no heartbeat for %s); stopping the job", s.spec.LeaseTTL)
 			s.terminate(killLost, s.spec.KillGrace)
 			return
