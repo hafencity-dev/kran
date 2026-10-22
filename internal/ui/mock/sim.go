@@ -91,6 +91,7 @@ func New(opt Options) *Sim {
 	for i := 0; i < 14; i++ {
 		s.submit(now.Add(-time.Duration(s.rng.IntN(90)) * time.Second))
 	}
+	s.recompute() // free capacity must be known before the first placement
 	s.schedule(now)
 	s.recompute()
 	return s

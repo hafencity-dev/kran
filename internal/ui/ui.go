@@ -11,6 +11,8 @@ import (
 	"strings"
 )
 
+//go:generate sh -c "cd ../../web && npm ci --no-audit --no-fund && npm run build"
+
 //go:embed all:dist
 var dist embed.FS
 
