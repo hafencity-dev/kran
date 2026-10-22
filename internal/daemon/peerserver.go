@@ -642,6 +642,26 @@ func (t *targetSide) streamJob(pc *peerConn, j *tjob, proc execenv.Process, offs
 	defer closeOut()
 	context.AfterFunc(ctx, closeOut)
 
+	// Phase changes go out from both goroutines below, serialized: output is
+	// written only after the phase current at that moment, so the running
+	// phase (reported before the command starts) always precedes the
+	// command's first byte. The origin decides fallback vs. exit 125 by it.
+	var phMu sync.Mutex
+	var lastPhase proto.Phase
+	sendPhase := func() error {
+		phMu.Lock()
+		defer phMu.Unlock()
+		ph, _ := j.currentPhase()
+		if ph == lastPhase || ph.State == "" {
+			return nil
+		}
+		if err := pc.writeJSONFrame(proto.FramePhase, ph); err != nil {
+			return err
+		}
+		lastPhase = ph
+		return nil
+	}
+
 	// Output and exit.
 	go func() {
 		defer cancel()
@@ -656,6 +676,9 @@ func (t *targetSide) streamJob(pc *peerConn, j *tjob, proc execenv.Process, offs
 				return
 			}
 			buf = p[:0]
+			if err := sendPhase(); err != nil {
+				return
+			}
 			if err := pc.writeFrame(ft, p); err != nil {
 				return
 			}
@@ -681,15 +704,11 @@ func (t *targetSide) streamJob(pc *peerConn, j *tjob, proc execenv.Process, offs
 	go func() {
 		tk := time.NewTicker(d.t.Heartbeat)
 		defer tk.Stop()
-		var last proto.Phase
 		for {
-			ph, ch := j.currentPhase()
-			if ph != last && ph.State != "" {
-				if pc.writeJSONFrame(proto.FramePhase, ph) != nil {
-					cancel()
-					return
-				}
-				last = ph
+			_, ch := j.currentPhase()
+			if sendPhase() != nil {
+				cancel()
+				return
 			}
 			select {
 			case <-ctx.Done():
