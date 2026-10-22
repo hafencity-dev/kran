@@ -416,6 +416,17 @@ func TestSignalsAndStdin(t *testing.T) {
 		t.Fatalf("stdin echo: %+v %d bytes", exit, len(out))
 	}
 
+	// Input sent before the command started (here: during a slow setup)
+	// waits for it instead of being lost.
+	p = te.start(ref, []string{"cat"}, withStdin(), withSetup("sleep 1"))
+	w = p.Stdin()
+	io.WriteString(w, "early input")
+	w.Close()
+	exit = waitExit(t, p, 20*time.Second)
+	if out, _ := output(t, p); exit.Code != 0 || out != "early input" {
+		t.Fatalf("early stdin: %+v %q", exit, out)
+	}
+
 	p = te.start(ref, sh(`trap '' TERM; echo ready; sleep 30`))
 	waitFor(t, p, "ready", 10*time.Second)
 	t0 := time.Now()

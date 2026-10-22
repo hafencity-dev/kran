@@ -73,7 +73,8 @@ type manager struct {
 	jobsMu sync.Mutex
 	jobs   map[string]*jobState
 
-	env        *hostEnv
+	env        *hostEnv // guarded by rtMu after construction (Refresh replaces it)
+	refreshed  bool
 	systemdRun string // path when transient user scopes work, else ""
 
 	rtMu     sync.Mutex
@@ -216,10 +217,22 @@ func (m *manager) Runtimes(ctx context.Context) []proto.Runtime {
 }
 
 func (m *manager) Refresh(ctx context.Context) error {
+	m.rtMu.Lock()
+	again := m.refreshed
+	m.refreshed = true
+	m.rtMu.Unlock()
+	if m.tun.probe && again {
+		// Toolchains change when the node owner installs or upgrades them.
+		env := captureHostEnv(ctx)
+		m.rtMu.Lock()
+		m.env = env
+		m.rtMu.Unlock()
+	}
+	env := m.hostEnv()
 	native := proto.Runtime{
 		Kind: proto.RuntimeNative, OS: runtime.GOOS, Arch: runtime.GOARCH,
 		CPUs: runtime.NumCPU(), Mem: memTotal(), Available: true,
-		Toolchains: copyMap(m.env.tools),
+		Toolchains: copyMap(env.tools),
 	}
 	dk, reason := m.probeDocker(ctx)
 	native.Docker = dk != nil
@@ -231,6 +244,12 @@ func (m *manager) Refresh(ctx context.Context) error {
 	m.runtimes, m.dk, m.dkReason = rts, dk, reason
 	m.rtMu.Unlock()
 	return nil
+}
+
+func (m *manager) hostEnv() *hostEnv {
+	m.rtMu.Lock()
+	defer m.rtMu.Unlock()
+	return m.env
 }
 
 func copyMap(in map[string]string) map[string]string {
@@ -468,7 +487,8 @@ func (m *manager) Start(ctx context.Context, req StartRequest) (Process, error) 
 // nativeSpec fills spec for the native runtime.
 func (m *manager) nativeSpec(spec *superSpec, req *StartRequest, s *slot, dir string) error {
 	root := m.pool.hostPath(s)
-	tp, err := planToolchains(m.env, req.Spec.Req.Toolchains, m.opts.NodeName)
+	he := m.hostEnv()
+	tp, err := planToolchains(he, req.Spec.Req.Toolchains, m.opts.NodeName)
 	if err != nil {
 		return err
 	}
@@ -477,8 +497,8 @@ func (m *manager) nativeSpec(spec *superSpec, req *StartRequest, s *slot, dir st
 	if err := os.Mkdir(tmp, 0o700); err != nil {
 		return fmt.Errorf("job tmp: %w", err)
 	}
-	spec.Env = nativeEnv(m.env, req, m.opts.NodeName, root, tmp, tp)
-	spec.Argv = nativeArgv(req.Spec.Argv, m.env.path, tp, m.env.mise)
+	spec.Env = nativeEnv(he, req, m.opts.NodeName, root, tmp, tp)
+	spec.Argv = nativeArgv(req.Spec.Argv, he.path, tp, he.mise)
 	rel := path.Clean("/" + req.Spec.Workspace.Rel)[1:]
 	spec.Dir = filepath.Join(root, filepath.FromSlash(rel))
 	if err := os.MkdirAll(spec.Dir, 0o755); err != nil {
@@ -487,8 +507,8 @@ func (m *manager) nativeSpec(spec *superSpec, req *StartRequest, s *slot, dir st
 	if st := m.setupFor(req, s, root); st != nil {
 		st.Argv = []string{"/bin/sh", "-c", st.Run}
 		st.Dir = root
-		if len(tp.mise) > 0 && m.env.mise != "" {
-			st.Argv = append(append(append([]string{m.env.mise, "exec"}, tp.mise...), "--"), st.Argv...)
+		if len(tp.mise) > 0 && he.mise != "" {
+			st.Argv = append(append(append([]string{he.mise, "exec"}, tp.mise...), "--"), st.Argv...)
 		}
 		spec.Setup = st
 	}

@@ -116,7 +116,9 @@ func cleanupDocker(te *testEnv) {
 const ctrRoot = "/work/kran-test/proj"
 
 // noHeartbeat lets the job's lease expire.
-func noHeartbeat() jobOpt { return func(r *StartRequest) { r.Spec.Labels = map[string]string{"test.noheartbeat": "1"} } }
+func noHeartbeat() jobOpt {
+	return func(r *StartRequest) { r.Spec.Labels = map[string]string{"test.noheartbeat": "1"} }
+}
 
 func (te *testEnv) startCtr(ref proto.SlotRef, argv []string, opts ...jobOpt) Process {
 	te.t.Helper()

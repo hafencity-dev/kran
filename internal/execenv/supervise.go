@@ -59,7 +59,9 @@ type supervisor struct {
 	mu         sync.Mutex
 	cmd        *exec.Cmd // running step, nil between steps
 	pgid       int
-	ptmx       *os.File
+	ptmx       *os.File // job terminal (TTY jobs), created before the job starts
+	ptySlave   *os.File
+	stdinR     *os.File // job stdin pipe (Stdin jobs), created before the job starts
 	stdinW     *os.File
 	stdinEOF   bool
 	container  string // container of the running step (docker)
@@ -140,6 +142,12 @@ func (s *supervisor) run() int {
 		return 1
 	}
 	defer s.closeAll()
+	if err := s.prepareStdio(); err != nil {
+		exit.State, exit.Code, exit.BeforeStart = proto.JobInfraErr, proto.ExitInfra, true
+		exit.Reason = fmt.Sprintf("kran could not start the job on %s: %v", s.spec.Node, err)
+		s.writeStatus(exit)
+		return 1
+	}
 
 	ev := event{Ev: "ready", PID: os.Getpid()}
 	if s.cg != nil {
@@ -196,6 +204,28 @@ func (s *supervisor) open() error {
 		}
 		os.Chmod(s.spec.CtlPath, 0o600)
 		go s.serveCtl()
+	}
+	return nil
+}
+
+// prepareStdio creates the job's terminal or stdin pipe before reporting
+// ready, so input and resizes sent right after Start are never lost: they
+// wait in the pipe or the terminal until the command reads them.
+func (s *supervisor) prepareStdio() error {
+	switch {
+	case s.spec.TTY != nil:
+		m, t, err := pty.Open()
+		if err != nil {
+			return fmt.Errorf("pty: %w", err)
+		}
+		pty.Setsize(m, &pty.Winsize{Rows: s.spec.TTY.Rows, Cols: s.spec.TTY.Cols})
+		s.ptmx, s.ptySlave = m, t
+	case s.spec.Stdin:
+		r, w, err := os.Pipe()
+		if err != nil {
+			return fmt.Errorf("stdin pipe: %w", err)
+		}
+		s.stdinR, s.stdinW = r, w
 	}
 	return nil
 }
@@ -259,26 +289,18 @@ func (s *supervisor) runStep(setup bool) stepResult {
 	if err != nil {
 		return startFailure(err)
 	}
-	tty := !setup && s.spec.TTY != nil
+	tty := !setup && s.ptySlave != nil
 	var (
 		readers  sync.WaitGroup
 		closers  []*os.File
-		ptmx     *os.File
-		stdinW   *os.File
 		cgBefore cgUsage
 	)
 	attr := &syscall.SysProcAttr{Setsid: true}
 	if tty {
-		m, t, err := pty.Open()
-		if err != nil {
-			return startFailure(fmt.Errorf("pty: %w", err))
-		}
-		pty.Setsize(m, &pty.Winsize{Rows: s.spec.TTY.Rows, Cols: s.spec.TTY.Cols})
-		cmd.Stdin, cmd.Stdout, cmd.Stderr = t, t, t
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = s.ptySlave, s.ptySlave, s.ptySlave
 		attr.Setctty = true
 		attr.Ctty = 0
-		ptmx = m
-		closers = append(closers, t)
+		closers = append(closers, s.ptySlave)
 	} else {
 		outR, outW, err := os.Pipe()
 		if err != nil {
@@ -293,42 +315,34 @@ func (s *supervisor) runStep(setup bool) stepResult {
 		readers.Add(2)
 		go s.pump(&readers, outR, proto.FrameStdout, true)
 		go s.pump(&readers, errR, proto.FrameStderr, true)
-		if !setup && s.spec.Stdin {
-			inR, inW, err := os.Pipe()
-			if err != nil {
-				return startFailure(err)
-			}
-			cmd.Stdin = inR
-			closers = append(closers, inR)
-			stdinW = inW
+		if !setup && s.stdinR != nil {
+			cmd.Stdin = s.stdinR
+			closers = append(closers, s.stdinR)
 		}
 	}
 	cmd.SysProcAttr = attr
 	if s.cg != nil {
 		cgBefore = s.cg.usage()
 	}
-	if err := s.startCmd(cmd); err != nil {
-		for _, c := range closers {
-			c.Close()
-		}
-		if ptmx != nil {
-			ptmx.Close()
-		}
-		if stdinW != nil {
-			stdinW.Close()
-		}
-		readers.Wait()
-		return startFailure(err)
-	}
+	err = s.startCmd(cmd)
 	for _, c := range closers {
 		c.Close()
 	}
-	if ptmx != nil {
+	if !setup {
+		s.mu.Lock()
+		s.ptySlave, s.stdinR = nil, nil
+		s.mu.Unlock()
+	}
+	if err != nil {
+		readers.Wait()
+		return startFailure(err)
+	}
+	if tty {
 		readers.Add(1)
-		go s.pump(&readers, ptmx, proto.FrameStdout, false)
+		go s.pump(&readers, s.ptmx, proto.FrameStdout, false)
 	}
 	s.mu.Lock()
-	s.cmd, s.pgid, s.ptmx, s.stdinW, s.container = cmd, cmd.Process.Pid, ptmx, stdinW, name
+	s.cmd, s.pgid, s.container = cmd, cmd.Process.Pid, name
 	killing := s.killReason != ""
 	s.mu.Unlock()
 	if killing {
@@ -369,10 +383,14 @@ func (s *supervisor) runStep(setup bool) stepResult {
 		s.logf("output still open after the job ended; closing")
 	}
 	s.mu.Lock()
-	s.cmd, s.ptmx, s.container = nil, nil, ""
-	if s.stdinW != nil {
-		s.stdinW.Close()
-		s.stdinW = nil
+	s.cmd, s.container = nil, ""
+	var ptmx *os.File
+	if !setup {
+		if s.stdinW != nil {
+			s.stdinW.Close()
+			s.stdinW = nil
+		}
+		ptmx, s.ptmx = s.ptmx, nil
 	}
 	s.mu.Unlock()
 	if ptmx != nil {
@@ -508,11 +526,23 @@ func (s *supervisor) killTree(grace time.Duration) {
 	default:
 		if grace > 0 {
 			syscall.Kill(-pgid, syscall.SIGTERM)
-			signalProcs(jobProcs(pgid, pgid, s.spec.JobID, true), syscall.SIGTERM)
-			waitUntil(func() bool { return len(jobProcs(pgid, pgid, s.spec.JobID, true)) == 0 }, grace)
+			ps := jobProcs(pgid, pgid, s.spec.JobID, true)
+			signalProcs(ps, syscall.SIGTERM)
+			waitUntil(func() bool { return !anyAlive(ps) }, grace)
 		}
 		s.sweepKill(pgid)
 	}
+}
+
+// anyAlive reports whether any of ps still runs (cheap: one kill(0) each,
+// unlike a fresh process-table sweep).
+func anyAlive(ps []procInfo) bool {
+	for _, p := range ps {
+		if alive(p.pid) {
+			return true
+		}
+	}
+	return false
 }
 
 // sweepKill SIGKILLs the job tree repeatedly until nothing is left (a
@@ -545,7 +575,7 @@ func (s *supervisor) killLeftovers(pgid int) {
 		}
 		syscall.Kill(-pgid, syscall.SIGTERM)
 		signalProcs(ps, syscall.SIGTERM)
-		waitUntil(func() bool { return len(jobProcs(pgid, pgid, s.spec.JobID, true)) == 0 }, time.Second)
+		waitUntil(func() bool { return !anyAlive(ps) }, time.Second)
 		s.sweepKill(pgid)
 	}
 }

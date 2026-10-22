@@ -87,11 +87,12 @@ func (m *manager) probeDocker(ctx context.Context) (*dockerEnv, string) {
 	if !m.tun.probeDocker {
 		return nil, "docker probing disabled"
 	}
-	cli := findDockerCLI(m.env.path, m.env.home)
+	he := m.hostEnv()
+	cli := findDockerCLI(he.path, he.home)
 	if cli == "" {
 		return nil, "Docker is not installed on " + m.opts.NodeName
 	}
-	base := []string{"PATH=" + m.env.path, "HOME=" + m.env.home, "DOCKER_CLI_HINTS=false"}
+	base := []string{"PATH=" + he.path, "HOME=" + he.home, "DOCKER_CLI_HINTS=false"}
 	if v := os.Getenv("DOCKER_CONFIG"); v != "" {
 		base = append(base, "DOCKER_CONFIG="+v)
 	}
