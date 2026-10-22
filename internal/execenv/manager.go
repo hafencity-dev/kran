@@ -191,9 +191,12 @@ func (m *manager) reindex() {
 			continue
 		}
 		js := m.track(spec.JobID, dir, spec, nil)
+		// The slot stays busy across the restart; the daemon releases it
+		// with its persisted SlotRef once the job ended (and the reaper
+		// frees it if nobody does within slotHoldIdle).
 		if sl := m.pool.markBusy(spec.Slot, spec.JobID); sl != nil {
 			js.mu.Lock()
-			js.slot, js.autoFree = sl, true
+			js.slot = sl
 			js.mu.Unlock()
 		}
 		m.logf("re-attached running job %s", spec.JobID)
@@ -611,6 +614,16 @@ func (m *manager) Active() []string {
 
 func (m *manager) Run(ctx context.Context) error {
 	m.Reap(ctx)
+	// Build the runner image (minutes on first use) in the background so
+	// the first container job does not hit the daemon's prestart timeout;
+	// until it is ready such jobs fall back to running locally.
+	if dk, _ := m.docker(); dk != nil && m.containerSetting() != "off" {
+		go func() {
+			if err := m.ensureContainerReady(ctx, nil); err != nil && ctx.Err() == nil {
+				m.logf("container runtime: %v", err)
+			}
+		}()
+	}
 	reap := time.NewTicker(m.tun.reapEvery)
 	defer reap.Stop()
 	trim := time.NewTicker(m.tun.trimEvery)

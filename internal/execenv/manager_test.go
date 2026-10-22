@@ -536,9 +536,14 @@ func TestReattachByOffset(t *testing.T) {
 	if rest3 != rest[3:] {
 		t.Fatal("mid-frame offset")
 	}
-	// The restarted manager released the re-indexed job's slot by itself.
+	// The slot stayed busy across the restart until the daemon releases it
+	// with its persisted ref.
+	if _, err := m2.pool.lookup(ref); err != nil {
+		t.Fatalf("slot of re-indexed job not busy: %v", err)
+	}
+	m2.ReleaseSlot(ref)
 	if _, err := m2.pool.lookup(ref); err == nil {
-		t.Fatal("slot of re-indexed job not released after exit")
+		t.Fatal("slot not released")
 	}
 }
 
