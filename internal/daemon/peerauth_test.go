@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"net"
 	"testing"
 	"time"
 
@@ -100,5 +101,47 @@ func TestFinishedJobStoredWithoutEnv(t *testing.T) {
 	})
 	if j := storedJob(t, a, res.jobID); len(j.Spec.Env) != 0 {
 		t.Fatalf("finished job stored with env %v", j.Spec.Env)
+	}
+}
+
+// dialAs connects to n's peer socket handler like `kran serve --stdio
+// --peer <bound>` would.
+func dialAs(t *testing.T, n *testNode, bound string) transport.Session {
+	t.Helper()
+	cli, srv := net.Pipe()
+	go n.daemon().ServePeerConn(srv)
+	if bound != "" {
+		go cli.Write([]byte("kran-peer " + bound + "\n"))
+	}
+	s, err := transport.Client(cli, testSessionConfig(), "pipe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
+// The name the key was linked as wins over what the hello claims.
+func TestForcedCommandNameBindsIdentity(t *testing.T) {
+	c := newCluster(t, "a", "b", "c")
+	b := c.nodes["b"]
+	b.start()
+	ctx := context.Background()
+	sa := helloAs(t, c, "a", "b")
+	if err := peerOneShot(ctx, sa, proto.PeerAdmit, "job1", admitBody{Alloc: proto.Resources{CPUs: 1, Mem: 1 << 30}, Runtime: proto.RuntimeNative}, nil); err != nil {
+		t.Fatal(err)
+	}
+	// c's key, claiming to be a.
+	sc := dialAs(t, b, "c")
+	if err := peerOneShot(ctx, sc, proto.PeerHello, "", proto.Hello{Node: proto.NodeInfo{Name: "a", ID: "a-id"}, Protocol: protocolString()}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := peerOneShot(ctx, sc, proto.PeerJobCancel, "job1", nil, nil); peerCode(err) != codeUnknownJob {
+		t.Fatalf("c posing as a canceled a's job: %v", err)
+	}
+	// A key linked under a name that is no longer in peers.toml.
+	sx := dialAs(t, b, "x")
+	if err := peerOneShot(ctx, sx, proto.PeerHello, "", proto.Hello{Node: proto.NodeInfo{Name: "a"}, Protocol: protocolString()}, nil); err == nil {
+		t.Fatal("unlinked key accepted")
 	}
 }

@@ -65,7 +65,10 @@ targets linux/darwin × arm64/amd64.
 * **daemon ↔ daemon:** one SSH connection per peer (Go `x/crypto/ssh` client),
   authenticated with kran's own key `~/.config/kran/id_ed25519`. On the peer,
   `authorized_keys` pins that key to a forced command:
-  `command="<abs path>/kran serve --stdio",restrict ssh-ed25519 … kran@<node>`.
+  `command="<abs path>/kran serve --stdio --peer <name>",restrict ssh-ed25519 … kran@<node>`.
+  `--peer` is the name the key was linked as; the bridge passes it to the
+  daemon ahead of the yamux bytes and the session is bound to it (the
+  peer's own hello cannot claim another linked node's name).
   `kran serve --stdio` connects stdin/stdout to the peer daemon's peer socket
   (`kran-peer.sock`), so all traffic is multiplexed by **yamux** over that one
   stdio stream. The kran key can do nothing except speak kran protocol.

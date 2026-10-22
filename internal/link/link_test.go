@@ -119,12 +119,12 @@ func TestLinkEndToEnd(t *testing.T) {
 	// keys: each side authorizes the other's kran key with a forced command and the tag
 	ours, _ := config.PublicKey()
 	ra := w.readFile(w.remoteAuthKeys())
-	if !strings.Contains(ra, `command="`+filepath.Join(w.remoteHome, "bin", "kran")+` serve --stdio",restrict `) ||
+	if !strings.Contains(ra, `command="`+filepath.Join(w.remoteHome, "bin", "kran")+` serve --stdio --peer gx-local",restrict `) ||
 		!strings.Contains(ra, keyBlob(ours)) || !strings.HasSuffix(strings.TrimSpace(ra), "kran@gx-local kran-dev") {
 		t.Fatalf("remote authorized_keys:\n%s", ra)
 	}
 	la := w.readFile(w.localAuthKeys())
-	if !strings.Contains(la, `command="`+w.self+` serve --stdio",restrict `) || !strings.HasSuffix(strings.TrimSpace(la), "kran@devbox kran-dev") {
+	if !strings.Contains(la, `command="`+w.self+` serve --stdio --peer devbox",restrict `) || !strings.HasSuffix(strings.TrimSpace(la), "kran@devbox kran-dev") {
 		t.Fatalf("local authorized_keys:\n%s", la)
 	}
 	// peers.toml on both sides

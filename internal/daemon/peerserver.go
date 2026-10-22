@@ -25,6 +25,9 @@ type peerSession struct {
 	mu      sync.Mutex
 	remote  string
 	inbound bool
+	// bound is the name the peer's key was linked as, from the forced
+	// command ("" for links made by an older kran).
+	bound string
 }
 
 func (ps *peerSession) name() string {
@@ -40,14 +43,22 @@ func (d *Daemon) ServePeerConn(c net.Conn) {
 		c.Close()
 		return
 	}
-	s, err := transport.Server(c, d.deps.Session, "peer")
+	c.SetReadDeadline(time.Now().Add(30 * time.Second))
+	bound, rc, err := transport.ReadPeerName(c)
+	if err != nil {
+		d.logf("peer: %v", err)
+		c.Close()
+		return
+	}
+	c.SetReadDeadline(time.Time{})
+	s, err := transport.Server(rc, d.deps.Session, "peer")
 	if err != nil {
 		d.logf("peer: %v", err)
 		return
 	}
 	untrack := d.trackSession(s)
 	defer untrack()
-	ps := &peerSession{s: s, inbound: true}
+	ps := &peerSession{s: s, inbound: true, bound: bound}
 	d.acceptStreams(ps)
 }
 
@@ -140,7 +151,12 @@ func (d *Daemon) handleHello(ps *peerSession, pc *peerConn, req rawPeerRequest) 
 	// same name an outbound session to them carries), so jobs stay bound
 	// to their origin whichever session it uses.
 	name := h.Node.Name
-	if ps.inbound {
+	if ps.inbound && ps.bound != "" { // the key's linked name, whatever hello says
+		if name = d.peers.linkedName(ps.bound, ""); name == "" {
+			pc.fail(codeNotLinked, "%s is not linked with %s any more; run kran link", ps.bound, d.self)
+			return
+		}
+	} else if ps.inbound {
 		if name = d.peers.linkedName(h.Node.Name, h.Node.ID); name == "" {
 			pc.fail(codeNotLinked, "%s is not linked with %s; run kran link", h.Node.Name, d.self)
 			return

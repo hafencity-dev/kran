@@ -10,6 +10,7 @@ import (
 
 	"github.com/hafencity-dev/kran/internal/config"
 	"github.com/hafencity-dev/kran/internal/paths"
+	"github.com/hafencity-dev/kran/internal/transport"
 )
 
 // AuthorizedKeysLine renders the forced-command entry for a kran public key:
@@ -19,6 +20,20 @@ import (
 // pubKey may be a full "type blob comment" line. The key can then do nothing
 // except speak the kran protocol (SPEC §3).
 func AuthorizedKeysLine(kranPath, pubKey, tag string) string {
+	return keyLine(kranPath, "", pubKey, tag)
+}
+
+// PeerKeyLine is AuthorizedKeysLine for a key linked as peer: the forced
+// command becomes `<kranPath> serve --stdio --peer <peer>`, so the daemon
+// binds the session to that linked name instead of trusting the hello.
+func PeerKeyLine(kranPath, peer, pubKey, tag string) string {
+	if !transport.ValidPeerName(peer) {
+		return ""
+	}
+	return keyLine(kranPath, peer, pubKey, tag)
+}
+
+func keyLine(kranPath, peer, pubKey, tag string) string {
 	f := strings.Fields(pubKey)
 	if len(f) < 2 || hasControl(kranPath+tag+strings.Join(f, " ")) { // a newline would start another key line
 		return ""
@@ -36,8 +51,12 @@ func AuthorizedKeysLine(kranPath, pubKey, tag string) string {
 	if !plainPath.MatchString(cmd) {
 		cmd = shq(cmd)
 	}
+	cmd += " serve --stdio"
+	if peer != "" {
+		cmd += " --peer " + peer
+	}
 	esc := strings.ReplaceAll(cmd, `"`, `\"`)
-	return fmt.Sprintf(`command="%s serve --stdio",restrict %s %s %s`, esc, f[0], f[1], comment)
+	return fmt.Sprintf(`command="%s",restrict %s %s %s`, esc, f[0], f[1], comment)
 }
 
 var plainPath = regexp.MustCompile(`^[A-Za-z0-9_./+:@,=-]+$`)

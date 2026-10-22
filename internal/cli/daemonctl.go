@@ -56,6 +56,7 @@ Normally the service manager runs this for you (kran service install).`,
 
 func (a *App) serveCommand() *cobra.Command {
 	var stdio bool
+	var peer string
 	cmd := &cobra.Command{
 		Use:    "serve --stdio",
 		Short:  "Serve the peer protocol on stdin/stdout (used by linked machines over SSH)",
@@ -67,13 +68,14 @@ func (a *App) serveCommand() *cobra.Command {
 			}
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
-			if code := transport.ServeStdio(ctx); code != 0 {
+			if code := transport.ServeStdioAs(ctx, peer); code != 0 {
 				return &ExitError{Code: code}
 			}
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&stdio, "stdio", false, "bridge stdin/stdout to the local daemon's peer socket")
+	cmd.Flags().StringVar(&peer, "peer", "", "the linked name of the machine this key belongs to (written by kran link)")
 	return cmd
 }
 

@@ -201,3 +201,20 @@ func TestForcedCommandThroughShell(t *testing.T) {
 		}
 	}
 }
+
+// The forced command carries the name the key is linked as, so the daemon
+// knows which linked machine a session belongs to whatever its hello says.
+func TestPeerKeyLineNamesThePeer(t *testing.T) {
+	got := PeerKeyLine("/k", "devmac", keyA, "")
+	if !strings.HasPrefix(got, `command="/k serve --stdio --peer devmac",restrict `) {
+		t.Fatal(got)
+	}
+	if al, ok := parseAuthLine(got); !ok || !al.isKran() {
+		t.Fatalf("%+v", al)
+	}
+	for _, bad := range []string{"Dev Mac", "a;b", "-x", ""} {
+		if got := PeerKeyLine("/k", bad, keyA, ""); got != "" {
+			t.Errorf("peer %q gave %q", bad, got)
+		}
+	}
+}

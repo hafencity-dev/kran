@@ -78,7 +78,7 @@ func TestInternalAcceptForget(t *testing.T) {
 	home, _ := os.UserHomeDir()
 	ak := filepath.Join(home, ".ssh", "authorized_keys")
 	exe, _ := selfExe()
-	want := AuthorizedKeysLine(exe, keyA, "kran-dev") + "\n"
+	want := PeerKeyLine(exe, "devmac", keyA, "kran-dev") + "\n"
 	if b, _ := os.ReadFile(ak); string(b) != want {
 		t.Fatalf("%q want %q", b, want)
 	}
