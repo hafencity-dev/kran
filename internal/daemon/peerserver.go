@@ -208,6 +208,9 @@ func (t *targetSide) begin(id string) (*tjob, error) {
 	if j.started {
 		return nil, &peerError{Code: codeJobStarted, Msg: fmt.Sprintf("job %s already started on %s", id, t.d.self)}
 	}
+	if j.canceled {
+		return nil, &peerError{Code: codeUnknownJob, Msg: fmt.Sprintf("job %s was canceled on %s", id, t.d.self)}
+	}
 	j.busy++
 	return j, nil
 }
@@ -216,6 +219,9 @@ func (t *targetSide) end(j *tjob) {
 	t.mu.Lock()
 	j.busy--
 	j.reservedAt = t.d.now()
+	if j.canceled && j.busy == 0 && !j.started {
+		t.releaseLocked(j, "canceled by origin")
+	}
 	t.mu.Unlock()
 }
 
@@ -462,8 +468,8 @@ func (t *targetSide) handleSlotCommit(pc *peerConn, req rawPeerRequest) {
 
 func (t *targetSide) handleSlotRelease(pc *peerConn, req rawPeerRequest) {
 	t.mu.Lock()
-	if j := t.jobs[req.JobID]; j != nil && !j.started {
-		t.releaseLocked(j, "released by origin")
+	if j := t.jobs[req.JobID]; j != nil {
+		t.cancelLocked(j, "released by origin")
 	}
 	t.mu.Unlock()
 	t.d.publishSelf()
@@ -510,9 +516,18 @@ func (t *targetSide) handleJobStart(ps *peerSession, pc *peerConn, req rawPeerRe
 	t.mu.Lock()
 	j.busy--
 	j.started = true
+	canceled := j.canceled
 	t.persistLocked()
+	// From here watch owns the slot and the allocation, also for a job the
+	// origin canceled while it was starting.
 	t.startWatchLocked(j)
 	t.mu.Unlock()
+	if canceled {
+		t.d.logf("target: job %s from %s was canceled while it started; stopping it", j.ID, j.Origin)
+		t.cancelProc(j, proc)
+		pc.fail(codeUnknownJob, "job %s was canceled on %s", j.ID, t.d.self)
+		return
+	}
 	t.d.logf("target: started job %s from %s", j.ID, j.Origin)
 	t.d.publishSelf()
 	if err := pc.respond(nil); err != nil {
@@ -567,11 +582,14 @@ func (t *targetSide) handleJobControl(pc *peerConn, req rawPeerRequest) {
 		pc.fail(codeUnknownJob, "%s has no job %s", t.d.self, req.JobID)
 		return
 	}
-	if !j.started {
+	t.mu.Lock()
+	started := j.started
+	if !started && req.Method == proto.PeerJobCancel {
+		t.cancelLocked(j, "canceled by origin")
+	}
+	t.mu.Unlock()
+	if !started {
 		if req.Method == proto.PeerJobCancel {
-			t.mu.Lock()
-			t.releaseLocked(j, "canceled by origin")
-			t.mu.Unlock()
 			t.d.publishSelf()
 		}
 		pc.respond(nil)

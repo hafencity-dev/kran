@@ -414,6 +414,8 @@ type fakeExec struct {
 	startErr    error
 	acquireGate chan struct{} // AcquireSlot blocks until closed (nil = no wait)
 	putBlobGate chan struct{}
+	startGate   chan struct{} // Start blocks until closed (nil = no wait); starting counts entries
+	starting    int
 	putBlobs    int
 	acquires    int
 	releases    int
@@ -452,6 +454,18 @@ func (x *fakeExec) AcquireSlot(ctx context.Context, repoID, hint string, rt prot
 		}
 	}
 	return proto.SlotRef{}, errors.New("all slots busy")
+}
+
+func (x *fakeExec) counts() (starting, acquires, releases int) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	return x.starting, x.acquires, x.releases
+}
+
+func (x *fakeExec) proc(id string) *fakeProc {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	return x.procs[id]
 }
 
 func (x *fakeExec) heldSlots() int {
@@ -534,6 +548,15 @@ func (x *fakeExec) ReleaseSlot(slot proto.SlotRef) {
 }
 
 func (x *fakeExec) Start(ctx context.Context, req execenv.StartRequest) (execenv.Process, error) {
+	x.mu.Lock()
+	x.starting++
+	gate := x.startGate
+	x.mu.Unlock()
+	if gate != nil {
+		// Like a container image build on first use: Start outlives the
+		// origin's interest; it does not watch ctx for the origin.
+		<-gate
+	}
 	x.mu.Lock()
 	err := x.startErr
 	x.mu.Unlock()

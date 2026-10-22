@@ -38,10 +38,13 @@ type tjob struct {
 	sess       transport.Session // session that admitted it
 	reservedAt time.Time
 	busy       int // in-flight prestart operations (holds the reservation)
-	started    bool
-	ended      bool
-	endedAt    time.Time
-	watching   bool
+	// canceled: the origin gave the job up while an operation was in
+	// flight; the last one to finish releases (or stops) it.
+	canceled bool
+	started  bool
+	ended    bool
+	endedAt  time.Time
+	watching bool
 
 	attachMu sync.Mutex // serializes attaching through execenv
 	procMu   sync.Mutex // guards proc and phase
@@ -206,6 +209,21 @@ func runtimeInfo(info proto.NodeInfo, rt proto.RuntimeKind) *proto.Runtime {
 		}
 	}
 	return nil
+}
+
+// cancelLocked drops a reservation the origin gave up. With an operation
+// in flight (slot.acquire, commit, job.start …) the slot is still in use:
+// the operation releases it when it ends (end), or stops the job it
+// started (handleJobStart).
+func (t *targetSide) cancelLocked(j *tjob, why string) {
+	if j.started {
+		return
+	}
+	if j.busy > 0 {
+		j.canceled = true
+		return
+	}
+	t.releaseLocked(j, why)
 }
 
 // releaseLocked drops a reservation that never started.
