@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -81,10 +82,13 @@ func (b binarySource) download(ctx context.Context, goos, goarch, dest string) (
 }
 
 // fetch downloads release `version` for goos/goarch into the binary cache
-// (cache hit returns immediately), verifying checksums.txt when the release
-// has one.
+// (cache hit returns immediately), verifying it against the release's
+// checksums.txt.
 func (b binarySource) fetch(ctx context.Context, version, goos, goarch string) (string, error) {
 	ver := strings.TrimPrefix(version, "v")
+	if !releaseVersion.MatchString(ver) { // it becomes a cache path and a gh argument
+		return "", fmt.Errorf("%q is not a release version (like 1.4.0)", version)
+	}
 	dest := paths.BinaryCache(ver, goos, goarch)
 	if st, err := os.Stat(dest); err == nil && st.Mode().IsRegular() {
 		return dest, nil
@@ -122,13 +126,18 @@ func (b binarySource) fetch(ctx context.Context, version, goos, goarch string) (
 	if _, err := os.Stat(sums); err != nil {
 		haveSums = false
 	}
-	if haveSums {
-		if err := verifyChecksum(sums, tgz, asset); err != nil {
-			return "", err
-		}
+	// Fail closed like install.sh: this binary is pushed to and run on
+	// every linked machine.
+	if !haveSums {
+		return "", fmt.Errorf("release v%s has no checksums.txt (or it could not be downloaded), so %s cannot be verified; try again", ver, asset)
+	}
+	if err := verifyChecksum(sums, tgz, asset); err != nil {
+		return "", err
 	}
 	return dest, extractKran(tgz, dest)
 }
+
+var releaseVersion = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$`)
 
 func (b binarySource) token() string {
 	if b.o.GitHubToken != "" {
@@ -160,7 +169,7 @@ func verifyChecksum(sumsFile, file, asset string) error {
 			return nil
 		}
 	}
-	return nil // asset not listed: nothing to verify against
+	return fmt.Errorf("%s is not listed in the release's checksums.txt, so it cannot be verified", asset)
 }
 
 func firstEnv(keys ...string) string {
