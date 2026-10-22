@@ -296,6 +296,81 @@ echo "tmp=$(stat -c %a /tmp) tmpdir=$TMPDIR"; d=$(mktemp -d) && echo x > "$d/f" 
 
 	// A /tmp volume whose container was removed without it: the reaper
 	// removes it, and nothing else.
+	// After an upgrade the old runner image goes once nothing works on it:
+	// its sync helper and stopped containers are removed first.
+	t.Run("old-runner-image", func(t *testing.T) {
+		dk, _ := te.m.docker()
+		ctx := context.Background()
+		if err := te.m.ensureContainerReady(ctx, nil); err != nil {
+			t.Fatal(err)
+		}
+		old := te.m.ns + "-runner:0.0.1-old"
+		if _, err := dk.run(ctx, []byte("FROM "+te.m.imageTag()+"\nLABEL kran.test.old=1\n"), "build", "--quiet", "--tag", old, "--label", "kran.ns="+te.m.ns, "-"); err != nil {
+			t.Fatal(err)
+		}
+		defer dk.run(ctx, nil, "image", "rm", "--force", old)
+		syncName := te.m.ns + "-oldsync-" + newJobID()
+		if _, err := dk.run(ctx, nil, "run", "--detach", "--name", syncName, "--label", "kran.ns="+te.m.ns, "--label", "kran.role=sync", old, "sleep", "300"); err != nil {
+			t.Fatal(err)
+		}
+		stopped := te.m.ns + "-oldstopped-" + newJobID()
+		if _, err := dk.run(ctx, nil, "create", "--name", stopped, "--label", "kran.ns="+te.m.ns, old, "true"); err != nil {
+			t.Fatal(err)
+		}
+		te.m.img.mu.Lock()
+		te.m.img.lastPruned = time.Time{}
+		te.m.img.mu.Unlock()
+		if err := te.m.pruneImages(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := dk.run(ctx, nil, "image", "inspect", old); err == nil {
+			t.Errorf("old runner image kept:\n%s", te.log.String())
+		}
+		assertNoContainer(t, te, syncName)
+		assertNoContainer(t, te, stopped)
+		if _, err := dk.run(ctx, nil, "image", "inspect", te.m.imageTag()); err != nil {
+			t.Errorf("current image removed: %v", err)
+		}
+	})
+
+	// Under disk pressure idle slots go, least recently used first; the
+	// slot in use stays. (A huge reserve stands in for a full disk.)
+	t.Run("disk-pressure-slots", func(t *testing.T) {
+		ctx := context.Background()
+		const repo2 = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+		idle, err := te.m.AcquireSlot(ctx, repo2, "wt", proto.RuntimeContainer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		te.commit(idle, repo2, map[string]string{"big": "data"})
+		te.m.ReleaseSlot(idle)
+		te.m.opts.DiskReserve = 1 << 62
+		if volume {
+			te.m.reclaimVolumeSlots(ctx, true)
+		} else {
+			te.m.reclaimHostSlots(ctx)
+		}
+		te.m.opts.DiskReserve = 1
+		if !strings.Contains(te.log.String(), "removing idle slot "+short(repo2)) {
+			t.Fatalf("idle slot not removed:\n%s", te.log.String())
+		}
+		if strings.Contains(te.log.String(), "removing idle slot "+short(testRepo)) {
+			t.Fatal("the slot in use was removed")
+		}
+		p := te.startCtr(ref, sh(`cat f.txt`))
+		if exit := waitExit(t, p, 60*time.Second); exit.Code != 0 {
+			t.Fatalf("busy slot broken: %+v", exit)
+		}
+		if volume {
+			dk, _ := te.m.docker()
+			if _, err := dk.run(ctx, nil, "exec", te.m.syncName(), "test", "-e", ctrSlots+"/"+idle.Path); err == nil {
+				t.Error("idle slot still in the volume")
+			}
+		} else if _, err := os.Stat(idle.Path); err == nil {
+			t.Error("idle slot still on disk")
+		}
+	})
+
 	t.Run("tmp-volume-reaper", func(t *testing.T) {
 		dk, _ := te.m.docker()
 		ctx := context.Background()

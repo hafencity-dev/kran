@@ -8,6 +8,7 @@ import (
 	_ "embed"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -247,12 +248,31 @@ func (m *manager) pruneImages(ctx context.Context) error {
 		return fmt.Errorf("list runner images: %w", err)
 	}
 	stale := staleRunnerImages(string(out), m.ns+"-runner", m.imageTag())
+	m.pruneStoppedContainers(ctx, dk)
+	kept := false
+	cur := m.imageID(ctx, dk, m.imageTag())
 	for _, ref := range stale {
+		// Another tag of the current image only goes as a tag: the
+		// containers on it are the current ones.
+		if id := m.imageID(ctx, dk, ref); id != "" && id != cur {
+			if busy := m.releaseImage(ctx, dk, ref); busy != "" {
+				m.logf("reaper: keeping %s while %s runs on it", ref, busy)
+				kept = true
+				continue
+			}
+		}
 		if _, err := dk.run(ctx, nil, "image", "rm", ref); err != nil {
 			m.logf("reaper: keeping %s: %v", ref, err)
+			kept = true
 			continue
 		}
 		m.logf("reaper: removed old runner image %s", ref)
+	}
+	if kept {
+		// A job of the old version still runs: try again soon.
+		m.img.mu.Lock()
+		m.img.lastPruned = m.now().Add(imageRetryAfter - imagePruneEvery)
+		m.img.mu.Unlock()
 	}
 	// Rebuilds of the same tag (a new kran binary, a changed Dockerfile)
 	// leave the old image dangling.
@@ -261,8 +281,95 @@ func (m *manager) pruneImages(ctx context.Context) error {
 	} else if r := pruneSummary(string(out)); r != "" {
 		m.logf("reaper: removed dangling runner images: %s", r)
 	}
-	m.pruneStoppedContainers(ctx, dk)
 	return nil
+}
+
+// imageID is the ID of image ref ("" when unknown).
+func (m *manager) imageID(ctx context.Context, dk *dockerEnv, ref string) string {
+	if dk.api == nil {
+		return ""
+	}
+	var img struct{ Id string }
+	if dk.api.get(ctx, "/images/"+url.PathEscape(ref)+"/json", &img) != nil {
+		return ""
+	}
+	return img.Id
+}
+
+// imageRetryAfter: how soon the reaper tries again to remove an old
+// runner image a job still used.
+const imageRetryAfter = 5 * time.Minute
+
+// releaseImage removes this namespace's containers that keep an old
+// runner image (ref) alive without doing work: the sync helper of the old
+// version (ensureSync starts a new one from the current image when a sync
+// needs it; it never uses one of another image) and stopped containers.
+// It returns what still runs on ref (a job of the old version), "" when
+// nothing does.
+func (m *manager) releaseImage(ctx context.Context, dk *dockerEnv, ref string) string {
+	if dk.api == nil {
+		return ""
+	}
+	cs, err := dk.api.containersWhere(ctx, map[string][]string{"ancestor": {ref}})
+	if err != nil {
+		return ""
+	}
+	for _, c := range cs {
+		if c.Labels["kran.ns"] != m.ns {
+			if _, job := c.Labels["kran.job"]; !job {
+				continue // not ours: Docker keeps the image for it
+			}
+		}
+		running := c.State == "running" || c.State == "restarting" || c.State == "paused"
+		jobID, job := c.Labels["kran.job"]
+		if job && (running || m.jobSupervised(jobID)) {
+			// Its supervisor still owns it (and reads its exit status).
+			return "job container " + strings.TrimPrefix(firstName(c.Names), "/")
+		}
+		if running && c.Labels["kran.role"] != "sync" && c.Labels["kran.role"] != "trim" {
+			return "container " + strings.TrimPrefix(firstName(c.Names), "/")
+		}
+		if _, err := dk.run(ctx, nil, "rm", "--force", "--volumes", c.ID); err != nil {
+			return "container " + strings.TrimPrefix(firstName(c.Names), "/")
+		}
+		m.logf("reaper: removed %s container %s of the old runner image %s", orDefault(c.Labels["kran.role"], "stopped"), strings.TrimPrefix(firstName(c.Names), "/"), ref)
+		if c.Labels["kran.role"] == "sync" {
+			dk.mu.Lock()
+			dk.syncBin, dk.syncAt = "", time.Time{}
+			dk.mu.Unlock()
+		}
+	}
+	return ""
+}
+
+// jobSupervised: a supervisor of this state dir still owns job id (its
+// status is not written yet and the supervisor lives).
+func (m *manager) jobSupervised(id string) bool {
+	if validJobID(id) != nil {
+		return false
+	}
+	dir := m.l.job(id)
+	if _, err := os.Stat(filepath.Join(dir, fileSpec)); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, fileStatus)); err == nil {
+		return false
+	}
+	return supervisorAlive(dir)
+}
+
+func firstName(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	return names[0]
+}
+
+func orDefault(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
 }
 
 // pruneStoppedContainers removes stopped containers of this namespace that

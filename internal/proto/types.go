@@ -119,10 +119,13 @@ type Runtime struct {
 // CacheStatus describes the container runtime's shared caches (toolchains,
 // module and package caches, the persistent home) after their last trim.
 type CacheStatus struct {
-	Used      int64     `json:"used"`      // bytes
-	Budget    int64     `json:"budget"`    // bytes the caches may use
-	DiskFree  int64     `json:"disk_free"` // free bytes on the Docker disk
-	DiskTotal int64     `json:"disk_total"`
+	Used      int64 `json:"used"`      // bytes
+	Budget    int64 `json:"budget"`    // bytes the caches may use
+	DiskFree  int64 `json:"disk_free"` // free bytes on the Docker disk
+	DiskTotal int64 `json:"disk_total"`
+	// Reserve is the free space kran keeps on that disk, trimming its
+	// caches and then idle slots.
+	Reserve   int64     `json:"reserve,omitempty"`
 	Reclaimed int64     `json:"reclaimed"` // bytes the last trim freed
 	At        time.Time `json:"at"`        // when it ran
 }

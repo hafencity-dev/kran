@@ -60,13 +60,16 @@ func (c *checker) checkRuntimes(ctx context.Context) {
 func cacheResult(node string, cs *proto.CacheStatus) Result {
 	r := Result{ID: "runtime.container.caches", Title: node + " container caches", Level: OK, Node: node,
 		Detail: fmt.Sprintf("%s of %s budget; Docker disk %s free of %s", gib(cs.Used), gib(cs.Budget), gib(cs.DiskFree), gib(cs.DiskTotal))}
+	if cs.Reserve > 0 {
+		r.Detail += fmt.Sprintf("; kran keeps %s free (accept.disk_reserve)", gib(cs.Reserve))
+	}
 	if cs.Reclaimed > 0 {
 		r.Detail += fmt.Sprintf("; the last trim reclaimed %s", gib(cs.Reclaimed))
 	}
 	if floor := max(int64(10<<30), cs.DiskTotal/20); cs.DiskFree < floor {
 		r.Level = Warn
 		r.Detail += fmt.Sprintf("; below the floor of %s", gib(floor))
-		r.Fix = "free space in the Docker VM (`docker system prune`), give it a bigger disk, or lower runtime.container.cache_budget on " + node
+		r.Fix = "free space in the Docker VM (`docker system prune`), give it a bigger disk, or lower runtime.container.cache_budget on " + node + "; kran already removes idle slots there"
 	}
 	return r
 }

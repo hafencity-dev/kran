@@ -29,6 +29,11 @@ type cacheTrim struct {
 	last     time.Time
 	report   *cacheReport
 	reportAt time.Time
+
+	// The Docker disk as last measured (trim or slot check).
+	diskFree, diskTotal int64
+	diskAt              time.Time
+	slotCheck           time.Time // last volume slot check (slotreclaim.go)
 }
 
 func (m *manager) trimName() string { return m.ns + "-cache-trim" }
@@ -109,8 +114,13 @@ func (m *manager) maybeTrimCaches(ctx context.Context) {
 		m.ct.running, m.ct.done = nil, nil
 		if err == nil && rep.Total > 0 { // measured (a trim skipped for a running job was not)
 			m.ct.report, m.ct.reportAt = &rep, m.now()
+			m.ct.diskFree, m.ct.diskTotal, m.ct.diskAt = rep.Free, rep.Total, m.now()
 		}
 		m.ct.mu.Unlock()
+		if err == nil && rep.Total > 0 && rep.Free < rep.Reserve {
+			// The caches alone did not free enough: idle slots next.
+			m.reclaimVolumeSlots(tctx, true)
+		}
 		switch {
 		case err != nil && tctx.Err() == nil:
 			m.logf("container caches: trim failed: %v", err)
@@ -142,7 +152,8 @@ func (m *manager) runCacheTrim(ctx context.Context, dk *dockerEnv) (cacheReport,
 		"--mount", "type=volume,src=" + m.volume("tools") + ",dst=" + ctrTools,
 		"--entrypoint", ctrKran, m.imageTag(), "internal", "cache-trim",
 		"--cache", ctrCache, "--tools", ctrTools,
-		"--budget", strconv.FormatInt(m.opts.CacheBudget, 10), "--floor", strconv.FormatInt(m.opts.DiskFloor, 10)}
+		"--budget", strconv.FormatInt(m.opts.CacheBudget, 10), "--floor", strconv.FormatInt(m.opts.DiskFloor, 10),
+		"--reserve", strconv.FormatInt(m.opts.DiskReserve, 10)}
 	out, err := dk.run(ctx, nil, args...)
 	if err != nil {
 		return cacheReport{}, err
@@ -162,20 +173,20 @@ func (m *manager) runCacheTrim(ctx context.Context, dk *dockerEnv) (cacheReport,
 func (m *manager) checkDockerDiskFloor() error {
 	m.ct.mu.Lock()
 	defer m.ct.mu.Unlock()
-	r := m.ct.report
-	if r == nil || r.Total <= 0 || m.now().Sub(m.ct.reportAt) > 2*cacheTrimEvery {
+	free, total := m.ct.diskFree, m.ct.diskTotal
+	if total <= 0 || m.now().Sub(m.ct.diskAt) > 2*cacheTrimEvery {
 		return nil // unknown or stale: do not block jobs on it
 	}
 	floor := m.opts.DiskFloor
 	if floor <= 0 {
-		floor = diskFloor(r.Total)
+		floor = diskFloor(total)
 	}
-	if r.Free >= floor {
+	if free >= floor {
 		return nil
 	}
-	m.ct.last = time.Time{}
-	return fmt.Errorf("%w: the Docker disk on %s has %s free, needs at least %s; kran is trimming its caches, or free space with `docker system prune`",
-		ErrDiskFloor, m.opts.NodeName, fmtGiB(r.Free), fmtGiB(floor))
+	m.ct.last, m.ct.slotCheck = time.Time{}, time.Time{}
+	return fmt.Errorf("%w: the Docker disk on %s has %s free, needs at least %s; kran is trimming its caches and idle slots, or free space with `docker system prune`",
+		ErrDiskFloor, m.opts.NodeName, fmtGiB(free), fmtGiB(floor))
 }
 
 // cacheStatus is the last trim's report for the container runtime's
@@ -187,6 +198,10 @@ func (m *manager) cacheStatus() *proto.CacheStatus {
 	if r == nil {
 		return nil
 	}
-	return &proto.CacheStatus{Used: r.After, Budget: r.Budget, DiskFree: r.Free, DiskTotal: r.Total,
-		Reclaimed: r.Reclaimed, At: m.ct.reportAt.UTC()}
+	cs := &proto.CacheStatus{Used: r.After, Budget: r.Budget, DiskFree: r.Free, DiskTotal: r.Total,
+		Reserve: r.Reserve, Reclaimed: r.Reclaimed, At: m.ct.reportAt.UTC()}
+	if m.ct.diskAt.After(m.ct.reportAt) {
+		cs.DiskFree, cs.DiskTotal = m.ct.diskFree, m.ct.diskTotal
+	}
+	return cs
 }

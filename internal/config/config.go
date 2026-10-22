@@ -29,6 +29,10 @@ type AcceptConfig struct {
 	Enabled     bool   `toml:"enabled"`
 	ReserveCPUs int    `toml:"reserve_cpus"`
 	ReserveMem  string `toml:"reserve_mem"`
+	// DiskReserve is the free space kran keeps on the disks it fills
+	// (this machine's, and the Docker disk) by trimming its caches and
+	// idle slots, e.g. "30GiB"; "" = max(25 GiB, 20%), at most 50 GiB.
+	DiskReserve string `toml:"disk_reserve"`
 	MaxJobs     int    `toml:"max_jobs"`
 	Nice        int    `toml:"nice"`
 }
@@ -125,6 +129,11 @@ func (c *Config) Validate() error {
 	case "auto", "local", "remote":
 	default:
 		errs = append(errs, fmt.Errorf("submit.prefer = %q; use auto, local or remote", c.Submit.Prefer))
+	}
+	if b := c.Accept.DiskReserve; b != "" {
+		if _, err := ParseSize(b); err != nil {
+			errs = append(errs, fmt.Errorf("accept.disk_reserve: %w", err))
+		}
 	}
 	if b := c.Runtime.Container.CacheBudget; b != "" {
 		if _, err := ParseSize(b); err != nil {

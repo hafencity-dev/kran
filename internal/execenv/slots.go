@@ -356,6 +356,45 @@ func (p *slotPool) stale(idle time.Duration) []*slot {
 	return out
 }
 
+// evictLRU takes the idle slot at loc that was used least recently out of
+// the pool, for deletion (nil when every slot there is in use). A slot
+// in use, or acquired for a job about to start, is never taken.
+func (p *slotPool) evictLRU(loc slotLoc) *slot {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if ents, err := os.ReadDir(p.l.slotsDir()); err == nil {
+		for _, e := range ents {
+			if e.IsDir() && validRepoID(e.Name()) == nil {
+				p.load(e.Name())
+			}
+		}
+	}
+	var best *slot
+	var bestKey string
+	var bestAt time.Time
+	for key, ss := range p.repos {
+		for _, s := range ss {
+			if s.busy || s.loc != loc {
+				continue
+			}
+			if at := p.lastUsed(s); best == nil || at.Before(bestAt) {
+				best, bestKey, bestAt = s, key, at
+			}
+		}
+	}
+	if best == nil {
+		return nil
+	}
+	kept := p.repos[bestKey][:0]
+	for _, s := range p.repos[bestKey] {
+		if s != best {
+			kept = append(kept, s)
+		}
+	}
+	p.repos[bestKey] = kept
+	return best
+}
+
 // lastUsed is the slot's last use (caller holds mu). Metadata without one
 // (written by an older kran, or missing) counts from the latest change of
 // the slot's files we can see, else from now: an unknown age never makes

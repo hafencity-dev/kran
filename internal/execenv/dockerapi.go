@@ -110,7 +110,12 @@ type containerSummary struct {
 
 // containers lists containers (all states) carrying the label filter.
 func (d *dockerAPI) containers(ctx context.Context, label string) ([]containerSummary, error) {
-	f, _ := json.Marshal(map[string][]string{"label": {label}})
+	return d.containersWhere(ctx, map[string][]string{"label": {label}})
+}
+
+// containersWhere lists containers (all states) matching Docker filters.
+func (d *dockerAPI) containersWhere(ctx context.Context, filters map[string][]string) ([]containerSummary, error) {
+	f, _ := json.Marshal(filters)
 	var out []containerSummary
 	err := d.get(ctx, "/containers/json?all=1&filters="+url.QueryEscape(string(f)), &out)
 	return out, err

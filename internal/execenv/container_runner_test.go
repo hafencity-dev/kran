@@ -178,6 +178,18 @@ echo "6:$(docker run --rm -v "$t/f":/etc/x.conf:ro $img cat /etc/x.conf)"
 echo "7:$(docker run --rm -v "$t/ssl":/etc/nginx/sslcerts:ro $img cat /etc/nginx/sslcerts/cert)"
 echo "8:$(env -i /usr/bin/python3 -I -S -c 'print(6*7)')"
 python3 -m venv "$t/venv" && "$t/venv/bin/python" -c 'import sys; print("9:venv", sys.prefix != sys.base_prefix)'
+cid=$(docker run -d --label "kran.job=$KRAN_JOB_ID" -v "$PWD":/w -v "$t/f":/etc/x.conf:ro $img sleep 300)
+echo "11:$(docker inspect -f '{{range .Mounts}}{{.Source}} {{end}}' "$cid")"
+echo "12:$(docker inspect -f '{{json .HostConfig.Binds}}' "$cid")"
+echo "13:$(docker ps --filter "id=$cid" --format '{{.ID}}' | wc -l) $(docker container ls -q --filter "volume=$PWD" | wc -l)"
+docker rm -f "$cid" >/dev/null
+docker volume create --opt type=none --opt o=bind --opt device="$PWD" "kt-$KRAN_JOB_ID" >/dev/null
+echo "14:$(docker volume inspect -f '{{.Options.device}}' "kt-$KRAN_JOB_ID")"
+docker volume rm "kt-$KRAN_JOB_ID" >/dev/null
+echo "15:$(awk --version | head -1 | cut -d, -f1) $(awk 'BEGIN { print gensub(/o/, "0", "g", "foo") }')"
+for tool in gawk parallel uuidgen hostname tput cpio getopt column hexdump timeout flock setsid nproc realpath iconv perl; do
+	command -v "$tool" >/dev/null || echo "missing: $tool"
+done
 echo "10:$(env -i PATH=/usr/bin:/bin sh -c 'docker compose version >/dev/null && docker buildx version >/dev/null && docker-compose version >/dev/null && command -v docker')"
 for tool in envsubst lsof sfdisk fdisk jq rg shellcheck file unzip zip xz zstd bzip2 rsync ps pkill killall nc dig ip ss ping less patch diff bc sqlite3 make gcc g++ curl wget git ssh tree xxd strace openssl docker; do
 	command -v "$tool" >/dev/null || echo "missing: $tool"
@@ -189,7 +201,8 @@ command -v node >/dev/null && echo "node: $(command -v node)" || echo no-node`),
 	if exit.Code != 0 {
 		t.Fatalf("exit %+v\n%s\n%s", exit, out, errOut)
 	}
-	for _, want := range []string{"1:content from the slot\n", "2:written-by-nested\n", "3:content from the slot\n", "4:home-file\n", "5:content from the slot\n", "6:tmp-file-ok\n", "7:tmp-dir-ok\n", "8:42\n", "9:venv True\n", "10:/usr/bin/docker\n", "plugins-ok\n", "no-node\n"} {
+	for _, want := range []string{"1:content from the slot\n", "2:written-by-nested\n", "3:content from the slot\n", "4:home-file\n", "5:content from the slot\n", "6:tmp-file-ok\n", "7:tmp-dir-ok\n", "8:42\n", "9:venv True\n", "10:/usr/bin/docker\n",
+		ctrRoot + "/sub ", "/f ", `12:["` + ctrRoot + `/sub:/w","/tmp/`, "13:1 ", "14:" + ctrRoot + "/sub\n", "15:GNU Awk 5", " f00\n", "plugins-ok\n", "no-node\n"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s\n%s", want, out, errOut)
 		}

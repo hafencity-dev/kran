@@ -44,6 +44,8 @@ func (m *manager) Reap(ctx context.Context) error {
 	if err := m.gcSlots(ctx); err != nil {
 		errs = append(errs, err)
 	}
+	m.reclaimHostSlots(ctx)
+	m.reclaimVolumeSlots(ctx, false)
 	return errors.Join(errs...)
 }
 
@@ -272,20 +274,22 @@ func (m *manager) gcSlots(ctx context.Context) error {
 	var errs []error
 	for _, s := range m.pool.stale(m.tun.slotMaxIdle) {
 		m.logf("removing slot %s/%d unused since %s", short(s.repo), s.index, s.meta.LastUsed.Format(time.DateTime))
-		if s.loc == locHost {
-			if err := os.RemoveAll(m.pool.hostPath(s)); err != nil {
-				errs = append(errs, err)
-				continue
-			}
-		} else {
-			if _, err := m.volumeApply(ctx, applyReq{Op: "remove", Slot: m.pool.ref(s).Path}, nil); err != nil {
-				errs = append(errs, err)
-				continue
-			}
-		}
-		if err := m.pool.forget(s); err != nil {
+		if err := m.removeSlot(ctx, s); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// removeSlot deletes a slot the pool no longer hands out (stale or
+// evicted): its files, then its metadata.
+func (m *manager) removeSlot(ctx context.Context, s *slot) error {
+	if s.loc == locHost {
+		if err := removeAllForce(m.pool.hostPath(s)); err != nil {
+			return err
+		}
+	} else if _, err := m.volumeApply(ctx, applyReq{Op: "remove", Slot: m.pool.ref(s).Path}, nil); err != nil {
+		return err
+	}
+	return m.pool.forget(s)
 }
