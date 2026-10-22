@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/hafencity-dev/kran/internal/proto"
+	"github.com/hafencity-dev/kran/internal/selfexe"
 	"github.com/hafencity-dev/kran/internal/workspace"
 )
 
@@ -100,7 +101,7 @@ func newManagerWith(opts Options, tun tunables) (*manager, error) {
 		return nil, errors.New("execenv: StateDir is required")
 	}
 	if opts.Self == "" {
-		self, err := os.Executable()
+		self, err := selfexe.Path()
 		if err != nil {
 			return nil, fmt.Errorf("execenv: locate kran binary: %w", err)
 		}

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/hafencity-dev/kran/internal/paths"
+	"github.com/hafencity-dev/kran/internal/selfexe"
 )
 
 // Autostart: a peer reaching this node over SSH while no daemon runs (e.g.
@@ -125,7 +126,9 @@ func waitSocket(ctx context.Context, sock string, d time.Duration) bool {
 // logs to daemon.log itself and keeps this one small). The environment
 // (KRAN_*_DIR overrides) is inherited.
 func spawnDaemon() (func() error, error) {
-	exe, err := os.Executable()
+	// Never a test binary: `<test> daemon` would run the package's suite
+	// again instead of a daemon, and recurse (see internal/selfexe).
+	exe, err := selfexe.Path()
 	if err != nil {
 		return nil, err
 	}

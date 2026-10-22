@@ -423,7 +423,7 @@ func (m *manager) launch(ctx context.Context, dir string, spec *superSpec) error
 		sargs := []string{"--user", "--scope", "--quiet", "--collect",
 			"--unit=" + spec.Scope, "--slice=" + m.slice(),
 			"--description=kran job " + spec.JobID,
-			"-p", "Delegate=yes"}
+			"-p", "Delegate=yes", "-p", fmt.Sprintf("TasksMax=%d", proto.JobTasksMax)}
 		if spec.MemMax > 0 {
 			// Backstop in case the supervisor cannot set up the job cgroup;
 			// the precise cap lives on the job's own cgroup.

@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/hafencity-dev/kran/internal/client"
+	"github.com/hafencity-dev/kran/internal/selfexe"
 	"github.com/hafencity-dev/kran/internal/service"
 )
 
@@ -81,13 +82,7 @@ func (a *App) detectTTY() {
 	}
 }
 
-func selfPath() (string, error) {
-	p, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	return p, nil
-}
+func selfPath() (string, error) { return selfexe.Path() }
 
 // Main runs the CLI with os.Args and returns the process exit code.
 func Main(args []string) int {

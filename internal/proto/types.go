@@ -13,6 +13,15 @@ const (
 	ProtocolMinor = 1
 )
 
+// Process caps on Linux (systemd TasksMax, threads included). A job's scope
+// and kran.slice as a whole stop a runaway fork loop at the cap instead of
+// letting it take the machine down; a parallel build with threaded test
+// binaries stays far below either.
+const (
+	JobTasksMax   = 8192
+	SliceTasksMax = 16384
+)
+
 // ---------------------------------------------------------------------------
 // Nodes
 

@@ -9,6 +9,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/hafencity-dev/kran/internal/selfexe"
 )
 
 // TestMain lets the test binary stand in for the kran binary: the manager
@@ -16,6 +18,7 @@ import (
 // `<self> internal apply`, and jobs use `<self> helper …` as a portable
 // toolbox (sleepers, escapees, memory hogs).
 func TestMain(m *testing.M) {
+	selfexe.AllowTest() // dispatched right below
 	if len(os.Args) >= 3 && os.Args[1] == "internal" {
 		switch os.Args[2] {
 		case "supervise":

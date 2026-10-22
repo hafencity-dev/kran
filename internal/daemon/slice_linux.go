@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/hafencity-dev/kran/internal/proto"
 )
 
 // systemdSlice keeps kran.slice's MemoryMax at
@@ -122,7 +124,7 @@ func (s *systemdSlice) Refresh() {
 	if d := max - s.last; s.last != 0 && d < sliceStep && d > -sliceStep {
 		return
 	}
-	out, err := s.run(ctx, "set-property", "--runtime", s.Name(), fmt.Sprintf("MemoryMax=%d", max), "MemoryHigh=infinity")
+	out, err := s.run(ctx, "set-property", "--runtime", s.Name(), fmt.Sprintf("MemoryMax=%d", max), "MemoryHigh=infinity", fmt.Sprintf("TasksMax=%d", proto.SliceTasksMax))
 	if err != nil {
 		if !s.failed {
 			s.logf("kran.slice: set MemoryMax: %v %s (retrying every refresh)", err, out)

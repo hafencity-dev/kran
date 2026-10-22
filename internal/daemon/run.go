@@ -19,6 +19,7 @@ import (
 	"github.com/hafencity-dev/kran/internal/metrics"
 	"github.com/hafencity-dev/kran/internal/paths"
 	"github.com/hafencity-dev/kran/internal/scheduler"
+	"github.com/hafencity-dev/kran/internal/selfexe"
 	"github.com/hafencity-dev/kran/internal/store"
 	"github.com/hafencity-dev/kran/internal/transport"
 	"github.com/hafencity-dev/kran/internal/ui"
@@ -121,7 +122,10 @@ func run(ctx context.Context, opts Options) error {
 	// prefixes the systemd slice and scopes and the Docker resources so the
 	// two never touch each other's.
 	ns, slice := namespace(logf)
-	self, _ := os.Executable()
+	self, err := selfexe.Path()
+	if err != nil {
+		logf("execenv: %v", err)
+	}
 	var ex execenv.Manager
 	if m, err := execenv.New(execenv.Options{
 		StateDir: dirs.State, NodeName: cfg.Name, Self: self, Logf: logf, Namespace: ns,
