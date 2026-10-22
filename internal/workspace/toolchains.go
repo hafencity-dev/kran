@@ -13,10 +13,10 @@ import (
 
 // toolAliases maps asdf/mise plugin names to kran's toolchain keys.
 var toolAliases = map[string]string{
-	"nodejs": "node",
-	"golang": "go",
+	"nodejs":  "node",
+	"golang":  "go",
 	"python3": "python",
-	"rustc":  "rust",
+	"rustc":   "rust",
 }
 
 func toolKey(name string) string {

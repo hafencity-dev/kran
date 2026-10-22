@@ -9,15 +9,15 @@ import (
 
 func TestNormalizeRemote(t *testing.T) {
 	cases := map[string]string{
-		"git@github.com:Org/Repo.git":             "github.com/org/repo",
-		"https://github.com/org/repo":             "github.com/org/repo",
-		"https://user:pw@github.com/org/repo/":    "github.com/org/repo",
-		"ssh://git@github.com:22/org/repo.git":    "github.com/org/repo",
-		"git+ssh://git@gitlab.example.com/a/b/c":  "gitlab.example.com/a/b/c",
-		"github.com:org/repo":                     "github.com/org/repo",
-		"/srv/git/project.git":                    "/srv/git/project",
-		"file:///srv/git/project.git":             "/srv/git/project",
-		"":                                        "",
+		"git@github.com:Org/Repo.git":            "github.com/org/repo",
+		"https://github.com/org/repo":            "github.com/org/repo",
+		"https://user:pw@github.com/org/repo/":   "github.com/org/repo",
+		"ssh://git@github.com:22/org/repo.git":   "github.com/org/repo",
+		"git+ssh://git@gitlab.example.com/a/b/c": "gitlab.example.com/a/b/c",
+		"github.com:org/repo":                    "github.com/org/repo",
+		"/srv/git/project.git":                   "/srv/git/project",
+		"file:///srv/git/project.git":            "/srv/git/project",
+		"":                                       "",
 	}
 	for in, want := range cases {
 		if got := NormalizeRemote(in); got != want {

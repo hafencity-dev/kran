@@ -128,12 +128,12 @@ priority = "high"
 	}
 
 	for body, wantErr := range map[string]string{
-		`os = "linux"`:                  `use "same" or "any"`,
-		"bogus = 1":                     "unknown setting",
-		"[setup]\nrun = \"\"":           "needs a run command",
-		"[[rule]]\nmatch = \"\"":        "match is empty",
+		`os = "linux"`:           `use "same" or "any"`,
+		"bogus = 1":              "unknown setting",
+		"[setup]\nrun = \"\"":    "needs a run command",
+		"[[rule]]\nmatch = \"\"": "match is empty",
 		"[[rule]]\nmatch = \"x\"\npriority = \"urgent\"": "priority",
-		"os = ":                         ".kran.toml:1",
+		"os = ": ".kran.toml:1",
 	} {
 		os.WriteFile(filepath.Join(root, ".kran.toml"), []byte(body), 0o644)
 		_, err := LoadProjectConfig(root)
