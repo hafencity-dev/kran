@@ -386,11 +386,11 @@ func (r *runner) onFrame(ctx context.Context, m frameMsg) (int, bool) {
 	switch m.t {
 	case proto.FrameHeartbeat:
 	case proto.FrameStdout:
-		r.started = true
+		r.remoteStarted()
 		r.offset += int64(len(m.payload))
 		_, _ = r.stdout.Write(m.payload)
 	case proto.FrameStderr:
-		r.started = true
+		r.remoteStarted()
 		r.offset += int64(len(m.payload))
 		_, _ = r.stderr.Write(m.payload)
 	case proto.FrameNotice:
@@ -452,8 +452,18 @@ func (r *runner) onPhase(p proto.Phase) {
 		}
 		r.pendNote(text)
 	case proto.JobRunning:
-		r.started = true
+		r.remoteStarted()
 		r.clearNote()
+	}
+}
+
+// remoteStarted notes that the command runs. Only now does stdin go to the
+// target: until then the job may still fall back to a local run, which
+// must get all of it.
+func (r *runner) remoteStarted() {
+	r.started = true
+	if r.remote {
+		r.startStdin()
 	}
 }
 
@@ -475,7 +485,6 @@ func (r *runner) onDecision(ctx context.Context, d proto.Decision) (int, bool) {
 		if !r.flags.JSONEvents {
 			r.say("%s", line)
 		}
-		r.startStdin()
 		return 0, false
 	}
 	// Local placement (or a fallback after a failed remote attempt).
@@ -659,8 +668,8 @@ func sigName(s os.Signal) string {
 
 func sigNum(name string) int { return int(signalNames[name]) }
 
-// startStdin forwards stdin to a remote job (-i). It starts only once the job
-// is known to be remote so a local placement keeps the terminal's stdin.
+// startStdin forwards stdin to a remote job (-i). It starts only once the
+// command runs remotely, so a local placement or fallback keeps all of it.
 func (r *runner) startStdin() {
 	if !r.flags.Stdin || r.stdinOnce || r.stdin == nil {
 		return

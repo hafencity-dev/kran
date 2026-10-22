@@ -496,6 +496,12 @@ func TestStdinForwarding(t *testing.T) {
 	go func() {
 		s.push(proto.FrameDecision, proto.Decision{JobID: "j", Mode: "remote", Node: "n"})
 		pw.Write([]byte("hello"))
+		s.push(proto.FramePhase, proto.Phase{State: proto.JobSyncing})
+		time.Sleep(100 * time.Millisecond)
+		if n := s.count(proto.FrameStdin); n != 0 {
+			t.Errorf("stdin forwarded before the command runs: %d frames", n)
+		}
+		s.push(proto.FramePhase, proto.Phase{State: proto.JobRunning})
 		waitFor(t, func() bool { return s.count(proto.FrameStdin) >= 1 })
 		pw.Close()
 		waitFor(t, func() bool { return s.count(proto.FrameStdinEOF) == 1 })
@@ -507,6 +513,35 @@ func TestStdinForwarding(t *testing.T) {
 	f, _ := s.find(proto.FrameStdin)
 	if string(f.payload) != "hello" {
 		t.Fatalf("%q", f.payload)
+	}
+}
+
+// TestStdinKeptForFallback: a remote attempt that fails before the command
+// runs must leave stdin untouched for the local run that follows.
+func TestStdinKeptForFallback(t *testing.T) {
+	pr, pw, _ := os.Pipe()
+	s := newFakeSession()
+	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s}}, "sh", "-c", "cat")
+	h.r.flags.Stdin = true
+	h.r.stdin = pr
+	h.r.stdio.In = pr
+	pw.Write([]byte("all of it"))
+	pw.Close()
+	go func() {
+		s.push(proto.FrameDecision, proto.Decision{JobID: "j", Mode: "remote", Node: "n"})
+		s.push(proto.FramePhase, proto.Phase{State: proto.JobSetup})
+		time.Sleep(100 * time.Millisecond)
+		s.push(proto.FrameNotice, proto.Notice{Kind: "fallback", Message: "n failed before the job started"})
+		s.push(proto.FrameDecision, proto.Decision{JobID: "j", Mode: "local", Envelope: &proto.LocalEnvelope{}})
+	}()
+	if code := h.run(t); code != 0 {
+		t.Fatal(code)
+	}
+	if out := localOut(t, h); out != "all of it" {
+		t.Fatalf("local fallback got %q of stdin", out)
+	}
+	if s.count(proto.FrameStdin) != 0 {
+		t.Fatal("stdin was forwarded to a job that never ran")
 	}
 }
 
