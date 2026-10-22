@@ -36,3 +36,26 @@ func TestPrivateDir(t *testing.T) {
 		t.Fatal("symlinked control dir accepted")
 	}
 }
+
+// docker parses --mount as CSV with later keys winning: a workspace root
+// from the origin must not add keys (src=/ would mount the host root).
+func TestReservedMountRejectsCSV(t *testing.T) {
+	for _, root := range []string{"/w/a,src=/", "/w/a,dst=/etc", `/w/"x"`, "/w/a\nb"} {
+		if !reservedMount(root) {
+			t.Errorf("%q accepted as a mount target", root)
+		}
+	}
+	if reservedMount("/home/u/my repo=1") {
+		t.Fatal("plain path refused")
+	}
+}
+
+// The origin's BASH_ENV/ENV name files on the origin; on the target they
+// would make every bash/sh -c of the job source a local file first.
+func TestHostSpecificShellStartupEnv(t *testing.T) {
+	for _, k := range []string{"BASH_ENV", "ENV"} {
+		if !hostSpecificEnv(k) {
+			t.Errorf("%s forwarded to the job", k)
+		}
+	}
+}
