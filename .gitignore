@@ -1,0 +1,9 @@
+/dist/
+/bin/
+/kran
+*.test
+*.out
+coverage.*
+web/node_modules/
+web/.vite/
+.DS_Store

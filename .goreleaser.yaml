@@ -1,0 +1,61 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+project_name: kran
+
+before:
+  hooks:
+    - go mod verify
+
+builds:
+  - id: kran
+    main: ./cmd/kran
+    binary: kran
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [arm64, amd64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/hafencity-dev/kran/internal/version.Version={{.Version}}
+      - -X github.com/hafencity-dev/kran/internal/version.Commit={{.ShortCommit}}
+      - -X github.com/hafencity-dev/kran/internal/version.BuildDate={{.Date}}
+
+# install.sh and `kran upgrade` rely on these exact asset names.
+archives:
+  - id: kran
+    formats: [tar.gz]
+    name_template: "kran_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "Merge "
+
+release:
+  github:
+    owner: hafencity-dev
+    name: kran
+  draft: false
+  prerelease: auto
+
+# Homebrew tap (optional). Enable after creating hafencity-dev/homebrew-tap.
+# brews:
+#   - repository:
+#       owner: hafencity-dev
+#       name: homebrew-tap
+#     homepage: https://github.com/hafencity-dev/kran
+#     description: Run heavy dev jobs on whichever of your machines has room
+#     install: bin.install "kran"
+#     test: system "#{bin}/kran", "version"

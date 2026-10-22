@@ -1,0 +1,21 @@
+{
+  "name": "kran-ui",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "shoot": "node scripts/shoot.mjs"
+  },
+  "dependencies": {
+    "preact": "^10.29.8"
+  },
+  "devDependencies": {
+    "@fontsource-variable/archivo": "^5.3.0",
+    "playwright-core": "^1.59.1",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.7"
+  }
+}
