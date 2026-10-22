@@ -38,6 +38,17 @@ func fakeKran(args []string) int {
 	switch args[0] {
 	case "internal":
 		return InternalMain(args[1:], os.Stdin, os.Stdout, os.Stderr)
+	case "service":
+		sd := os.Getenv("KRAN_STATE_DIR")
+		if _, err := os.Stat(filepath.Join(sd, "no-service")); err == nil {
+			os.Stderr.WriteString("kran: the service is not installed\n")
+			return 1
+		}
+		os.MkdirAll(sd, 0o700)
+		f, _ := os.OpenFile(filepath.Join(sd, "service.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		f.WriteString(strings.Join(args[1:], " ") + "\n")
+		f.Close()
+		return 0
 	case "setup":
 		fs := flag.NewFlagSet("setup", flag.ContinueOnError)
 		name := fs.String("name", "", "")

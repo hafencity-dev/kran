@@ -39,6 +39,8 @@ type Options struct {
 	RemoteBinDir string
 	// SelfAddresses overrides the addresses advertised for this machine.
 	SelfAddresses []string
+	// Force makes Upgrade restart the remote service without waiting for idle.
+	Force bool
 	// SourceDir is a kran source checkout for cross-compiling (default: found from SelfPath/cwd).
 	SourceDir   string
 	GitHubToken string       // default $GITHUB_TOKEN / $GH_TOKEN
@@ -246,62 +248,11 @@ func Link(ctx context.Context, o Options) (*Result, error) {
 		return nil, err
 	}
 	src := binarySource{o: &o, r: o.runner()}
-	binDir := o.RemoteBinDir
-	if binDir == "" {
-		binDir = "~/.local/bin"
+	kranPath, info, ch, err := ensureKran(ctx, &o, c, src, rOS, rArch, home, res)
+	if err != nil {
+		return nil, err
 	}
-	binDirAbs := absRemote(home, binDir)
-
-	// --- install / update kran on the remote
-	kranPath := findRemoteKran(ctx, c, home)
-	if kranPath != "" && o.RemoteBinDir == "" && strings.HasPrefix(kranPath, strings.TrimRight(home, "/")+"/") {
-		binDirAbs = path.Dir(kranPath) // update in place instead of shadowing it
-	}
-	var info *Info
-	if kranPath != "" {
-		info, err = c.remoteInfo(ctx, kranPath)
-		if err != nil {
-			o.logf("remote kran at %s did not answer link-info (%v); reinstalling", kranPath, err)
-			info = nil
-		}
-	}
-	needInstall := info == nil
-	if info != nil {
-		if cmp, ok := compareVersions(info.Version, o.Version); ok {
-			needInstall = cmp < 0
-		} else {
-			needInstall = true // unknown or dev: decided by content hash below
-		}
-	}
-	if needInstall {
-		o.progress("install", fmt.Sprintf("Installing kran %s (%s/%s)", o.Version, rOS, rArch))
-		bin, aerr := src.acquire(ctx, rOS, rArch)
-		switch {
-		case aerr != nil && info == nil:
-			return nil, aerr
-		case aerr != nil:
-			res.Notes = append(res.Notes, fmt.Sprintf("kept kran %s on %s: %v", info.Version, o.Host, aerr))
-		default:
-			sum, err := fileSHA256(bin)
-			if err != nil {
-				return nil, err
-			}
-			if info != nil && info.SHA256 == sum {
-				break
-			}
-			if err := c.pushBinary(ctx, bin, binDirAbs); err != nil {
-				return nil, fmt.Errorf("install kran on %s: %w", o.Host, err)
-			}
-			res.Installed, changed = true, true
-			kranPath = binDirAbs + "/kran"
-			if info, err = c.remoteInfo(ctx, kranPath); err != nil {
-				return nil, fmt.Errorf("the installed kran on %s does not start: %w", o.Host, err)
-			}
-		}
-	}
-	if info == nil {
-		return nil, fmt.Errorf("kran is not installed on %s", o.Host)
-	}
+	changed = changed || ch
 
 	// --- first-time setup of the remote (node id, key, service)
 	if info.ID == "" || info.PubKey == "" {
@@ -444,6 +395,67 @@ func Link(ctx context.Context, o Options) (*Result, error) {
 	res.Peer = peer
 	res.Already = !changed
 	return res, nil
+}
+
+// ensureKran installs (or updates) kran on the remote when it is missing or
+// older than ours, and returns its path and link-info. Content hashes decide
+// for development builds; an unchanged binary is never re-sent.
+func ensureKran(ctx context.Context, o *Options, c *sshClient, src binarySource, rOS, rArch, home string, res *Result) (kranPath string, info *Info, changed bool, err error) {
+	binDir := o.RemoteBinDir
+	if binDir == "" {
+		binDir = "~/.local/bin"
+	}
+	binDirAbs := absRemote(home, binDir)
+	kranPath = findRemoteKran(ctx, c, home)
+	if kranPath != "" && o.RemoteBinDir == "" && strings.HasPrefix(kranPath, strings.TrimRight(home, "/")+"/") {
+		binDirAbs = path.Dir(kranPath) // update in place instead of shadowing it
+	}
+	if kranPath != "" {
+		info, err = c.remoteInfo(ctx, kranPath)
+		if err != nil {
+			o.logf("remote kran at %s did not answer link-info (%v); reinstalling", kranPath, err)
+			info = nil
+		}
+	}
+	needInstall := info == nil
+	if info != nil {
+		res.RemoteVersion = info.Version // before any update
+		if cmp, ok := compareVersions(info.Version, o.Version); ok {
+			needInstall = cmp < 0
+		} else {
+			needInstall = true // unknown or dev: decided by content hash below
+		}
+	}
+	if needInstall {
+		o.progress("install", fmt.Sprintf("Installing kran %s (%s/%s)", o.Version, rOS, rArch))
+		bin, aerr := src.acquire(ctx, rOS, rArch)
+		switch {
+		case aerr != nil && info == nil:
+			return "", nil, false, aerr
+		case aerr != nil:
+			res.Notes = append(res.Notes, fmt.Sprintf("kept kran %s on %s: %v", info.Version, o.Host, aerr))
+		default:
+			sum, err := fileSHA256(bin)
+			if err != nil {
+				return "", nil, false, err
+			}
+			if info != nil && info.SHA256 == sum {
+				break
+			}
+			if err := c.pushBinary(ctx, bin, binDirAbs); err != nil {
+				return "", nil, false, fmt.Errorf("install kran on %s: %w", o.Host, err)
+			}
+			res.Installed, changed = true, true
+			kranPath = binDirAbs + "/kran"
+			if info, err = c.remoteInfo(ctx, kranPath); err != nil {
+				return "", nil, false, fmt.Errorf("the installed kran on %s does not start: %w", o.Host, err)
+			}
+		}
+	}
+	if info == nil {
+		return "", nil, false, fmt.Errorf("kran is not installed on %s", o.Host)
+	}
+	return kranPath, info, changed, nil
 }
 
 func loadPeer(name string) (config.Peer, error) {

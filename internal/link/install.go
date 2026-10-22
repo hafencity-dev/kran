@@ -45,7 +45,7 @@ func (b binarySource) acquire(ctx context.Context, goos, goarch string) (string,
 		return o.SelfPath, nil
 	}
 	ver := o.Version
-	cache := paths.BinaryCache(ver, goos, goarch)
+	cache := paths.BinaryCache(strings.TrimPrefix(ver, "v"), goos, goarch)
 	type step struct {
 		name string
 		fn   func() (string, error)
@@ -74,9 +74,20 @@ func (b binarySource) acquire(ctx context.Context, goos, goarch string) (string,
 }
 
 func (b binarySource) download(ctx context.Context, goos, goarch, dest string) (string, error) {
-	ver := strings.TrimPrefix(b.o.Version, "v")
 	if isDevVersion(b.o.Version) {
 		return "", errors.New("development builds have no release")
+	}
+	return b.fetch(ctx, b.o.Version, goos, goarch)
+}
+
+// fetch downloads release `version` for goos/goarch into the binary cache
+// (cache hit returns immediately), verifying checksums.txt when the release
+// has one.
+func (b binarySource) fetch(ctx context.Context, version, goos, goarch string) (string, error) {
+	ver := strings.TrimPrefix(version, "v")
+	dest := paths.BinaryCache(ver, goos, goarch)
+	if st, err := os.Stat(dest); err == nil && st.Mode().IsRegular() {
+		return dest, nil
 	}
 	asset := assetName(ver, goos, goarch)
 	tmp, err := os.MkdirTemp("", "kran-dl-")
@@ -84,29 +95,72 @@ func (b binarySource) download(ctx context.Context, goos, goarch, dest string) (
 		return "", err
 	}
 	defer os.RemoveAll(tmp)
-	var tgz string
+	tgz, sums := filepath.Join(tmp, asset), filepath.Join(tmp, "checksums.txt")
+	haveSums := false
+	got := false
 	// 1. gh, when installed and authenticated (the repo is private).
-	if _, err := b.r.Run(ctx, Cmd{Name: "gh", Args: []string{"auth", "status"}}); err == nil {
-		_, err := b.r.Run(ctx, Cmd{Name: "gh", Args: []string{"release", "download", "v" + ver, "-R", repoSlug, "-p", asset, "-D", tmp, "--clobber"}})
-		if err == nil {
-			tgz = filepath.Join(tmp, asset)
+	if b.ghReady(ctx) {
+		tag := "v" + ver
+		if _, err := b.r.Run(ctx, Cmd{Name: "gh", Args: []string{"release", "download", tag, "-R", repoSlug, "-p", asset, "-D", tmp, "--clobber"}}); err == nil {
+			got = true
+			if _, err := b.r.Run(ctx, Cmd{Name: "gh", Args: []string{"release", "download", tag, "-R", repoSlug, "-p", "checksums.txt", "-D", tmp, "--clobber"}}); err == nil {
+				haveSums = true
+			}
 		}
 	}
 	// 2. GitHub API with a token.
-	if tgz == "" {
-		tok := b.o.GitHubToken
-		if tok == "" {
-			tok = firstEnv("GITHUB_TOKEN", "GH_TOKEN")
-		}
+	if !got {
+		tok := b.token()
 		if tok == "" {
 			return "", errors.New("gh is not installed or not logged in, and GITHUB_TOKEN is not set")
 		}
-		tgz = filepath.Join(tmp, asset)
 		if err := b.apiDownload(ctx, tok, "v"+ver, asset, tgz); err != nil {
+			return "", err
+		}
+		haveSums = b.apiDownload(ctx, tok, "v"+ver, "checksums.txt", sums) == nil
+	}
+	if _, err := os.Stat(sums); err != nil {
+		haveSums = false
+	}
+	if haveSums {
+		if err := verifyChecksum(sums, tgz, asset); err != nil {
 			return "", err
 		}
 	}
 	return dest, extractKran(tgz, dest)
+}
+
+func (b binarySource) token() string {
+	if b.o.GitHubToken != "" {
+		return b.o.GitHubToken
+	}
+	return firstEnv("GITHUB_TOKEN", "GH_TOKEN")
+}
+
+func (b binarySource) ghReady(ctx context.Context) bool {
+	_, err := b.r.Run(ctx, Cmd{Name: "gh", Args: []string{"auth", "status"}})
+	return err == nil
+}
+
+func verifyChecksum(sumsFile, file, asset string) error {
+	data, err := os.ReadFile(sumsFile)
+	if err != nil {
+		return err
+	}
+	for _, ln := range strings.Split(string(data), "\n") {
+		f := strings.Fields(ln)
+		if len(f) == 2 && strings.TrimPrefix(f[1], "*") == asset {
+			sum, err := fileSHA256(file)
+			if err != nil {
+				return err
+			}
+			if !strings.EqualFold(sum, f[0]) {
+				return fmt.Errorf("checksum mismatch for %s (download corrupted or tampered with); try again", asset)
+			}
+			return nil
+		}
+	}
+	return nil // asset not listed: nothing to verify against
 }
 
 func firstEnv(keys ...string) string {
@@ -118,7 +172,7 @@ func firstEnv(keys ...string) string {
 	return ""
 }
 
-func (b binarySource) apiDownload(ctx context.Context, token, tag, asset, out string) error {
+func (b binarySource) apiClient() (*http.Client, string) {
 	base := b.o.APIBase
 	if base == "" {
 		base = "https://api.github.com"
@@ -127,17 +181,23 @@ func (b binarySource) apiDownload(ctx context.Context, token, tag, asset, out st
 	if hc == nil {
 		hc = &http.Client{Timeout: 5 * time.Minute}
 	}
-	get := func(url, accept string) (*http.Response, error) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("Accept", accept)
-		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-		return hc.Do(req)
+	return hc, base
+}
+
+func apiGet(ctx context.Context, hc *http.Client, token, url, accept string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
 	}
-	resp, err := get(fmt.Sprintf("%s/repos/%s/releases/tags/%s", base, repoSlug, tag), "application/vnd.github+json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", accept)
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	return hc.Do(req)
+}
+
+func (b binarySource) apiDownload(ctx context.Context, token, tag, asset, out string) error {
+	hc, base := b.apiClient()
+	resp, err := apiGet(ctx, hc, token, fmt.Sprintf("%s/repos/%s/releases/tags/%s", base, repoSlug, tag), "application/vnd.github+json")
 	if err != nil {
 		return err
 	}
@@ -158,7 +218,7 @@ func (b binarySource) apiDownload(ctx context.Context, token, tag, asset, out st
 		if a.Name != asset {
 			continue
 		}
-		r2, err := get(a.URL, "application/octet-stream")
+		r2, err := apiGet(ctx, hc, token, a.URL, "application/octet-stream")
 		if err != nil {
 			return err
 		}
