@@ -146,7 +146,7 @@ func TestWrapDecisionTable(t *testing.T) {
 		if ok != tc.want {
 			t.Errorf("WrapCommand(%q) = %v, want %v (%s)", tc.cmd, ok, tc.want, tc.why)
 		}
-		if ok && got != "kran run --sh "+ShellQuote(tc.cmd) {
+		if prefix, rest := hoistCd(tc.cmd); ok && got != prefix+"kran run --sh "+ShellQuote(rest) {
 			t.Errorf("WrapCommand(%q) wrapped to %q", tc.cmd, got)
 		}
 	}
