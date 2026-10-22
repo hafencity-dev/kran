@@ -39,12 +39,14 @@ func UnlinkDetailed(ctx context.Context, name string, o Options) (*UnlinkResult,
 	}
 	p := *peer
 	st, haveState := readLinkState(name)
-	if o.SelfName == "" || o.SelfID == "" {
+	if o.SelfName == "" {
 		cfg, err := config.Load("")
 		if err != nil {
 			return nil, err
 		}
 		o.SelfName = cfg.Name
+	}
+	if o.SelfID == "" {
 		if o.SelfID, _, err = config.EnsureNodeID(); err != nil {
 			return nil, err
 		}
