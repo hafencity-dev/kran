@@ -71,13 +71,15 @@ func parseKV(list []string) (map[string]string, error) {
 	m := map[string]string{}
 	for _, kv := range list {
 		k, v, ok := strings.Cut(kv, "=")
-		if !ok || k == "" {
+		if !ok || !envName.MatchString(k) { // the key is exported unquoted on the remote
 			return nil, usagef("%q must be KEY=VALUE", kv)
 		}
 		m[k] = v
 	}
 	return m, nil
 }
+
+var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 var aliasRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
 

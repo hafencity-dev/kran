@@ -245,3 +245,14 @@ func TestNoGUIMessageNamesTheCommand(t *testing.T) {
 		}
 	}
 }
+
+func TestParseKVNames(t *testing.T) {
+	if m, err := parseKV([]string{"KRAN_CONFIG_DIR=/a b"}); err != nil || m["KRAN_CONFIG_DIR"] != "/a b" {
+		t.Fatal(m, err)
+	}
+	for _, bad := range []string{"=x", "A;rm -rf ~;B=x", "A B=x", "1A=x"} {
+		if _, err := parseKV([]string{bad}); err == nil {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+}
