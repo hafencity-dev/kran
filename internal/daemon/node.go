@@ -177,6 +177,7 @@ func New(deps Deps) (*Daemon, error) {
 	if d.deps.KillLocal == nil {
 		d.deps.KillLocal = func(pid, pgid int, scope string) { killLocal(pid, pgid, scope, d.t.KillGrace, d.logf) }
 	}
+	d.ctx, d.cancel = context.WithCancel(context.Background())
 	d.bus = newBus(d.now)
 	d.jobs = newJobTable(d)
 	d.stats = newStatsTracker(d.now)
@@ -192,7 +193,6 @@ func (d *Daemon) Name() string { return d.self }
 
 // Run serves until ctx ends, then shuts down gracefully.
 func (d *Daemon) Run(ctx context.Context) error {
-	d.ctx, d.cancel = context.WithCancel(context.Background())
 	defer d.cancel()
 	if err := os.MkdirAll(d.deps.Dirs.spoolDir(), 0o700); err != nil {
 		return fmt.Errorf("create spool dir: %w", err)
@@ -381,13 +381,8 @@ func (d *Daemon) nodeInfo() proto.NodeInfo {
 	return d.info
 }
 
-// lifetime is the daemon context, or Background before Run.
-func (d *Daemon) lifetime() context.Context {
-	if d.ctx != nil {
-		return d.ctx
-	}
-	return context.Background()
-}
+// lifetime is the daemon context: canceled at shutdown.
+func (d *Daemon) lifetime() context.Context { return d.ctx }
 
 func (d *Daemon) janitorLoop(ctx context.Context) {
 	t := time.NewTicker(time.Hour)

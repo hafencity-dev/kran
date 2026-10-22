@@ -391,6 +391,10 @@ func (e *jobEntry) finish(x proto.Exit) {
 	code := x.Code
 	j.ExitCode = &code
 	j.Signal = x.Signal
+	// The target measures the command; the origin measured the sync.
+	if x.Usage.SyncBytes == 0 && x.Usage.SyncSeconds == 0 {
+		x.Usage.SyncBytes, x.Usage.SyncSeconds = j.Usage.SyncBytes, j.Usage.SyncSeconds
+	}
 	j.Usage = x.Usage
 	j.EndedAt = d.now().UTC()
 	j.Node = x.Node
