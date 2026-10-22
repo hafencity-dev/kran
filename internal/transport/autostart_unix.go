@@ -158,3 +158,37 @@ func autostart(ctx context.Context, sock string) error {
 	}
 	return ensureDaemon(ctx, sock, filepath.Join(paths.RuntimeDir(), "daemon-start.lock"), spawnDaemon)
 }
+
+// HoldStartLock takes the lock autostart takes before spawning a daemon, so
+// `kran serve --stdio` waits instead of starting an on-demand daemon while
+// `kran service` hands the socket over to the managed one. The returned
+// function releases it.
+func HoldStartLock(ctx context.Context) (func(), error) {
+	lockPath := filepath.Join(paths.RuntimeDir(), "daemon-start.lock")
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", lockPath, err)
+	}
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return func() {
+				syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+				f.Close()
+			}, nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EINTR) {
+			f.Close()
+			return nil, fmt.Errorf("lock %s: %w", lockPath, err)
+		}
+		select {
+		case <-ctx.Done():
+			f.Close()
+			return nil, ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}

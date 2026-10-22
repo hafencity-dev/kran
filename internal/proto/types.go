@@ -390,6 +390,17 @@ type VersionInfo struct {
 	Protocol  string `json:"protocol"` // "1.0"
 }
 
+// DaemonInfo (added by A) says which process serves the local API, so
+// `kran service` can tell a daemon its service manager runs from one started
+// on demand that must hand over (GET /api/v1/daemon).
+type DaemonInfo struct {
+	PID int `json:"pid"`
+	// Supervisor is the service manager that started it ("systemd",
+	// "launchd"), "" when started on demand or by hand.
+	Supervisor string    `json:"supervisor,omitempty"`
+	StartedAt  time.Time `json:"started_at"`
+}
+
 // APIError is the JSON body of every non-2xx API response.
 type APIError struct {
 	Error string `json:"error"`

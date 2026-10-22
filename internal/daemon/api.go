@@ -39,7 +39,9 @@ func (d *Daemon) routes(unix bool) http.Handler {
 	mux.HandleFunc("GET /api/v1/nodes/{name}/metrics", d.handleMetricsHistory)
 	mux.HandleFunc("POST /api/v1/nodes/{name}/drain", d.handleDrain(true))
 	mux.HandleFunc("POST /api/v1/nodes/{name}/resume", d.handleDrain(false))
+	mux.HandleFunc("GET /api/v1/daemon", d.handleDaemonInfo)
 	if unix {
+		mux.HandleFunc("POST /api/v1/daemon/stop", d.handleDaemonStop)
 		mux.HandleFunc("POST /api/v1/run", d.handleRun)
 	} else {
 		mux.HandleFunc("POST /api/v1/run", func(w http.ResponseWriter, r *http.Request) {
@@ -487,4 +489,49 @@ func utf8Complete(b []byte) int {
 		}
 	}
 	return n
+}
+
+func (d *Daemon) handleDaemonInfo(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, proto.DaemonInfo{PID: os.Getpid(), Supervisor: d.deps.Supervisor, StartedAt: d.startedAt.UTC()})
+}
+
+// handleDaemonStop lets `kran service` replace a daemon its service manager
+// does not run: stop now ("now", graceful: jobs are restored by the next
+// daemon) or once no job is active here ("idle").
+func (d *Daemon) handleDaemonStop(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		When string `json:"when"`
+	}
+	json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body)
+	switch body.When {
+	case "", "idle":
+		d.goLoop(d.stopWhenIdle)
+	case "now":
+		d.requestStop()
+	default:
+		writeAPIError(w, http.StatusBadRequest, `when must be "idle" or "now"`, "")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, proto.DaemonInfo{PID: os.Getpid(), Supervisor: d.deps.Supervisor, StartedAt: d.startedAt.UTC()})
+}
+
+func (d *Daemon) requestStop() { d.stopOnce.Do(func() { close(d.stopReq) }) }
+
+// stopWhenIdle stops the daemon once it originates no active job and holds
+// no reservation for a job that has not started (running guest jobs survive
+// under their supervisors and are picked up by the next daemon).
+func (d *Daemon) stopWhenIdle(ctx context.Context) {
+	tk := time.NewTicker(250 * time.Millisecond)
+	defer tk.Stop()
+	for {
+		if len(d.jobs.list()) == 0 && d.target.reservations() == 0 {
+			d.requestStop()
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-tk.C:
+		}
+	}
 }

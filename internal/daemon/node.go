@@ -112,6 +112,9 @@ type Deps struct {
 	// ClientAlive reports whether the process of a CLI that dropped its run
 	// session still exists (nil: signal 0 to its pid).
 	ClientAlive func(pid int) bool
+	// Supervisor names the service manager running this daemon ("" = on
+	// demand or by hand); reported by GET /api/v1/daemon.
+	Supervisor string
 	// NoListen skips the unix sockets and the UI listener (in-process tests
 	// that drive Handler and ServePeerConn directly).
 	NoListen bool
@@ -138,6 +141,10 @@ type Daemon struct {
 	token   string
 
 	draining atomic.Bool
+
+	startedAt time.Time
+	stopOnce  sync.Once
+	stopReq   chan struct{} // closed when asked to stop (handover to a managed daemon)
 
 	ctx      context.Context // daemon lifetime
 	cancel   context.CancelFunc
@@ -183,6 +190,7 @@ func New(deps Deps) (*Daemon, error) {
 		logf:     deps.Logf,
 		conns:    map[net.Conn]struct{}{},
 		sessions: map[transport.Session]struct{}{},
+		stopReq:  make(chan struct{}),
 	}
 	if d.deps.ClientAlive == nil {
 		self := os.Getpid()
@@ -209,6 +217,7 @@ func (d *Daemon) Name() string { return d.self }
 // Run serves until ctx ends, then shuts down gracefully.
 func (d *Daemon) Run(ctx context.Context) error {
 	defer d.cancel()
+	d.startedAt = d.now()
 	if err := os.MkdirAll(d.deps.Dirs.spoolDir(), 0o700); err != nil {
 		return fmt.Errorf("create spool dir: %w", err)
 	}
@@ -265,7 +274,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	d.logf("kran daemon %s started on %s (protocol %d.%d)", version.Version, d.self, proto.ProtocolMajor, proto.ProtocolMinor)
 
-	<-ctx.Done()
+	select {
+	case <-ctx.Done():
+	case <-d.stopReq:
+		d.logf("stopping as asked (a managed daemon takes over)")
+	}
 	d.shutdown(listeners)
 	return nil
 }
