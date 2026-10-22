@@ -20,15 +20,13 @@ import (
 type timing struct {
 	NoticeDelay time.Duration // a wait must exceed this before kran says anything
 	Heartbeat   time.Duration // we send a heartbeat this often
-	DeadAfter   time.Duration // no frame for this long = connection lost
 	Reconnect   time.Duration // how long to retry the daemon after a drop
 	DoubleInt   time.Duration // second Ctrl-C within this escalates to KILL
 	RetryEvery  time.Duration
 }
 
 func defaultTiming() timing {
-	return timing{NoticeDelay: 2 * time.Second, Heartbeat: 2 * time.Second, DeadAfter: 10 * time.Second,
-		Reconnect: 10 * time.Second, DoubleInt: 2 * time.Second, RetryEvery: 300 * time.Millisecond}
+	return timing{NoticeDelay: 2 * time.Second, Heartbeat: 2 * time.Second, Reconnect: 10 * time.Second, DoubleInt: 2 * time.Second, RetryEvery: 300 * time.Millisecond}
 }
 
 // runner drives one `kran run` (SPEC §6.1).
@@ -59,7 +57,6 @@ type runner struct {
 	remote   bool // a remote placement is active
 	started  bool // the user's command has started (remote running, or output seen)
 	offset   int64
-	lastRecv time.Time
 	local    *localProc
 	localCh  <-chan proto.Exit
 	fallback bool
@@ -280,7 +277,6 @@ func (r *runner) launchFailed(lerr *localError) int {
 func (r *runner) attach(s client.RunSession) {
 	r.sess = s
 	r.gen++
-	r.lastRecv = time.Now()
 	gen := r.gen
 	go func() {
 		for {
@@ -335,13 +331,12 @@ func (r *runner) loop(ctx context.Context) int {
 				return code
 			}
 		case <-hb.C:
+			// Silence detection lives in the session: client.RunSession
+			// swallows the daemon's heartbeats and fails Recv after
+			// client.RecvTimeout without any frame. Timing it here from
+			// the frames Recv returns would declare a healthy daemon dead
+			// whenever a job waits or runs quietly for DeadAfter.
 			r.send(proto.FrameHeartbeat, nil)
-			if r.sess != nil && time.Since(r.lastRecv) > r.tm.DeadAfter {
-				r.closeSession()
-				if code, done := r.onDisconnect(ctx, errors.New("no heartbeat from the daemon")); done {
-					return code
-				}
-			}
 		case sig := <-r.signals:
 			if code, done := r.onSignal(sig); done {
 				return code
@@ -384,7 +379,6 @@ func (r *runner) onFrame(ctx context.Context, m frameMsg) (int, bool) {
 	if m.err != nil {
 		return r.onDisconnect(ctx, m.err)
 	}
-	r.lastRecv = time.Now()
 	switch m.t {
 	case proto.FrameHeartbeat:
 	case proto.FrameStdout:

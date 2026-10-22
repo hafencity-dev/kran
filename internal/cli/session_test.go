@@ -180,7 +180,7 @@ func newHarness(t *testing.T, cl *fakeClient, argv ...string) *harness {
 		env:    os.Environ(),
 		stdout: h.stdout, stderr: &lineWriter{w: h.stderr},
 		stdio: localStdio{Out: outF, Err: errF}, signals: h.sigs,
-		tm:    timing{NoticeDelay: 80 * time.Millisecond, Heartbeat: 20 * time.Millisecond, DeadAfter: time.Second, Reconnect: 600 * time.Millisecond, DoubleInt: time.Second, RetryEvery: 10 * time.Millisecond},
+		tm:    timing{NoticeDelay: 80 * time.Millisecond, Heartbeat: 20 * time.Millisecond, Reconnect: 600 * time.Millisecond, DoubleInt: time.Second, RetryEvery: 10 * time.Millisecond},
 		start: startLocal, probe: func(int64) bool { return false },
 	}
 	h.r.dial = func(ctx context.Context) (client.Client, error) {
@@ -271,6 +271,26 @@ func TestQuickQueueStaysSilent(t *testing.T) {
 	}
 	if strings.Contains(h.stderr.String(), "waiting briefly") {
 		t.Fatalf("%q", h.stderr.String())
+	}
+}
+
+// TestLongQuietQueueKeepsWaiting: the daemon's heartbeats never reach the
+// runner (client.RunSession swallows them), so a long wait without other
+// frames must not look like a dead daemon.
+func TestLongQuietQueueKeepsWaiting(t *testing.T) {
+	s := newFakeSession()
+	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s}}, "sh", "-c", "printf %s \"$KRAN_JOB_ID\"")
+	h.r.flags.Quiet = true
+	go func() {
+		s.push(proto.FrameNotice, proto.Notice{Kind: "queued", Message: "waiting: a is at its limit of 1 jobs"})
+		time.Sleep(1500 * time.Millisecond) // many heartbeat ticks without a frame
+		s.push(proto.FrameDecision, proto.Decision{JobID: "jq", Mode: "local", Envelope: &proto.LocalEnvelope{Env: map[string]string{"KRAN_JOB_ID": "jq"}}})
+	}()
+	if code := h.run(t); code != 0 {
+		t.Fatal(code)
+	}
+	if localOut(t, h) != "jq" {
+		t.Fatalf("ran without the daemon's decision: %q", localOut(t, h))
 	}
 }
 
