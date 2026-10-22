@@ -577,8 +577,7 @@ func (r *runner) onDecision(ctx context.Context, d proto.Decision) (int, bool) {
 	if r.tee == nil && r.sess != nil {
 		// The output also goes to the daemon, so kran logs and the UI
 		// show local jobs like remote ones (SPEC §8.2).
-		r.tee = newHistoryTee(teeQueueMax)
-		r.tee.setSession(r.sess)
+		r.tee = newHistoryTee(teeQueueMax) // queues until started is sent
 	}
 	p, lerr := r.start(r.localJob(d.Envelope))
 	if lerr != nil {
@@ -587,6 +586,9 @@ func (r *runner) onDecision(ctx context.Context, d proto.Decision) (int, bool) {
 	}
 	r.local, r.localCh, r.started = p, p.Done(), true
 	r.sendJSON(proto.FrameStarted, p.Started)
+	if r.tee != nil {
+		r.tee.setSession(r.sess) // the history takes output only after started
+	}
 	r.event("started", map[string]any{"job_id": d.JobID, "pid": p.Started.PID, "scope": p.Started.Scope})
 	return 0, false
 }
