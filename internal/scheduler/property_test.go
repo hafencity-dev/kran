@@ -401,6 +401,9 @@ func FuzzScheduler(f *testing.F) {
 	f.Add([]byte("submit release reject metrics status tick admit usage"))
 	f.Add(make([]byte, 64))
 	f.Fuzz(func(t *testing.T, data []byte) {
+		if len(data) > 4096 {
+			data = data[:4096] // one operation per byte: keep inputs fast
+		}
 		pos := 0
 		next := func(n int) int {
 			if pos >= len(data) {
