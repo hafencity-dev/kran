@@ -61,7 +61,9 @@ func (m *peerManager) run(ctx context.Context) {
 		<-ctx.Done()
 		return
 	}
-	m.reload()
+	if m.d.deps.Peers.Stamp() != m.stamp {
+		m.reload()
+	}
 	t := time.NewTicker(m.d.t.PeerPoll)
 	defer t.Stop()
 	for {
@@ -620,27 +622,18 @@ func (p *peer) nodeState() proto.NodeState {
 	default:
 		ns.Status = proto.NodeOnline
 	}
-	// Capacity is net of what other origins (and jobs this scheduler does
-	// not track, e.g. reattached after a restart) hold on the node, so the
-	// scheduler only subtracts its own allocations.
+	// The node's own totals; AllocatedJobs lets the scheduler skip what it
+	// already counts itself (C's contract).
 	ns.Capacity = st.Capacity
-	for _, a := range st.Allocs {
-		ns.Allocated.CPUs += a.Res.CPUs
-		ns.Allocated.Mem += a.Res.Mem
-		if a.Running {
-			ns.Running++
+	ns.Allocated = st.Allocated
+	ns.AllocatedJobs = append([]string{}, st.AllocatedJobs...)
+	ns.Running = st.Running
+	ns.Free = st.Free
+	ns.MaxJobs = st.MaxJobs
+	for _, g := range st.Guests {
+		if g.Origin != d.self {
+			ns.Guests = append(ns.Guests, g)
 		}
-		if a.Origin == d.self && d.jobs.schedHolds(a.JobID) {
-			continue
-		}
-		ns.Capacity.CPUs -= a.Res.CPUs
-		ns.Capacity.Mem -= a.Res.Mem
-	}
-	if ns.Capacity.CPUs < 0 {
-		ns.Capacity.CPUs = 0
-	}
-	if ns.Capacity.Mem < 0 {
-		ns.Capacity.Mem = 0
 	}
 	ns.Link = proto.LinkInfo{Direction: p.cfg.Direction, BandwidthBps: p.bandwidth, Connected: s != nil}
 	if s != nil {
@@ -723,6 +716,7 @@ func (d *Daemon) applyRemoteLive(node string, allocs []allocInfo) {
 			continue
 		}
 		live := *a.Live
+		d.deps.Sched.UpdateJobUsage(a.JobID, live)
 		e.mu.Lock()
 		same := e.job.Live != nil && *e.job.Live == live
 		running := e.job.State == proto.JobRunning && e.job.Node == node

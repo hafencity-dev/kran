@@ -211,6 +211,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.target.restore()
 	d.jobs.restore()
 
+	// Every linked peer is known to the scheduler (offline until it
+	// connects) before the first job arrives, so --node and --gpu checks
+	// see the whole mesh.
+	if d.deps.Peers != nil {
+		d.peers.reload()
+	}
+
 	var listeners []func()
 	if !d.deps.NoListen {
 		stop, err := d.listen()
@@ -402,8 +409,28 @@ func (d *Daemon) janitorLoop(ctx context.Context) {
 	}
 }
 
-// janitor deletes spools of jobs older than 7 days.
+// singleCoreScore is a node's benchmark score (0 when unknown).
+func (d *Daemon) singleCoreScore(node string) float64 {
+	if node == d.self {
+		return d.nodeInfo().SingleCoreScore
+	}
+	if p := d.peers.get(node); p != nil {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.st.Info.SingleCoreScore
+	}
+	return 0
+}
+
+// janitor prunes history and deletes spools older than 7 days.
 func (d *Daemon) janitor() {
+	ctx, cancel := context.WithTimeout(d.lifetime(), time.Minute)
+	if n, err := d.deps.Store.PruneJobs(ctx, d.now().Add(-7*24*time.Hour)); err != nil {
+		d.logf("store: prune: %v", err)
+	} else if n > 0 {
+		d.logf("store: pruned %d jobs older than 7 days", n)
+	}
+	cancel()
 	dir := d.deps.Dirs.spoolDir()
 	ents, err := os.ReadDir(dir)
 	if err != nil {

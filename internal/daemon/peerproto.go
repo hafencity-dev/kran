@@ -103,9 +103,13 @@ type rawPeerResponse struct {
 
 // Request bodies.
 type admitBody struct {
-	Origin  string            `json:"origin"`
-	Alloc   proto.Resources   `json:"alloc"`
-	Runtime proto.RuntimeKind `json:"runtime"`
+	Origin   string            `json:"origin"`
+	Alloc    proto.Resources   `json:"alloc"`
+	Runtime  proto.RuntimeKind `json:"runtime"`
+	Duration float64           `json:"duration_s,omitempty"` // estimate, origin seconds
+	RepoID   string            `json:"repo_id,omitempty"`
+	Owner    proto.Owner       `json:"owner"`
+	Argv     []string          `json:"argv,omitempty"`
 }
 
 type slotAcquireBody struct {
@@ -148,12 +152,21 @@ type jobSignalBody struct {
 type peerStatus struct {
 	Info     proto.NodeInfo    `json:"info"`
 	Metrics  proto.NodeMetrics `json:"metrics"`
-	Capacity proto.Resources   `json:"capacity"`
+	Capacity proto.Resources   `json:"capacity"` // after reserve
 	Reserve  proto.Resources   `json:"reserve"`
 	Accepts  bool              `json:"accepts"`
 	Draining bool              `json:"draining"`
 	Degraded string            `json:"degraded,omitempty"`
-	Allocs   []allocInfo       `json:"allocs,omitempty"`
+	MaxJobs  int               `json:"max_jobs,omitempty"`
+	// The node's own scheduler totals (its local jobs and admitted
+	// guests); AllocatedJobs lists what Allocated counts.
+	Allocated     proto.Resources `json:"allocated"`
+	AllocatedJobs []string        `json:"allocated_jobs"`
+	Running       int             `json:"running"`
+	Free          proto.Resources `json:"free"`
+	Guests        []proto.JobRef  `json:"guests,omitempty"`
+	// Allocs are the remote jobs running here (for live usage).
+	Allocs []allocInfo `json:"allocs,omitempty"`
 }
 
 type allocInfo struct {

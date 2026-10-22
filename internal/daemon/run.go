@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/term"
@@ -17,6 +18,7 @@ import (
 	"github.com/hafencity-dev/kran/internal/scheduler"
 	"github.com/hafencity-dev/kran/internal/store"
 	"github.com/hafencity-dev/kran/internal/transport"
+	"github.com/hafencity-dev/kran/internal/ui"
 	"github.com/hafencity-dev/kran/internal/workspace"
 )
 
@@ -84,7 +86,15 @@ func run(ctx context.Context, opts Options) error {
 	defer st.Close()
 
 	prober := metrics.New(metrics.Options{StateDir: dirs.State, Logf: logf})
-	est := estimate.New(st)
+	// The estimator's speed prior reads nodes' benchmark scores from the
+	// daemon, which exists only after the estimator: late-bound.
+	var dref atomic.Pointer[Daemon]
+	est := estimate.NewWithOptions(st, estimate.Options{Self: cfg.Name, Logf: logf, Score: func(node string) float64 {
+		if d := dref.Load(); d != nil {
+			return d.singleCoreScore(node)
+		}
+		return 0
+	}})
 	sched := scheduler.New(scheduler.Options{Origin: cfg.Name, Speed: est.Speed, Now: time.Now, Logf: logf})
 
 	self, _ := os.Executable()
@@ -128,7 +138,7 @@ func run(ctx context.Context, opts Options) error {
 		Scanner: scanner,
 		Peers:   peerSrc,
 		Dialer:  dialer,
-		UI:      nil, // lead: ui.Handler() once internal/ui lands
+		UI:      ui.Handler(),
 		Slice:   newSliceController(cfg.Accept.ReserveMem, logf),
 		Session: transport.SessionConfig{Logf: logf},
 		Logf:    logf,
@@ -136,6 +146,7 @@ func run(ctx context.Context, opts Options) error {
 	if err != nil {
 		return err
 	}
+	dref.Store(d)
 	return d.Run(ctx)
 }
 

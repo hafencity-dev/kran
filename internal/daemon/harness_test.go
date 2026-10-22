@@ -17,7 +17,9 @@ import (
 	"time"
 
 	"github.com/hafencity-dev/kran/internal/client"
+	"github.com/hafencity-dev/kran/internal/estimate"
 	"github.com/hafencity-dev/kran/internal/proto"
+	"github.com/hafencity-dev/kran/internal/scheduler"
 	"github.com/hafencity-dev/kran/internal/transport"
 )
 
@@ -103,11 +105,13 @@ type testNode struct {
 	log     *safeLog
 	cfg     NodeConfig
 	dialer  PeerDialer // nil = in-memory network
+	real    bool       // C's scheduler and estimator instead of fakes
 	src     PeerSource // nil = peers
 
 	mu     sync.Mutex
 	d      *Daemon
 	sched  *fakeSched
+	rsched scheduler.Scheduler
 	cancel context.CancelFunc
 	done   chan error
 }
@@ -173,12 +177,18 @@ func (n *testNode) start() *Daemon {
 	if n.src != nil {
 		src = n.src
 	}
+	var sch scheduler.Scheduler = sched
+	var est estimate.Estimator = n.est
+	if n.real {
+		est = estimate.NewWithOptions(n.store, estimate.Options{Self: n.name})
+		sch = scheduler.New(scheduler.Options{Origin: n.name, Speed: est.Speed, Logf: n.log.logf(n.name + " sched")})
+	}
 	d, err := New(Deps{
 		Config:  n.cfg,
 		Dirs:    n.dirs,
 		Store:   n.store,
-		Sched:   sched,
-		Est:     n.est,
+		Sched:   sch,
+		Est:     est,
 		Prober:  n.prober,
 		Exec:    n.exec,
 		Scanner: n.scanner,
@@ -196,6 +206,7 @@ func (n *testNode) start() *Daemon {
 	go func() { done <- d.Run(ctx) }()
 	n.mu.Lock()
 	n.d, n.sched, n.cancel, n.done = d, sched, cancel, done
+	n.rsched = sch
 	n.mu.Unlock()
 	n.net.Listen(n.name, d.ServePeerConn)
 	deadline := time.Now().Add(5 * time.Second)

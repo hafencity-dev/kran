@@ -138,7 +138,9 @@ func (d *Daemon) serveRun(conn net.Conn, br *bufio.Reader) {
 			if err := rc.write(ft, fp); err != nil {
 				return
 			}
-			if ft == proto.FrameExit {
+			// A FrameError ends the session (SPEC §8.2): the CLI then runs
+			// the command itself, so no exit frame may follow.
+			if ft == proto.FrameExit || ft == proto.FrameError {
 				return
 			}
 		}
@@ -280,7 +282,7 @@ func (d *Daemon) serveFinished(rc *runConn, ra proto.Reattach) {
 					if rc.write(ft, fp) != nil {
 						break
 					}
-					if ft == proto.FrameExit {
+					if ft == proto.FrameExit || ft == proto.FrameError {
 						cancel()
 						rd.Close()
 						sp.close()

@@ -61,8 +61,9 @@ type jobEntry struct {
 	pgid    int
 	scope   string
 
-	outbox *outbox // remote: frames for the target
-	tty    *proto.TTY
+	outbox       *outbox // remote: frames for the target
+	lastPhasePub time.Time
+	tty          *proto.TTY
 }
 
 type localEvent struct {
@@ -107,18 +108,6 @@ func (t *jobTable) list() []*jobEntry {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].id < out[j].id })
 	return out
-}
-
-// schedHolds reports whether this daemon's scheduler tracks an allocation
-// for the job.
-func (t *jobTable) schedHolds(id string) bool {
-	e := t.get(id)
-	if e == nil {
-		return false
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.placed
 }
 
 func (t *jobTable) retire(e *jobEntry, final proto.Job) {
@@ -269,6 +258,8 @@ func (e *jobEntry) setState(s proto.JobState, reason string) {
 		}
 		if s == proto.JobRunning && j.StartedAt.IsZero() {
 			j.StartedAt = e.d.now().UTC()
+			j.RunningAt = j.StartedAt
+			j.Phase = nil
 		}
 	})
 }
@@ -285,6 +276,7 @@ func (e *jobEntry) markPlaced(p scheduler.Placement) {
 			j.Fallback = true
 		}
 		j.QueuePos = 0
+		j.PlacedAt = e.d.now().UTC()
 	})
 }
 
@@ -304,6 +296,26 @@ func (e *jobEntry) unplace() {
 func (e *jobEntry) notice(kind, msg string) {
 	b, _ := json.Marshal(proto.Notice{Kind: kind, Message: msg, JobID: e.id})
 	e.spool.append(proto.FrameNotice, b)
+}
+
+// phase records a sync/setup progress report: to the CLI (spool) and, at
+// most twice a second unless the state changes, to Job.Phase for the UI.
+func (e *jobEntry) phase(ph proto.Phase) {
+	e.sendFrame(proto.FramePhase, ph)
+	if ph.State == proto.JobRunning {
+		return
+	}
+	now := e.d.now()
+	e.mu.Lock()
+	skip := e.job.Phase != nil && e.job.Phase.State == ph.State && now.Sub(e.lastPhasePub) < 500*time.Millisecond && ph.Progress < 1
+	if !skip {
+		e.lastPhasePub = now
+	}
+	e.mu.Unlock()
+	if !skip {
+		p := ph
+		e.update(func(j *proto.Job) { j.Phase = &p })
+	}
 }
 
 func (e *jobEntry) sendFrame(t proto.FrameType, v any) {
@@ -387,6 +399,8 @@ func (e *jobEntry) finish(x proto.Exit) {
 		x.Node = d.self
 	}
 	x.Fallback = x.Fallback || j.Fallback
+	j.Fallback = x.Fallback
+	j.Phase = nil
 	j.State = x.State
 	code := x.Code
 	j.ExitCode = &code
@@ -418,7 +432,6 @@ func (e *jobEntry) finish(x proto.Exit) {
 		u := x.Usage
 		d.deps.Sched.Release(e.id, &u)
 	}
-	d.target.removeLocal(e.id)
 	if final.State == proto.JobSucceeded || final.State == proto.JobFailed {
 		d.deps.Est.Observe(&final)
 	}

@@ -184,7 +184,7 @@ func (t *targetSide) handleAdmit(ps *peerSession, pc *peerConn, req rawPeerReque
 		pc.fail(codeBadRequest, "malformed admit")
 		return
 	}
-	if err := t.admit(req.JobID, ps.name(), b.Alloc, b.Runtime, ps.s); err != nil {
+	if err := t.admit(req.JobID, ps.name(), b, ps.s); err != nil {
 		var ae *admitError
 		if errors.As(err, &ae) {
 			pc.fail(ae.code, "%s", ae.msg)

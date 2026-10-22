@@ -48,11 +48,11 @@ func (d *Daemon) routes(unix bool) http.Handler {
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusNotFound, "no such API endpoint: "+r.Method+" "+r.URL.Path, "check kran version on both sides")
 	})
-	ui := d.deps.UI
-	if ui == nil {
-		ui = placeholderUI()
+	if d.deps.UI != nil {
+		mux.Handle("/", d.deps.UI)
+	} else {
+		mux.Handle("/", http.NotFoundHandler())
 	}
-	mux.Handle("/", ui)
 	return mux
 }
 

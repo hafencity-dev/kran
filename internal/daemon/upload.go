@@ -23,7 +23,7 @@ const uploadWorkers = 4
 // throughput for the scheduler. It returns the raw bytes sent.
 func (d *Daemon) uploadBlobs(ctx context.Context, sess transport.Session, e *jobEntry, node string, m *proto.Manifest, plan proto.SyncPlan) (int64, error) {
 	if len(plan.Missing) == 0 {
-		e.sendFrame(proto.FramePhase, proto.Phase{State: proto.JobSyncing,
+		e.phase(proto.Phase{State: proto.JobSyncing,
 			Message: fmt.Sprintf("%s is up to date (%d changed, %d deleted)", node, plan.Changed, plan.Deleted), Progress: 1})
 		return 0, nil
 	}
@@ -40,7 +40,7 @@ func (d *Daemon) uploadBlobs(ctx context.Context, sess transport.Session, e *job
 		}
 	}
 	msg := fmt.Sprintf("sending %d files, %s", len(plan.Missing), humanBytes(total))
-	e.sendFrame(proto.FramePhase, proto.Phase{State: proto.JobSyncing, Message: msg})
+	e.phase(proto.Phase{State: proto.JobSyncing, Message: msg})
 
 	parent := ctx
 	ctx, cancel := context.WithCancel(ctx)
@@ -60,7 +60,7 @@ func (d *Daemon) uploadBlobs(ctx context.Context, sess transport.Session, e *job
 				return
 			case <-tk.C:
 				if total > 0 {
-					e.sendFrame(proto.FramePhase, proto.Phase{State: proto.JobSyncing, Message: msg,
+					e.phase(proto.Phase{State: proto.JobSyncing, Message: msg,
 						Progress: float64(sent.Load()) / float64(total)})
 				}
 			}

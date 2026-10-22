@@ -42,6 +42,8 @@ type fakeSched struct {
 	rejects  []string
 	jobs     map[string]proto.Job
 	rej      map[string]map[string]bool
+	foreign  map[string]scheduler.Placement
+	usage    map[string]proto.Resources
 }
 
 type fticket struct {
@@ -56,7 +58,8 @@ type fticket struct {
 
 func newFakeSched(origin string, place placeFunc) *fakeSched {
 	return &fakeSched{origin: origin, nodes: map[string]proto.NodeState{}, alloc: map[string]scheduler.Placement{}, place: place,
-		jobs: map[string]proto.Job{}, rej: map[string]map[string]bool{}}
+		jobs: map[string]proto.Job{}, rej: map[string]map[string]bool{},
+		foreign: map[string]scheduler.Placement{}, usage: map[string]proto.Resources{}}
 }
 
 func (t *fticket) JobID() string          { return t.job.Spec.ID }
@@ -101,6 +104,7 @@ func (s *fakeSched) Release(id string, u *proto.Usage) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.alloc, id)
+	delete(s.foreign, id)
 	s.released = append(s.released, id)
 }
 
@@ -159,14 +163,61 @@ func (s *fakeSched) Snapshot() scheduler.Snapshot {
 		snap.Queue = append(snap.Queue, t.job.Spec.ID)
 		snap.Reasons[t.job.Spec.ID] = t.reason
 	}
-	for _, p := range s.alloc {
-		a := snap.Allocated[p.Node]
-		a.CPUs += p.Alloc.CPUs
-		a.Mem += p.Alloc.Mem
-		snap.Allocated[p.Node] = a
-		snap.Running[p.Node]++
+	snap.Jobs = map[string][]string{}
+	for _, m := range []map[string]scheduler.Placement{s.alloc, s.foreign} {
+		for _, p := range m {
+			a := snap.Allocated[p.Node]
+			a.CPUs += p.Alloc.CPUs
+			a.Mem += p.Alloc.Mem
+			snap.Allocated[p.Node] = a
+			snap.Running[p.Node]++
+			snap.Jobs[p.Node] = append(snap.Jobs[p.Node], p.JobID)
+		}
 	}
 	return snap
+}
+
+// Admit: capacity of the self node minus every allocation there.
+func (s *fakeSched) Admit(job *proto.Job, rt proto.RuntimeKind) (scheduler.Placement, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id := job.Spec.ID
+	if p, ok := s.foreign[id]; ok {
+		return p, nil
+	}
+	n, ok := s.nodes[s.origin]
+	if !ok {
+		return scheduler.Placement{}, &scheduler.AdmitError{Code: "unknown", Reason: s.origin + ": not ready yet"}
+	}
+	if n.Status == proto.NodeDraining {
+		return scheduler.Placement{}, &scheduler.AdmitError{Code: "draining", Reason: s.origin + ": draining"}
+	}
+	capMem := n.Capacity.Mem
+	if capMem == 0 {
+		capMem = n.Info.MemTotal - n.Reserve.Mem
+	}
+	var used int64
+	for _, m := range []map[string]scheduler.Placement{s.alloc, s.foreign} {
+		for _, p := range m {
+			if p.Node == s.origin {
+				used += p.Alloc.Mem
+			}
+		}
+	}
+	res := proto.Resources{CPUs: job.Estimate.CPUs, Mem: job.Estimate.Mem}
+	if res.Mem > capMem-used {
+		return scheduler.Placement{}, &scheduler.AdmitError{Code: "busy",
+			Reason: fmt.Sprintf("%s: needs %s, has %s free", s.origin, humanBytes(res.Mem), humanBytes(capMem-used))}
+	}
+	p := scheduler.Placement{JobID: id, Node: s.origin, Runtime: rt, Alloc: res, Reason: "admitted"}
+	s.foreign[id] = p
+	return p, nil
+}
+
+func (s *fakeSched) UpdateJobUsage(id string, live proto.Resources) {
+	s.mu.Lock()
+	s.usage[id] = live
+	s.mu.Unlock()
 }
 
 func (s *fakeSched) Kick() {

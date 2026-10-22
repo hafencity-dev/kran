@@ -18,12 +18,14 @@ import (
 // event.
 func (d *Daemon) State() proto.State {
 	snap := d.deps.Sched.Snapshot()
-	nodes := []proto.NodeState{d.selfNodeState(snap, false)}
+	nodes := []proto.NodeState{d.selfNodeState(snap)}
 	for _, p := range d.peers.list() {
 		ns := p.nodeState()
-		ns.Capacity = p.grossCapacity()
 		if f, ok := snap.Free[ns.Info.Name]; ok {
 			ns.Free = f
+		}
+		if r := snap.Unavailable[ns.Info.Name]; r != "" && ns.Status == proto.NodeOnline {
+			ns.Reason = r
 		}
 		nodes = append(nodes, ns)
 	}
@@ -79,54 +81,42 @@ func (d *Daemon) State() proto.State {
 	return st
 }
 
-// grossCapacity is the peer's schedulable capacity before subtracting
-// anyone's allocations (for display).
-func (p *peer) grossCapacity() proto.Resources {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.st.Capacity
-}
-
-// selfNodeState describes this node. forScheduler subtracts what remote
-// origins (and restored local jobs) hold, so the scheduler only accounts
-// for its own placements.
-func (d *Daemon) selfNodeState(snap scheduler.Snapshot, forScheduler bool) proto.NodeState {
+// selfNodeState describes this node: gross capacity, the scheduler's own
+// totals (local jobs and admitted guests) and the guests themselves.
+func (d *Daemon) selfNodeState(snap scheduler.Snapshot) proto.NodeState {
 	info := d.nodeInfo()
-	m := d.deps.Prober.Sample()
-	capacity := d.target.selfCapacity()
-	foreign := d.target.foreignAllocs()
 	ns := proto.NodeState{
-		Info:     info,
-		Metrics:  m,
-		Status:   proto.NodeOnline,
-		Self:     true,
-		Capacity: capacity,
-		Reserve:  proto.Resources{CPUs: d.cfg.Accept.ReserveCPUs, Mem: d.cfg.Accept.ReserveMem},
-		Accepts:  d.cfg.Accept.Enabled,
-		LastSeen: d.now(),
-		Link:     proto.LinkInfo{Connected: true},
-	}
-	if forScheduler {
-		ns.Capacity.CPUs = maxf(capacity.CPUs-foreign.CPUs, 0)
-		ns.Capacity.Mem = max64(capacity.Mem-foreign.Mem, 0)
+		Info:          info,
+		Metrics:       d.deps.Prober.Sample(),
+		Status:        proto.NodeOnline,
+		Self:          true,
+		Capacity:      d.target.selfCapacity(),
+		Reserve:       proto.Resources{CPUs: d.cfg.Accept.ReserveCPUs, Mem: d.cfg.Accept.ReserveMem},
+		Accepts:       d.cfg.Accept.Enabled,
+		LastSeen:      d.now(),
+		Link:          proto.LinkInfo{Connected: true},
+		MaxJobs:       d.cfg.Accept.MaxJobs,
+		Allocated:     snap.Allocated[d.self],
+		AllocatedJobs: append([]string{}, snap.Jobs[d.self]...),
+		Free:          snap.Free[d.self],
+		Running:       snap.Running[d.self],
+		Guests:        d.target.guests(),
 	}
 	if d.draining.Load() {
 		ns.Status, ns.Reason = proto.NodeDraining, d.self+" is draining (undo: kran resume "+d.self+")"
 	} else if r := d.target.diskFloorReason(); r != "" {
 		ns.Status, ns.Reason = proto.NodeDegraded, r
+	} else if r := snap.Unavailable[d.self]; r != "" {
+		ns.Reason = r
 	}
-	a := snap.Allocated[d.self]
-	ns.Allocated = proto.Resources{CPUs: a.CPUs + foreign.CPUs, Mem: a.Mem + foreign.Mem}
-	ns.Free = snap.Free[d.self]
-	ns.Running = snap.Running[d.self] + d.target.runningRemote()
 	return ns
 }
 
 // publishSelf pushes this node to the scheduler and the UI.
 func (d *Daemon) publishSelf() {
-	snap := d.deps.Sched.Snapshot()
-	d.deps.Sched.UpdateNode(d.selfNodeState(snap, true))
-	d.bus.publish(proto.EventNode, d.selfNodeState(snap, false))
+	ns := d.selfNodeState(d.deps.Sched.Snapshot())
+	d.deps.Sched.UpdateNode(ns)
+	d.bus.publish(proto.EventNode, ns)
 }
 
 func (d *Daemon) publishState() {
@@ -149,9 +139,9 @@ func (d *Daemon) selfLoop(ctx context.Context) {
 	lastSig := ""
 	for {
 		d.refreshInfo(false)
-		snap := d.deps.Sched.Snapshot()
-		d.deps.Sched.UpdateNode(d.selfNodeState(snap, true))
-		ns := d.selfNodeState(snap, false)
+		d.target.sampleLive()
+		ns := d.selfNodeState(d.deps.Sched.Snapshot())
+		d.deps.Sched.UpdateNode(ns)
 		sig := fmt.Sprintf("%s|%s|%d", ns.Status, ns.Reason, ns.Running)
 		if sig != lastSig {
 			lastSig = sig
@@ -182,6 +172,7 @@ func (d *Daemon) sampleLocalJobs() {
 		if err != nil {
 			continue
 		}
+		d.deps.Sched.UpdateJobUsage(e.id, r)
 		e.update(func(j *proto.Job) { j.Live = &r })
 	}
 }

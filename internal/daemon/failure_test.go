@@ -594,7 +594,7 @@ func TestAdmissionIsAtomic(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if tg.admit(fmt.Sprintf("j%d", i), "o", proto.Resources{CPUs: 1, Mem: 1 << 30}, proto.RuntimeNative, nil) == nil {
+			if tg.admit(fmt.Sprintf("j%d", i), "o", admitBody{Alloc: proto.Resources{CPUs: 1, Mem: 1 << 30}, Runtime: proto.RuntimeNative}, nil) == nil {
 				mu.Lock()
 				ok++
 				mu.Unlock()
@@ -605,9 +605,9 @@ func TestAdmissionIsAtomic(t *testing.T) {
 	if ok != 4 {
 		t.Fatalf("%d admitted, want 4", ok)
 	}
-	err := tg.admit("big", "o", proto.Resources{CPUs: 1, Mem: 1 << 30}, proto.RuntimeNative, nil)
+	err := tg.admit("big", "o", admitBody{Alloc: proto.Resources{CPUs: 1, Mem: 1 << 30}, Runtime: proto.RuntimeNative}, nil)
 	var ae *admitError
-	if !errors.As(err, &ae) || ae.code != codeBusy || !strings.Contains(ae.msg, "needs 1.0 GiB") {
+	if !errors.As(err, &ae) || ae.code != "busy" || !strings.Contains(ae.msg, "needs 1.0 GiB") {
 		t.Fatalf("err %v", err)
 	}
 }

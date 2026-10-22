@@ -37,12 +37,6 @@ func (d *Daemon) submit(spec proto.JobSpec) (*jobEntry, error) {
 	if spec.SubmittedAt.IsZero() {
 		spec.SubmittedAt = d.now().UTC()
 	}
-	if spec.Priority == "" {
-		spec.Priority = proto.PriorityNormal
-		if spec.TTY != nil {
-			spec.Priority = proto.PriorityHigh
-		}
-	}
 	if spec.Req.OS == "" {
 		spec.Req.OS = proto.OSSame
 	}
@@ -113,6 +107,11 @@ func (d *Daemon) drive(ctx context.Context, e *jobEntry, mode driveMode) {
 		p, err := d.awaitPlacement(ctx, e, ticket)
 		if err != nil {
 			if errors.Is(err, errStopping) {
+				return
+			}
+			var ue *scheduler.UnplaceableError
+			if errors.As(err, &ue) {
+				d.unplaceable(e, ue.Reason)
 				return
 			}
 			d.deps.Sched.Cancel(e.id)
@@ -258,6 +257,21 @@ func (d *Daemon) awaitPlacement(ctx context.Context, e *jobEntry, t scheduler.Ti
 	}
 }
 
+// unplaceable ends a job the scheduler can never place with its flags.
+// With --remote/--no-fallback that is exit 125; otherwise the CLI gets a
+// FrameError before start and runs the command locally on its own.
+func (d *Daemon) unplaceable(e *jobEntry, reason string) {
+	spec := e.snapshot().Spec
+	if spec.NoFallback || spec.Req.Prefer == proto.PreferRemote {
+		e.finish(proto.Exit{Code: proto.ExitInfra, State: proto.JobInfraErr, Reason: reason})
+		return
+	}
+	e.sendFrame(proto.FrameError, proto.APIError{Error: reason, Hint: "kran run runs it locally"})
+	e.update(func(j *proto.Job) { j.Local = true })
+	e.finish(proto.Exit{Code: proto.ExitInfra, State: proto.JobCanceled, Fallback: true, Node: d.self,
+		Reason: reason + "; kran run ran it locally without the daemon"})
+}
+
 func (d *Daemon) finishCanceledBeforeStart(e *jobEntry) {
 	_, reason, sig := e.canceled()
 	if reason == "" {
@@ -297,7 +311,6 @@ func (d *Daemon) localEnvelope(e *jobEntry, p scheduler.Placement) *proto.LocalE
 }
 
 func (d *Daemon) runLocal(ctx context.Context, e *jobEntry, p scheduler.Placement) {
-	d.target.addLocal(e.id, p.Alloc, true)
 	job := e.snapshot()
 	env := d.localEnvelope(e, p)
 	e.sendFrame(proto.FrameDecision, proto.Decision{
@@ -376,7 +389,13 @@ func (d *Daemon) finishCanceledLocal(e *jobEntry) {
 // restart; without it the result is unknown.
 func (d *Daemon) restoreLocal(ctx context.Context, e *jobEntry) {
 	job := e.snapshot()
-	d.target.addLocal(e.id, job.Alloc, false)
+	// The new scheduler does not know this job: account for it as an
+	// admission on this node until it ends.
+	if _, err := d.deps.Sched.Admit(&job, proto.RuntimeNative); err == nil {
+		e.mu.Lock()
+		e.placed = true
+		e.mu.Unlock()
+	}
 	if !d.waitForCLI(ctx, e) {
 		if ctx.Err() != nil {
 			return

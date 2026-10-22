@@ -56,7 +56,8 @@ func (d *Daemon) runRemote(ctx context.Context, e *jobEntry, p scheduler.Placeme
 	})
 
 	actx, cancel := rpc(30 * time.Second)
-	err = peerOneShot(actx, sess, proto.PeerAdmit, e.id, admitBody{Origin: d.self, Alloc: p.Alloc, Runtime: p.Runtime}, nil)
+	err = peerOneShot(actx, sess, proto.PeerAdmit, e.id, admitBody{Origin: d.self, Alloc: p.Alloc, Runtime: p.Runtime,
+		Duration: job.Estimate.Duration, RepoID: spec.Workspace.RepoID, Owner: spec.Owner, Argv: spec.Argv}, nil)
 	cancel()
 	if peerCode(err) == codeJobStarted {
 		// Restarted before we persisted the start: it runs; follow it.
@@ -77,7 +78,7 @@ func (d *Daemon) runRemote(ctx context.Context, e *jobEntry, p scheduler.Placeme
 	}
 
 	e.setState(proto.JobSyncing, "syncing to "+node)
-	e.sendFrame(proto.FramePhase, proto.Phase{State: proto.JobSyncing, Message: "scanning workspace"})
+	e.phase(proto.Phase{State: proto.JobSyncing, Message: "scanning workspace"})
 	if d.deps.Scanner == nil {
 		abandon()
 		return fail(errors.New("this node cannot scan workspaces"))
@@ -113,7 +114,7 @@ func (d *Daemon) runRemote(ctx context.Context, e *jobEntry, p scheduler.Placeme
 		abandon()
 		return fail(fmt.Errorf("sync: %w", err))
 	}
-	e.sendFrame(proto.FramePhase, proto.Phase{State: proto.JobSyncing, Message: "updating the workspace on " + node, Progress: 1})
+	e.phase(proto.Phase{State: proto.JobSyncing, Message: "updating the workspace on " + node, Progress: 1})
 	cctx, cancel := rpc(d.t.PrestartTimeout)
 	err = peerOneShot(cctx, sess, proto.PeerSlotCommit, e.id, nil, nil)
 	cancel()
@@ -348,7 +349,7 @@ func (d *Daemon) pumpJob(ctx context.Context, e *jobEntry, node string, pc *peer
 					continue
 				}
 				d.onRemotePhase(e, node, ph)
-				e.spool.append(proto.FramePhase, p)
+				e.phase(ph)
 			case proto.FrameExit:
 				var x proto.Exit
 				if err := json.Unmarshal(p, &x); err != nil {

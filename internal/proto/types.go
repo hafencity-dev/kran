@@ -131,6 +131,8 @@ type NodeState struct {
 	// added by C: config accept.max_jobs (0 = unlimited) so origins
 	// respect a peer's job limit when placing.
 	MaxJobs int `json:"max_jobs,omitempty"`
+	// added by A (UI request): jobs other origins run on this node.
+	Guests []JobRef `json:"guests,omitempty"`
 	// added by C: IDs of the jobs counted in Allocated (from the node's own
 	// scheduler snapshot). Lets an origin tell which of its placements a
 	// peer's report already includes, so they are not counted twice.
@@ -310,6 +312,12 @@ type Job struct {
 	EndedAt   time.Time   `json:"ended_at,omitempty"`
 	Origin    string      `json:"origin"` // origin node name
 	QueuePos  int         `json:"queue_pos,omitempty"`
+	// added by A (UI request): when the job was placed, when the user's
+	// command started (same as StartedAt), and the last phase report
+	// (sync/setup progress) while it is not running yet.
+	PlacedAt  time.Time `json:"placed_at,omitempty"`
+	RunningAt time.Time `json:"running_at,omitempty"`
+	Phase     *Phase    `json:"phase,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -323,6 +331,8 @@ type Stats struct {
 	// SavedSeconds estimates origin wall time avoided by offloading today.
 	SavedSecondsToday float64 `json:"saved_seconds_today"`
 	CPUSecondsByNode  map[string]float64 `json:"cpu_seconds_by_node"`
+	// added by A (UI request): start of "today" (local midnight on the daemon).
+	Since time.Time `json:"since"`
 }
 
 type State struct {
@@ -391,13 +401,27 @@ type LogEvent struct {
 	Level string    `json:"level"` // "info" | "warn" | "error"
 	Msg   string    `json:"msg"`
 	Time  time.Time `json:"time"`
+	Node  string    `json:"node,omitempty"`
+	JobID string    `json:"job_id,omitempty"`
 }
 
-// OutputChunk is one event of the followed job log (GET
-// /api/v1/jobs/{id}/log?follow=1, SSE event "output").
+// OutputChunk is one message of the followed job log (GET
+// /api/v1/jobs/{id}/log?follow=1, unnamed SSE messages).
 // added by A: binary-safe log streaming for the CLI and the UI.
 type OutputChunk struct {
-	Stream string `json:"stream"` // "stdout" | "stderr"
-	Offset int64  `json:"offset"` // payload offset of the first byte
-	B64    string `json:"b64"`    // data, base64 (std encoding)
+	Offset int64  `json:"offset"`           // payload offset after this chunk
+	Data   string `json:"data"`             // the bytes as UTF-8 text (never splits a character)
+	Stream string `json:"stream,omitempty"` // "stdout" | "stderr"
+	B64    string `json:"b64,omitempty"`    // the same bytes, base64 (exact, for non-UTF-8 output)
+}
+
+// JobRef is a job another origin runs on a node (NodeState.Guests).
+// added by A (UI request): show jobs from other machines.
+type JobRef struct {
+	ID     string     `json:"id"`
+	Origin string     `json:"origin"`
+	Owner  Owner      `json:"owner"`
+	Argv   []string   `json:"argv,omitempty"`
+	Alloc  Resources  `json:"alloc"`
+	Live   *Resources `json:"live,omitempty"`
 }
