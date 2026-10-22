@@ -253,6 +253,14 @@ func Link(ctx context.Context, o Options) (*Result, error) {
 		return nil, err
 	}
 	changed = changed || ch
+	// A new binary on a machine that already runs kran: its daemon still
+	// runs the old one until the service restarts (after running jobs end).
+	if ch && info.ID != "" && info.PubKey != "" {
+		o.progress("restart", "Restarting kran on "+o.Host)
+		if _, err := c.kran(ctx, kranPath, nil, "service", "restart"); err != nil {
+			res.Notes = append(res.Notes, fmt.Sprintf("updated kran on %s, but its daemon still runs the old version: %v (run `kran service restart` there)", o.Host, err))
+		}
+	}
 
 	// --- first-time setup of the remote (node id, key, service)
 	if info.ID == "" || info.PubKey == "" {

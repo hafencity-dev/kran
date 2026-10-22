@@ -210,3 +210,33 @@ func TestUpgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Re-linking with a newer binary restarts the remote service, so its daemon
+// does not keep running the old build.
+func TestRelinkRestartsAfterUpdate(t *testing.T) {
+	w := newWorld(t)
+	w.start(true)
+	ctx := context.Background()
+	if _, err := Link(ctx, w.opts); err != nil {
+		t.Fatal(err)
+	}
+	logf := filepath.Join(w.remoteEnv["KRAN_STATE_DIR"], "service.log")
+	if _, err := Link(ctx, w.opts); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(logf); err == nil {
+		t.Fatal("restarted without a new binary")
+	}
+	newSelf := filepath.Join(t.TempDir(), "kran")
+	copyFile(t, w.self, newSelf)
+	f, _ := os.OpenFile(newSelf, os.O_APPEND|os.O_WRONLY, 0)
+	f.WriteString("\nnew build")
+	f.Close()
+	w.opts.SelfPath = newSelf
+	if _, err := Link(ctx, w.opts); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(logf); strings.TrimSpace(string(b)) != "restart" {
+		t.Fatalf("restart log %q", b)
+	}
+}
