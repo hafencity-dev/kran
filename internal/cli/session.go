@@ -63,6 +63,7 @@ type runner struct {
 	lastRecv time.Time
 	local    *localProc
 	localCh  <-chan proto.Exit
+	tee      *historyTee // local output → daemon (job history)
 	fallback bool
 	lastInt  time.Time
 
@@ -188,6 +189,11 @@ func (r *runner) clearNote() {
 func (r *runner) Run(ctx context.Context) int {
 	r.quit = make(chan struct{})
 	defer close(r.quit)
+	defer func() {
+		if r.tee != nil {
+			r.tee.stop()
+		}
+	}()
 	r.frames = make(chan frameMsg, 64)
 	r.reconnectCh = make(chan reconnectResult, 1)
 
@@ -264,8 +270,12 @@ func defaultEnvelope() *proto.LocalEnvelope {
 }
 
 func (r *runner) localJob(env *proto.LocalEnvelope) localJob {
-	return localJob{JobID: r.jobID, Argv: r.spec.Argv, Dir: r.spec.Cwd, Env: r.env, Envelope: env,
+	j := localJob{JobID: r.jobID, Argv: r.spec.Argv, Dir: r.spec.Cwd, Env: r.env, Envelope: env,
 		Stdio: r.stdio, ScopeProbe: r.probe}
+	if r.tee != nil {
+		j.Tee = r.tee.push
+	}
+	return j
 }
 
 // standalone runs the command locally with no daemon involvement.
@@ -324,6 +334,9 @@ func (r *runner) attach(s client.RunSession) {
 }
 
 func (r *runner) closeSession() {
+	if r.tee != nil {
+		r.tee.setSession(nil)
+	}
 	if r.sess != nil {
 		_ = r.sess.Close()
 		r.sess = nil
@@ -379,6 +392,9 @@ func (r *runner) loop(ctx context.Context) int {
 				return code
 			}
 		case <-r.winch:
+			if r.local != nil {
+				r.local.resize()
+			}
 			if r.remote && r.size != nil {
 				if t := r.size(); t != nil {
 					r.sendJSON(proto.FrameResize, t)
@@ -525,6 +541,12 @@ func (r *runner) onDecision(ctx context.Context, d proto.Decision) (int, bool) {
 		r.fallback = true
 	}
 	r.remote = false
+	if r.tee == nil && r.sess != nil {
+		// The output also goes to the daemon, so kran logs and the UI
+		// show local jobs like remote ones (SPEC §8.2).
+		r.tee = newHistoryTee(teeQueueMax)
+		r.tee.setSession(r.sess)
+	}
 	p, lerr := r.start(r.localJob(d.Envelope))
 	if lerr != nil {
 		r.sendJSON(proto.FrameExit, proto.Exit{JobID: d.JobID, Code: lerr.Code, State: proto.JobFailed, Reason: lerr.Msg})
@@ -540,6 +562,14 @@ func (r *runner) onLocalDone(ex proto.Exit) int {
 	ex.JobID = r.jobID
 	ex.Fallback = r.fallback
 	r.local, r.localCh = nil, nil
+	if r.tee != nil {
+		// The history gets the output before the exit closes it; a daemon
+		// that cannot keep up delays the exit by at most teeFlushWait.
+		r.tee.flush(teeFlushWait)
+		if r.tee.stop() {
+			r.send(proto.FrameStdout, []byte("\n"+historyTruncated+"\n"))
+		}
+	}
 	r.sendJSON(proto.FrameExit, ex)
 	r.event("exit", map[string]any{"code": ex.Code, "signal": ex.Signal, "state": ex.State, "fallback": r.fallback})
 	return ex.Code
@@ -642,6 +672,9 @@ func (r *runner) onReconnect(ctx context.Context, rr reconnectResult) (int, bool
 		// A restarted daemon lost the child's process group: without it, it
 		// could not kill the child if this kran run dies later.
 		r.sendJSON(proto.FrameStarted, r.local.Started)
+	}
+	if r.tee != nil {
+		r.tee.setSession(r.sess) // output only after reattach and started
 	}
 	return 0, false
 }

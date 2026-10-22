@@ -488,6 +488,17 @@ func runLocalChild(rs client.RunSession, spec proto.JobSpec, dc proto.Decision, 
 	res.stdout.Write(so.Bytes())
 	res.stderr.Write(se.Bytes())
 	res.mu.Unlock()
+	// Like kran run: a copy of the output for the history, before the exit.
+	for _, f := range []struct {
+		t proto.FrameType
+		b []byte
+	}{{proto.FrameStdout, so.Bytes()}, {proto.FrameStderr, se.Bytes()}} {
+		if len(f.b) > 0 {
+			if err := rs.Send(f.t, f.b); err != nil {
+				return err
+			}
+		}
+	}
 	code := 0
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {

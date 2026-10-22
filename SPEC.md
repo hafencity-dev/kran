@@ -188,10 +188,11 @@ Flags: `-l/--local`, `-r/--remote`, `-n/--node NAME`, `--gpu`, `--cpus N`,
    sends `notice` frames with the wait reason (CLI prints at most one line per
    reason change, only when the wait exceeds 2 s, unless `--quiet`).
 5. **Local placement:** daemon replies `decision{mode:"local", envelope}`.
-   The CLI executes the command itself as a child (inheriting the tty, so
-   colors/progress work), inside a transient systemd scope in `kran.slice`
+   The CLI executes the command itself as a child (on a pty that mirrors
+   the terminal, so colors/progress and interactive programs work), inside a transient systemd scope in `kran.slice`
    on Linux (memory cap from envelope) or its own process group on macOS,
-   reports `started{pid, scope}` and later `exit{code, usage}`. If the CLI
+   reports `started{pid, scope}` and later `exit{code, usage}`, and copies
+   the output to the daemon for the history (§8.2). If the CLI
    dies, the socket closes, the daemon kills the scope/process group and
    frees the slot.
 6. **Remote placement:** daemon replies `decision{mode:"remote", node,
@@ -413,6 +414,18 @@ Control frame payloads are JSON (`proto.RunFrame*` types); data frames are
 raw bytes. Types: `submit`, `notice`, `decision`, `started`, `stdin`,
 `stdin_eof`, `stdout`, `stderr`, `resize`, `signal`, `exit`, `heartbeat`,
 `reattach`, `error`. See `internal/proto/frames.go`.
+
+`stdout`/`stderr` also flow client→daemon for a job the CLI runs locally:
+a copy of the child's output for the job history (`kran logs`, the UI).
+The CLI sits between child and terminal (a pty with the terminal's
+settings when the output is a terminal, pipes otherwise) and writes every
+read to the real destination first, unbuffered; the copy goes through a
+bounded queue (8 MiB) that never blocks the child: when the daemon falls
+behind, data is dropped and `[kran: output truncated in history]` is
+recorded instead. Frames are sent only after `started` (after `reattach` +
+`started` on a new session) and before `exit`. The daemon appends them to
+the job's spool (at most 64 MiB per job, then the same mark) and never
+echoes them back to run sessions; older daemons ignore them.
 
 ### 8.3 Peer protocol
 

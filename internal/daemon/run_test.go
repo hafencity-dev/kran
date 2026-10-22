@@ -25,8 +25,18 @@ func TestLocalRun(t *testing.T) {
 	if res.exit == nil || res.exit.Code != 3 || res.exit.State != proto.JobFailed {
 		t.Fatalf("exit = %+v", res.exit)
 	}
+	// The CLI's copy of the output is recorded, not echoed back to it.
 	if res.out() != "hi" || res.errOut() != "oops\n" {
 		t.Fatalf("out %q err %q", res.out(), res.errOut())
+	}
+	cl, err := client.DialSocket(ctx, a.sock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cl.Close()
+	var log strings.Builder
+	if err := cl.Log(ctx, res.jobID, false, &log); err != nil || log.String() != "hioops\n" {
+		t.Fatalf("history of the local job: %q %v", log.String(), err)
 	}
 	if len(res.decisions) != 1 || res.decisions[0].Mode != "local" || res.decisions[0].Envelope == nil {
 		t.Fatalf("decisions %+v", res.decisions)
@@ -208,5 +218,67 @@ func TestFirstContainerJobSaysTheRuntimeIsBeingPrepared(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("phases %+v", res.phases)
+	}
+}
+
+// A local job's history is capped like a remote job's in-memory tail; the
+// cut is marked.
+func TestLocalOutputHistoryIsCapped(t *testing.T) {
+	old := localHistoryMax
+	localHistoryMax = 10
+	defer func() { localHistoryMax = old }()
+	c := newCluster(t, "a")
+	a := c.nodes["a"]
+	a.start()
+	ws := workspaceDir(t, map[string]string{"f": "x"})
+	ctx, cancel := testContext(20 * time.Second)
+	defer cancel()
+	res, err := runCLI(ctx, a.sock(), shSpec(ws, "echo 0123456789abcdef; echo more >&2"), cliOpts{})
+	if err != nil || res.exit == nil || res.exit.Code != 0 {
+		t.Fatalf("%v %+v", err, res.exit)
+	}
+	cl, err := client.DialSocket(ctx, a.sock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cl.Close()
+	var log strings.Builder
+	if err := cl.Log(ctx, res.jobID, false, &log); err != nil {
+		t.Fatal(err)
+	}
+	if want := "0123456789\n[kran: output truncated in history]\n"; log.String() != want {
+		t.Fatalf("history %q, want %q", log.String(), want)
+	}
+}
+
+// Output frames from the CLI of a remote job are not the job's output.
+func TestOutputFramesOfARemoteJobsCLIAreIgnored(t *testing.T) {
+	c := newCluster(t, "a", "b")
+	a, b := c.nodes["a"], c.nodes["b"]
+	a.place = preferRemote("b")
+	b.start()
+	a.start()
+	c.waitOnline("a", "b")
+	ws := workspaceDir(t, map[string]string{"f": "x"})
+	ctx, cancel := testContext(20 * time.Second)
+	defer cancel()
+	res, err := runCLI(ctx, a.sock(), shSpec(ws, "echo remote"), cliOpts{
+		hook: func(rs client.RunSession, ft proto.FrameType, p []byte, r *cliResult) error {
+			if ft == proto.FrameDecision {
+				rs.Send(proto.FrameStdout, []byte("forged\n"))
+			}
+			return nil
+		}})
+	if err != nil || res.exit == nil || res.out() != "remote\n" {
+		t.Fatalf("%v %+v %q", err, res.exit, res.out())
+	}
+	cl, err := client.DialSocket(ctx, a.sock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cl.Close()
+	var log strings.Builder
+	if err := cl.Log(ctx, res.jobID, false, &log); err != nil || log.String() != "remote\n" {
+		t.Fatalf("history %q %v", log.String(), err)
 	}
 }

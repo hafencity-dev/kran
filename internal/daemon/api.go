@@ -334,7 +334,7 @@ func (d *Daemon) handleLog(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "invalid job id", "")
 		return
 	}
-	job, ok := d.jobs.find(id)
+	_, ok := d.jobs.find(id)
 	if !ok {
 		writeAPIError(w, http.StatusNotFound, "no job "+id, "list jobs: kran jobs")
 		return
@@ -355,11 +355,7 @@ func (d *Daemon) handleLog(w http.ResponseWriter, r *http.Request) {
 	} else {
 		path := filepath.Join(d.deps.Dirs.spoolDir(), id)
 		if _, err := os.Stat(path); err != nil {
-			if job.Local {
-				writeAPIError(w, http.StatusNotFound, "job "+id+" ran locally; kran does not capture the output of local jobs", "")
-			} else {
-				writeAPIError(w, http.StatusNotFound, "the output of job "+id+" is no longer kept", "")
-			}
+			writeAPIError(w, http.StatusNotFound, "the output of job "+id+" is no longer kept", "output is kept for 7 days")
 			return
 		}
 		var err error

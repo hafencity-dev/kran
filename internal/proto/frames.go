@@ -20,8 +20,8 @@ const (
 	FrameStarted   FrameType = 4  // both           JSON Started
 	FrameStdin     FrameType = 5  // client→daemon  raw
 	FrameStdinEOF  FrameType = 6  // client→daemon  empty
-	FrameStdout    FrameType = 7  // daemon→client  raw
-	FrameStderr    FrameType = 8  // daemon→client  raw
+	FrameStdout    FrameType = 7  // both           raw (client→daemon: a local job's output for the history; added by P1)
+	FrameStderr    FrameType = 8  // both           raw (as FrameStdout)
 	FrameResize    FrameType = 9  // client→daemon  JSON TTY
 	FrameSignal    FrameType = 10 // client→daemon  JSON Signal
 	FrameExit      FrameType = 11 // both           JSON Exit (client sends it for local jobs)

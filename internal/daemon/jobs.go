@@ -64,6 +64,11 @@ type jobEntry struct {
 	outbox       *outbox // remote: frames for the target
 	lastPhasePub time.Time
 	tty          *proto.TTY
+
+	// Output of a local job, sent by its CLI for the history (spooled,
+	// never echoed back).
+	localOut int64
+	localCut bool
 }
 
 type localEvent struct {
