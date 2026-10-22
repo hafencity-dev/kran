@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/hafencity-dev/kran/internal/proto"
 )
 
 // hostEnv is the node's own environment for native jobs, captured once at
@@ -505,15 +507,5 @@ func nativeArgv(argv []string, path string, tp toolPlan, mise string) []string {
 	return out
 }
 
-// memCap derives the job's memory cap (SPEC §6.8): twice the admitted
-// estimate, at least 2 GiB, at most what is free right now.
-func memCap(alloc int64, avail int64) int64 {
-	if alloc <= 0 {
-		return 0
-	}
-	c := max(2*alloc, 2*gib)
-	if avail > 0 && c > avail {
-		c = max(avail, alloc)
-	}
-	return c
-}
+// memCap derives the job's memory cap (proto.MemCap).
+func memCap(alloc, avail int64, explicit bool) int64 { return proto.MemCap(alloc, avail, explicit) }

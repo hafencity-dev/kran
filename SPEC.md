@@ -484,7 +484,9 @@ says where cpu/mem came from (`learned`, `repo:<family>`,
 came from, `repo_samples` how many runs a `repo:` estimate rests on.
 Usage is measured per job: Linux cgroup (`memory.peak`, `cpu.stat`),
 container (`docker stats` sampling / cgroup), macOS (1 s sampling of the
-process tree RSS + CPU time).
+process tree RSS + CPU time; every 200 ms when the job has a memory cap,
+which macOS can only enforce this way: a spike shorter than a sample can
+pass, anything that holds the memory is stopped).
 
 ### 6.7 Workspace sync (`internal/workspace` + `internal/execenv`)
 
@@ -655,8 +657,10 @@ process tree RSS + CPU time).
   node's floor (max(10 GiB, 5%) of that disk, or `DiskFloor`), container
   slots are refused with reason `disk` and the next reaper pass trims at
   once.
-* Resource caps: memory cap = admitted estimate × 2, at least 2 GiB, at most
-  free memory at start; on cap breach the job is OOM-killed and the exit
+* Resource caps: memory cap = admitted memory × 2, at least 8 GiB for an
+  estimate (a first compile or link of a large package needs more than its
+  siblings' estimate; the cap reserves nothing) and 2 GiB for an explicit
+  `--mem`, at most free memory at start (`proto.MemCap`); on cap breach the job is OOM-killed and the exit
   reason says so (`kran: job hit its 6 GiB memory cap on devmac — rerun with
   --mem 12G`); the estimate learns the peak, so the next run gets more.
   Linux local jobs: same via scope. macOS native: watchdog kills the job

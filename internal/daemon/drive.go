@@ -405,15 +405,11 @@ func (d *Daemon) localEnvelope(e *jobEntry, p scheduler.Placement) *proto.LocalE
 			"KRAN_NODE":   d.self,
 		},
 	}
-	// SPEC §6.8: cap = 2 × estimate, at least 2 GiB, at most what is free.
-	limit := 2 * p.Alloc.Mem
-	if limit < 2<<30 {
-		limit = 2 << 30
-	}
-	if avail := d.deps.Prober.Sample().MemAvailable; avail > 0 && limit > avail {
-		limit = avail
-	}
-	env.MemMax = limit
+	// SPEC §6.8 (proto.MemCap).
+	e.mu.Lock()
+	explicit := e.job.Spec.Req.Mem > 0
+	e.mu.Unlock()
+	env.MemMax = proto.MemCap(p.Alloc.Mem, d.deps.Prober.Sample().MemAvailable, explicit)
 	if s := d.deps.Slice; s != nil && s.Available() {
 		env.Slice = s.Name()
 		s.Refresh()

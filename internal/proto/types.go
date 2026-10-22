@@ -13,6 +13,26 @@ const (
 	ProtocolMinor = 1
 )
 
+// MemCap is a job's memory cap (SPEC §6.8): twice its admitted memory, at
+// most what is free when it starts. An estimated allocation gets at least
+// 8 GiB of room: the cap only kills, it reserves nothing, and a first
+// compile or link of a large package easily needs more than the estimate
+// of its smaller siblings. An explicit --mem gets at least 2 GiB.
+func MemCap(alloc, avail int64, explicit bool) int64 {
+	if alloc <= 0 {
+		return 0
+	}
+	floor := int64(8 << 30)
+	if explicit {
+		floor = 2 << 30
+	}
+	c := max(2*alloc, floor)
+	if avail > 0 && c > avail {
+		c = max(avail, alloc)
+	}
+	return c
+}
+
 // Process caps on Linux (systemd TasksMax, threads included). A job's scope
 // and kran.slice as a whole stop a runaway fork loop at the cap instead of
 // letting it take the machine down; a parallel build with threaded test

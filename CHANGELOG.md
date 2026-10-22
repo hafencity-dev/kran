@@ -13,6 +13,9 @@ All notable changes to kran. Versions follow [semantic versioning](https://semve
 
 ### Fixes
 
+- A job sized by an estimate may use at least 8 GiB before kran stops it (the cap only kills, it reserves nothing), so the first `go test` of a large package no longer hits a cap sized from its smaller siblings. An explicit `--mem` keeps its exact cap.
+- On macOS, where kran enforces a memory cap by measuring, a capped job is measured every 200 ms instead of every second.
+
 - A remote job's first output byte can no longer overtake its "running" notice, which the origin uses to decide between falling back and exit 125.
 - The test suites pass on macOS (path symlinks, process lookup, a root-only test path) and tolerate a heavily loaded CI runner.
 

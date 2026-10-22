@@ -138,16 +138,22 @@ func TestNativeEnv(t *testing.T) {
 }
 
 func TestMemCapAndUnits(t *testing.T) {
-	if c := memCap(3*gib, 100*gib); c != 6*gib {
-		t.Errorf("memCap = %d", c)
+	if c := memCap(3*gib, 100*gib, true); c != 6*gib {
+		t.Errorf("explicit: memCap = %d", c)
 	}
-	if c := memCap(512<<20, 100*gib); c != 2*gib {
-		t.Errorf("min 2 GiB: %d", c)
+	if c := memCap(512<<20, 100*gib, true); c != 2*gib {
+		t.Errorf("explicit floor: memCap = %d", c)
 	}
-	if c := memCap(4*gib, 5*gib); c != 5*gib {
-		t.Errorf("bounded by free: %d", c)
+	if c := memCap(512<<20, 100*gib, false); c != 8*gib {
+		t.Errorf("estimate floor: memCap = %d", c)
 	}
-	if c := memCap(0, 5*gib); c != 0 {
+	if c := memCap(6*gib, 100*gib, false); c != 12*gib {
+		t.Errorf("estimate: memCap = %d", c)
+	}
+	if c := memCap(4*gib, 5*gib, false); c != 5*gib {
+		t.Errorf("bounded by free memory: memCap = %d", c)
+	}
+	if c := memCap(0, 5*gib, false); c != 0 {
 		t.Errorf("no estimate, no cap: %d", c)
 	}
 	for b, want := range map[int64]string{6 * gib: "6 GiB", 5 * gib / 2: "2.5 GiB", 512 << 20: "512 MiB"} {

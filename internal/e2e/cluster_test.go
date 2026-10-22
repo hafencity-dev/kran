@@ -648,6 +648,39 @@ func processesWithDarwin(marker string) []procInfo {
 	return res
 }
 
+// procEnvVisible reports whether this host lets processesWith see other
+// processes' environment. On a Mac with SIP, ps -E shows none for Apple's
+// own binaries (/bin/sh, /bin/sleep); CI's macOS VMs have SIP off.
+var procEnvVisible = sync.OnceValue(func() bool {
+	if hostOS() != "darwin" {
+		return true
+	}
+	marker := fmt.Sprintf("KRAN_E2E_PROBE=%d", os.Getpid())
+	cmd := exec.Command("/bin/sleep", "5")
+	cmd.Env = append(os.Environ(), marker)
+	if cmd.Start() != nil {
+		return false
+	}
+	defer func() { cmd.Process.Kill(); cmd.Wait() }()
+	for _, p := range processesWith(marker + "\x00") {
+		if p.pid == cmd.Process.Pid {
+			return true
+		}
+	}
+	return false
+})
+
+// jobProcsCheckable reports whether a test can look for a job's processes
+// by KRAN_JOB_ID; when not, it says so in the test log.
+func jobProcsCheckable(t *testing.T) bool {
+	t.Helper()
+	if procEnvVisible() {
+		return true
+	}
+	t.Log("this Mac hides other processes' environment (SIP): process checks skipped")
+	return false
+}
+
 // processesWithJobID lists processes carrying KRAN_JOB_ID=id.
 func processesWithJobID(id string) []procInfo { return processesWith("KRAN_JOB_ID=" + id + "\x00") }
 

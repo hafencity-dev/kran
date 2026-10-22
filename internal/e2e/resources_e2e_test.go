@@ -73,7 +73,9 @@ func TestE2EMemoryCap(t *testing.T) {
 	a, b := c.node("a"), c.node("b")
 	repo := makeRepo(t, filepath.Join(c.base, "repo"), map[string]string{"f": "x"})
 	// --mem 1G → cap max(2×1 GiB, 2 GiB) = 2 GiB; the job touches 3 GiB.
-	alloc := []string{"python3", "-c", "import sys; x = bytearray(3 << 30); x[::4096] = b'a' * len(x[::4096]); print('survived')"}
+	// It holds the memory a moment: on macOS the cap is enforced by sampling
+	// (SPEC §6.8), which a spike shorter than a sample can slip past.
+	alloc := []string{"python3", "-c", "import time; x = bytearray(3 << 30); x[::4096] = b'a' * len(x[::4096]); time.sleep(2); print('survived')"}
 	r := a.kran(runOpts{dir: repo}, append([]string{"run", "-n", "b", "--mem", "1G", "--"}, alloc...)...)
 	if r.code != 137 || strings.Contains(string(r.stdout), "survived") {
 		t.Errorf("remote job over its cap: %s", r)

@@ -224,7 +224,8 @@ func TestE2EQueueReasonAndCancel(t *testing.T) {
 	if !p.waitStdout("started", 60*time.Second) {
 		t.Fatalf("remote job: %s", p.wait())
 	}
-	if procs := processesWithJobID(id); len(procs) == 0 {
+	check := jobProcsCheckable(t)
+	if procs := processesWithJobID(id); check && len(procs) == 0 {
 		t.Errorf("no processes with KRAN_JOB_ID=%s while it runs", id)
 	}
 	if r := a.kran(runOpts{}, "cancel", id[:9]); r.code != 0 {
@@ -234,7 +235,7 @@ func TestE2EQueueReasonAndCancel(t *testing.T) {
 	if r.code != 143 {
 		t.Errorf("canceled remote job: %s", r)
 	}
-	if !poll(15*time.Second, func() bool { return len(processesWithJobID(id)) == 0 }) {
+	if check && !poll(15*time.Second, func() bool { return len(processesWithJobID(id)) == 0 }) {
 		t.Errorf("processes of canceled job survive: %v", processesWithJobID(id))
 	}
 	if j, _ := a.job(id); j.State != proto.JobCanceled {
@@ -400,7 +401,7 @@ func TestE2ELeaseExpiryAfterNetworkCut(t *testing.T) {
 	if d := time.Since(cut); d > 45*time.Second {
 		t.Errorf("CLI took %v to give up", d)
 	}
-	if !poll(execLease+15*time.Second-time.Since(cut), func() bool { return len(processesWithJobID(id)) == 0 }) {
+	if jobProcsCheckable(t) && !poll(execLease+15*time.Second-time.Since(cut), func() bool { return len(processesWithJobID(id)) == 0 }) {
 		t.Errorf("job processes survive the lease: %v", processesWithJobID(id))
 	}
 	a.proxy.SetDown(false)

@@ -111,12 +111,13 @@ func TestE2ECLIKilled(t *testing.T) {
 		if !p.waitStdout("started", 60*time.Second) {
 			t.Fatal(p.wait())
 		}
-		if len(processesWithJobID(id)) == 0 {
+		check := jobProcsCheckable(t)
+		if check && len(processesWithJobID(id)) == 0 {
 			t.Fatalf("%v: no job processes found", where)
 		}
 		p.signal(syscall.SIGKILL)
 		p.wait()
-		if !poll(30*time.Second, func() bool { return len(processesWithJobID(id)) == 0 }) {
+		if check && !poll(30*time.Second, func() bool { return len(processesWithJobID(id)) == 0 }) {
 			t.Errorf("%v: job processes survive their CLI: %v", where, processesWithJobID(id))
 		}
 		j := a.waitJob(id, 30*time.Second, func(j proto.Job) bool { return j.State.Terminal() })

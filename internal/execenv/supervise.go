@@ -692,15 +692,26 @@ func (s *supervisor) watchLease() {
 	}
 }
 
+// capSampleEvery is how often a native job without a cgroup is measured
+// against its memory cap.
+const capSampleEvery = 200 * time.Millisecond
+
 // sample records live usage once per SampleEvery, tracks the peak and, for
 // native jobs without a cgroup, enforces the memory cap.
 func (s *supervisor) sample() {
 	defer close(s.sampleDone)
+	every := s.spec.SampleEvery
+	if s.cg == nil && s.spec.Docker == nil && s.spec.MemMax > 0 && every > capSampleEvery {
+		// Without a cgroup or a container the cap is enforced only here
+		// (native jobs on macOS): sample often enough to stop a job before
+		// it takes the machine's memory.
+		every = capSampleEvery
+	}
 	for {
 		select {
 		case <-s.sampleStop:
 			return
-		case <-time.After(s.spec.SampleEvery):
+		case <-time.After(every):
 		}
 		s.mu.Lock()
 		cmd, pgid, container := s.cmd, s.pgid, s.container

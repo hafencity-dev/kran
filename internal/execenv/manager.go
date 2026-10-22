@@ -509,7 +509,7 @@ func (m *manager) Start(ctx context.Context, req StartRequest) (Process, error) 
 		JobID: id, Node: m.opts.NodeName, Namespace: m.ns, Runtime: req.Runtime,
 		TTY: req.Spec.TTY, Stdin: req.Spec.Stdin, Nice: req.Nice,
 		LeaseTTL: m.tun.leaseTTL, KillGrace: m.tun.killGrace, SampleEvery: m.tun.sampleEvery,
-		MemMax: memCap(req.Alloc.Mem, memAvailable()), CPUs: req.Alloc.CPUs,
+		MemMax: memCap(req.Alloc.Mem, memAvailable(), req.Spec.Req.Mem > 0), CPUs: req.Alloc.CPUs,
 		CtlPath: ctlPath(dir, id), Slot: req.Slot,
 	}
 	if m.tun.memMax > 0 {
