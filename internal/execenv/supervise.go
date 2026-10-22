@@ -255,6 +255,8 @@ func (s *supervisor) event(e event) {
 }
 
 func (s *supervisor) writeStatus(exit proto.Exit) {
+	// Everything the job owned is gone before anyone learns it ended.
+	os.RemoveAll(filepath.Join(s.dir, dirTmp))
 	if err := writeJSONAtomic(filepath.Join(s.dir, fileStatus), exit); err != nil {
 		s.logf("write status: %v", err)
 	}

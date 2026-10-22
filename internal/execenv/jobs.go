@@ -32,15 +32,16 @@ type jobState struct {
 	done chan struct{}
 	exit proto.Exit
 
-	mu       sync.Mutex
-	onPhase  func(proto.Phase)
-	evOff    int64
-	ready    bool
-	running  bool
-	ctl      net.Conn
-	slot     *slot
-	autoFree bool // release the slot when the job ends (jobs re-indexed after a restart)
-	endedAt  time.Time
+	mu        sync.Mutex
+	onPhase   func(proto.Phase)
+	evOff     int64
+	ready     bool
+	running   bool
+	ctl       net.Conn
+	slot      *slot
+	autoFree  bool // release the slot when the job ends (jobs re-indexed after a restart)
+	finishing bool
+	endedAt   time.Time
 }
 
 func (js *jobState) statusPath() string { return filepath.Join(js.dir, fileStatus) }
@@ -146,10 +147,11 @@ func (js *jobState) readEvents() {
 
 func (js *jobState) finish(exit proto.Exit) {
 	js.mu.Lock()
-	if js.isDone() {
+	if js.isDone() || js.finishing {
 		js.mu.Unlock()
 		return
 	}
+	js.finishing = true
 	js.exit = exit
 	js.endedAt = time.Now()
 	if js.ctl != nil {
@@ -157,14 +159,18 @@ func (js *jobState) finish(exit proto.Exit) {
 		js.ctl = nil
 	}
 	sl, free := js.slot, js.autoFree
-	close(js.done)
 	js.mu.Unlock()
+	// Free the slot before announcing the end: a caller woken by Wait may
+	// reuse the slot right away.
 	if sl != nil {
 		js.m.pool.setJob(sl, "")
 		if free {
 			js.m.pool.release(sl)
 		}
 	}
+	js.mu.Lock()
+	close(js.done)
+	js.mu.Unlock()
 	js.m.logf("job %s ended: %s (exit %d)", js.id, exit.State, exit.Code)
 }
 

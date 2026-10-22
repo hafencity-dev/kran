@@ -265,6 +265,12 @@ func (p *slotPool) setJob(s *slot, job string) {
 	p.mu.Unlock()
 }
 
+func (p *slotPool) jobOf(s *slot) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return s.job
+}
+
 func (p *slotPool) setManifest(s *slot, m *proto.Manifest) {
 	p.mu.Lock()
 	s.manifest = m

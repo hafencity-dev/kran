@@ -365,8 +365,8 @@ func (m *manager) Commit(ctx context.Context, ref proto.SlotRef, mf *proto.Manif
 	if err != nil {
 		return err
 	}
-	if s.job != "" {
-		return fmt.Errorf("slot %s/%d is in use by job %s", short(s.repo), s.index, s.job)
+	if job := m.pool.jobOf(s); job != "" {
+		return fmt.Errorf("slot %s/%d is in use by job %s", short(s.repo), s.index, job)
 	}
 	if s.loc == locHost {
 		if _, err := commitLocal(m.pool.hostPath(s), mf, m.blobs, max(2, runtime.NumCPU()/2), runtime.GOOS == "darwin"); err != nil {
@@ -413,8 +413,8 @@ func (m *manager) Start(ctx context.Context, req StartRequest) (Process, error) 
 	if want := m.slotLocFor(req.Runtime); want != s.loc {
 		return nil, fmt.Errorf("slot %s/%d does not belong to the %s runtime", short(s.repo), s.index, req.Runtime)
 	}
-	if s.job != "" {
-		return nil, fmt.Errorf("slot %s/%d is in use by job %s", short(s.repo), s.index, s.job)
+	if job := m.pool.jobOf(s); job != "" {
+		return nil, fmt.Errorf("slot %s/%d is in use by job %s", short(s.repo), s.index, job)
 	}
 	m.jobsMu.Lock()
 	_, dup := m.jobs[id]
