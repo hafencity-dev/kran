@@ -161,3 +161,22 @@ func TestSize(t *testing.T) {
 		t.Error(FormatSize(8<<30), FormatSize(3<<29))
 	}
 }
+
+func TestEnsureKey(t *testing.T) {
+	t.Setenv("KRAN_CONFIG_DIR", t.TempDir())
+	pub, created, err := EnsureKey("gx10")
+	if err != nil || !created || !strings.HasPrefix(pub, "ssh-ed25519 ") || !strings.HasSuffix(pub, " kran@gx10") {
+		t.Fatal(pub, created, err)
+	}
+	pub2, created2, err := EnsureKey("gx10")
+	if err != nil || created2 || pub2 != pub {
+		t.Fatal("second call must be a no-op", created2, err)
+	}
+	if st, _ := os.Stat(filepath.Join(os.Getenv("KRAN_CONFIG_DIR"), "id_ed25519")); st.Mode().Perm() != 0o600 {
+		t.Fatalf("private key mode %v", st.Mode())
+	}
+	s, err := Signer()
+	if err != nil || s.PublicKey() == nil {
+		t.Fatal(err)
+	}
+}
