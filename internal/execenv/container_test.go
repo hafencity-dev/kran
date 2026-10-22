@@ -270,13 +270,14 @@ func testContainerRuntime(t *testing.T, volume bool) {
 		p := te.startCtr(ref, sh(`readlink /var/run/docker.sock; test -S "$(readlink /var/run/docker.sock)" && echo proxy-up
 ls /proc/self/fd | tr '\n' ' '; echo
 flock -n -x /kran/cache/.kran-lock true 2>/dev/null && echo unlocked || echo locked
-env | grep -c '^KRAN_INIT_' || true`))
+env | grep -c '^KRAN_INIT_' || true
+echo "tmp=$(stat -c %a /tmp) tmpdir=$TMPDIR"; d=$(mktemp -d) && echo x > "$d/f" && echo tmp-writable`))
 		exit := waitExit(t, p, 120*time.Second)
 		out, errOut := output(t, p)
 		if exit.Code != 0 {
 			t.Fatalf("exit %+v\n%s\n%s", exit, out, errOut)
 		}
-		for _, want := range []string{"/run/kran/docker/docker.sock\n", "proxy-up\n", "\nlocked\n", "\n0\n"} {
+		for _, want := range []string{"/run/kran/docker/docker.sock\n", "proxy-up\n", "\nlocked\n", "\n0\n", "tmp=1777 tmpdir=/tmp\n", "tmp-writable\n"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("missing %q in:\n%s\n%s", want, out, errOut)
 			}
@@ -286,6 +287,33 @@ env | grep -c '^KRAN_INIT_' || true`))
 		}
 		if errOut != "" {
 			t.Errorf("stderr %q", errOut)
+		}
+		// The job's /tmp volume went with its container.
+		if v := tmpVolumes(t, te); v != "" {
+			t.Errorf("job /tmp volumes left: %s", v)
+		}
+	})
+
+	// A /tmp volume whose container was removed without it: the reaper
+	// removes it, and nothing else.
+	t.Run("tmp-volume-reaper", func(t *testing.T) {
+		dk, _ := te.m.docker()
+		ctx := context.Background()
+		left, err := dk.run(ctx, nil, "volume", "create", "--label", "kran.ns="+te.m.ns, "--label", "kran.tmp=1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		other, err := dk.run(ctx, nil, "volume", "create", "--label", "kran.ns="+te.m.ns)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer dk.run(ctx, nil, "volume", "rm", "--force", strings.TrimSpace(string(other)))
+		te.m.reapTmpVolumes(ctx)
+		if v := tmpVolumes(t, te); v != "" {
+			t.Errorf("left-over /tmp volume %s not removed (%s)", strings.TrimSpace(string(left)), v)
+		}
+		if _, err := dk.run(ctx, nil, "volume", "inspect", strings.TrimSpace(string(other))); err != nil {
+			t.Errorf("another volume of the namespace was removed: %v", err)
 		}
 	})
 
@@ -420,6 +448,17 @@ echo planted; sleep 300`))
 		}
 		assertNoContainer(t, te, orphan)
 	})
+}
+
+// tmpVolumes lists job /tmp volumes of te's namespace.
+func tmpVolumes(t *testing.T, te *testEnv) string {
+	t.Helper()
+	dk, _ := te.m.docker()
+	out, err := dk.run(context.Background(), nil, "volume", "ls", "--quiet", "--filter", "label=kran.ns="+te.m.ns, "--filter", "label=kran.tmp=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func assertNoContainer(t *testing.T, te *testEnv, name string) {

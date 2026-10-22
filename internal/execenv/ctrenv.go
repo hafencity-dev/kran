@@ -27,6 +27,9 @@ const (
 	// The Docker host's socket in a job container; the job's own
 	// /var/run/docker.sock is kran's proxy in front of it (dockerproxy.go).
 	ctrDockerHost = "/run/kran/docker-host.sock"
+	// The job's /tmp (and TMPDIR): a volume of its own, removed with its
+	// container, so the proxy can map bind mounts of it.
+	ctrTmp = "/tmp"
 )
 
 // ctrToolBins lists the binaries mise provides per toolchain key; a job

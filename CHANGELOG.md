@@ -2,6 +2,15 @@
 
 All notable changes to kran. Versions follow [semantic versioning](https://semver.org/).
 
+## Unreleased
+
+### Linux container runtime
+
+- A job's `/tmp` (and `TMPDIR`) is a volume of its own on the Docker host's disk, so files and directories under `mktemp -d` can be bind-mounted into nested containers (`docker run -v "$tmp/ssl:/etc/nginx/sslcerts:ro"`, `-v "$tmp/file:/etc/x.conf"`). It is removed with the job; the reaper removes any a crash left behind.
+- The runner image has a real `/usr/bin/python3` (with venv) for scripts that use `env -i`, a narrowed `PATH` or `python3 -I -S`; on the job's `PATH` the origin's or the repo's python still comes first.
+- `docker` and `docker-compose` are also in `/usr/bin`, for scripts with a fixed `PATH`; the compose and buildx plugins work from there too.
+- Container jobs are refused with reason `disk` while the Docker disk is below the node's floor, and kran trims its caches at once.
+
 ## 0.1.0 - first release
 
 kran moves heavy dev jobs to whichever of your machines has room, and never makes a job worse than running it locally.

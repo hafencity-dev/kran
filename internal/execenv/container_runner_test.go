@@ -70,6 +70,7 @@ func main() {
 		p := te.startCtr(ref, sh(`set -e
 node --version; go version; python3 --version
 command -v deno || echo no-deno
+echo "py=$(command -v python3) sys=$(/usr/bin/python3 -c 'import sys; print(sys.version_info[0])')"
 go run .
 CGO_ENABLED=0 go run .
 id; whoami
@@ -83,7 +84,7 @@ ulimit -Sn; df -k /dev/shm | tail -1`), withOrigin, withEnv("LANG", "de_DE.UTF-8
 			t.Fatalf("exit %+v\n%s\n%s", exit, out, errOut)
 		}
 		uid := os.Getuid()
-		for _, want := range []string{"v24.8.0\n", "go1.25.1 ", "Python 3.12.", "no-deno",
+		for _, want := range []string{"v24.8.0\n", "go1.25.1 ", "Python 3.12.", "no-deno", "py=/usr/local/lib/kran/shims/python3 sys=3\n",
 			fmt.Sprintf("user=alice uid=%d home=/work/kran-test lookup=%d group=true env=/work/kran-test", uid, uid),
 			fmt.Sprintf("uid=%d(alice)", uid), "\nalice\n", "CE", "LANG=de_DE.UTF-8", "LC_CTYPE=C.UTF-8\n", "65536\n"} {
 			if !strings.Contains(out, want) {
@@ -172,6 +173,12 @@ tag="kran-test-build-$KRAN_JOB_ID"
 docker build -q -t "$tag" -f Dockerfile.kt . >/dev/null
 echo "5:$(docker run --rm "$tag")"
 docker image rm "$tag" >/dev/null
+t=$(mktemp -d); echo tmp-file-ok > "$t/f"; mkdir "$t/ssl"; echo tmp-dir-ok > "$t/ssl/cert"
+echo "6:$(docker run --rm -v "$t/f":/etc/x.conf:ro $img cat /etc/x.conf)"
+echo "7:$(docker run --rm -v "$t/ssl":/etc/nginx/sslcerts:ro $img cat /etc/nginx/sslcerts/cert)"
+echo "8:$(env -i /usr/bin/python3 -I -S -c 'print(6*7)')"
+python3 -m venv "$t/venv" && "$t/venv/bin/python" -c 'import sys; print("9:venv", sys.prefix != sys.base_prefix)'
+echo "10:$(env -i PATH=/usr/bin:/bin sh -c 'docker compose version >/dev/null && docker buildx version >/dev/null && docker-compose version >/dev/null && command -v docker')"
 for tool in envsubst lsof sfdisk fdisk jq rg shellcheck file unzip zip xz zstd bzip2 rsync ps pkill killall nc dig ip ss ping less patch diff bc sqlite3 make gcc g++ curl wget git ssh tree xxd strace openssl docker; do
 	command -v "$tool" >/dev/null || echo "missing: $tool"
 done
@@ -182,13 +189,16 @@ command -v node >/dev/null && echo "node: $(command -v node)" || echo no-node`),
 	if exit.Code != 0 {
 		t.Fatalf("exit %+v\n%s\n%s", exit, out, errOut)
 	}
-	for _, want := range []string{"1:content from the slot\n", "2:written-by-nested\n", "3:content from the slot\n", "4:home-file\n", "5:content from the slot\n", "plugins-ok\n", "no-node\n"} {
+	for _, want := range []string{"1:content from the slot\n", "2:written-by-nested\n", "3:content from the slot\n", "4:home-file\n", "5:content from the slot\n", "6:tmp-file-ok\n", "7:tmp-dir-ok\n", "8:42\n", "9:venv True\n", "10:/usr/bin/docker\n", "plugins-ok\n", "no-node\n"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s\n%s", want, out, errOut)
 		}
 	}
 	if strings.Contains(out, "missing:") {
 		t.Errorf("tools missing from the runner image:\n%s", out)
+	}
+	if v := tmpVolumes(t, te); v != "" {
+		t.Errorf("job /tmp volumes left: %s", v)
 	}
 	t.Logf("job output:\n%s", out)
 }

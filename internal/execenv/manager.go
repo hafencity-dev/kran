@@ -324,6 +324,11 @@ func (m *manager) AcquireSlot(ctx context.Context, repoID, hint string, rt proto
 	if err := m.checkDiskFloor(); err != nil {
 		return proto.SlotRef{}, err
 	}
+	if rt == proto.RuntimeContainer {
+		if err := m.checkDockerDiskFloor(); err != nil {
+			return proto.SlotRef{}, err
+		}
+	}
 	loc := m.slotLocFor(rt)
 	if loc == locVolume {
 		if err := m.ensureContainerReady(ctx, nil); err != nil {

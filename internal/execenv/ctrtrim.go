@@ -154,6 +154,30 @@ func (m *manager) runCacheTrim(ctx context.Context, dk *dockerEnv) (cacheReport,
 	return rep, nil
 }
 
+// checkDockerDiskFloor applies the disk floor to the Docker disk, where
+// container jobs write (slots in the volume on macOS, the caches, each
+// job's /tmp), as the last cache trim measured it. Below it, the next
+// reaper pass trims at once; until that frees enough, container jobs are
+// refused with reason disk.
+func (m *manager) checkDockerDiskFloor() error {
+	m.ct.mu.Lock()
+	defer m.ct.mu.Unlock()
+	r := m.ct.report
+	if r == nil || r.Total <= 0 || m.now().Sub(m.ct.reportAt) > 2*cacheTrimEvery {
+		return nil // unknown or stale: do not block jobs on it
+	}
+	floor := m.opts.DiskFloor
+	if floor <= 0 {
+		floor = diskFloor(r.Total)
+	}
+	if r.Free >= floor {
+		return nil
+	}
+	m.ct.last = time.Time{}
+	return fmt.Errorf("%w: the Docker disk on %s has %s free, needs at least %s; kran is trimming its caches, or free space with `docker system prune`",
+		ErrDiskFloor, m.opts.NodeName, fmtGiB(r.Free), fmtGiB(floor))
+}
+
 // cacheStatus is the last trim's report for the container runtime's
 // status ("" fields when none ran yet).
 func (m *manager) cacheStatus() *proto.CacheStatus {

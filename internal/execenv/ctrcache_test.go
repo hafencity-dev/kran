@@ -2,11 +2,14 @@ package execenv
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/hafencity-dev/kran/internal/proto"
 )
 
 func TestCacheUnitDepth(t *testing.T) {
@@ -233,5 +236,35 @@ func TestHoldCachesStopsTrim(t *testing.T) {
 	defer m.ct.mu.Unlock()
 	if m.ct.holds != 0 || m.ct.running != nil {
 		t.Fatalf("after release: holds %d running %v", m.ct.holds, m.ct.running != nil)
+	}
+}
+
+// Container jobs are refused while the Docker disk (as the last trim
+// measured it) is below the floor, and the next reaper pass trims.
+func TestDockerDiskFloor(t *testing.T) {
+	te := newTestEnv(t, func(o *Options, _ *tunables) { o.DiskFloor = 10 * gib })
+	m := te.m
+	if err := m.checkDockerDiskFloor(); err != nil {
+		t.Fatalf("no measurement yet: %v", err)
+	}
+	m.ct.mu.Lock()
+	m.ct.report, m.ct.reportAt, m.ct.last = &cacheReport{Free: 4 * gib, Total: 100 * gib}, m.now(), m.now()
+	m.ct.mu.Unlock()
+	err := m.checkDockerDiskFloor()
+	if !errors.Is(err, ErrDiskFloor) || !strings.Contains(err.Error(), "Docker disk") {
+		t.Fatalf("low disk: %v", err)
+	}
+	if _, err := m.AcquireSlot(context.Background(), testRepo, "wt", proto.RuntimeContainer); !errors.Is(err, ErrDiskFloor) {
+		t.Fatalf("container slot below the floor: %v", err)
+	}
+	m.ct.mu.Lock()
+	due := m.ct.last.IsZero()
+	m.ct.report.Free = 50 * gib
+	m.ct.mu.Unlock()
+	if !due {
+		t.Error("no trim requested")
+	}
+	if err := m.checkDockerDiskFloor(); err != nil {
+		t.Fatalf("enough disk: %v", err)
 	}
 }

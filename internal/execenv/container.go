@@ -536,7 +536,7 @@ func (m *manager) containerSpec(ctx context.Context, spec *superSpec, req *Start
 	}
 
 	fixed := map[string]string{
-		"HOME": home, "USER": user, "LOGNAME": user, "SHELL": "/bin/bash", "PATH": ctrPath(home), "TMPDIR": "/tmp",
+		"HOME": home, "USER": user, "LOGNAME": user, "SHELL": "/bin/bash", "PATH": ctrPath(home), "TMPDIR": ctrTmp,
 		"GOCACHE": ctrCache + "/go-build", "GOMODCACHE": ctrCache + "/gomod",
 		"npm_config_cache": ctrCache + "/npm", "npm_config_store_dir": ctrCache + "/pnpm-store",
 		"UV_CACHE_DIR": ctrCache + "/uv", "PIP_CACHE_DIR": ctrCache + "/pip", "CARGO_HOME": ctrCache + "/cargo",
@@ -602,6 +602,12 @@ func (m *manager) containerSpec(ctx context.Context, spec *superSpec, req *Start
 			"--cap-drop", "ALL", "--cap-add", "SETUID", "--cap-add", "SETGID", "--cap-add", "KILL",
 			"--security-opt", "no-new-privileges",
 			"--shm-size", strconv.FormatInt(ctrShmSize(spec.MemMax), 10),
+			// /tmp lives on the Docker host's disk, where nested
+			// containers can bind it (dockerproxy.go); anonymous, so
+			// removing the container (--volumes) removes it too. The
+			// labels let the reaper find one a crash left behind.
+			"--mount", "type=volume,dst=" + ctrTmp + ",volume-label=kran.ns=" + m.ns + ",volume-label=kran.tmp=1",
+			"-e", "KRAN_INIT_CONTAINER=" + name,
 			"--mount", "type=volume,src=" + m.volume("cache") + ",dst=" + ctrCache,
 			"--mount", "type=volume,src=" + m.volume("tools") + ",dst=" + ctrTools,
 		}

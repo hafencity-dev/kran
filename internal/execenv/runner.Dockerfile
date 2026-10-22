@@ -7,14 +7,16 @@ FROM debian:stable-slim
 ENV DEBIAN_FRONTEND=noninteractive
 # Besides the build basics, the everyday command-line tools scripts and
 # tests expect on a Linux dev box (envsubst, jq, rg, lsof, sfdisk, nc, dig,
-# ss, sqlite3, …). Toolchains (Go, Node, Python, …) come from mise instead.
+# ss, sqlite3, …). Toolchains (Go, Node, Python, …) come from mise; the
+# system python3 (with venv) is there for scripts that run /usr/bin/python3
+# or narrow PATH (the job's shims still put the origin's python first).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl wget git build-essential pkg-config \
       bash zsh procps psmisc lsof strace iproute2 iputils-ping netcat-openbsd bind9-dnsutils \
       openssh-client gnupg openssl locales tzdata \
       unzip zip xz-utils zstd bzip2 rsync file less patch diffutils bc time tree xxd bsdextrautils \
-      gettext-base jq ripgrep shellcheck sqlite3 fdisk \
+      gettext-base jq ripgrep shellcheck sqlite3 fdisk python3 python3-venv \
  && rm -rf /var/lib/apt/lists/*
 
 # Common UTF-8 locales, so a job sorts and formats like its origin without
@@ -68,6 +70,8 @@ RUN set -eu; arch="$(uname -m)"; \
     echo "$buildx_sum  docker-buildx" | sha256sum -c -; \
     install -m 0755 docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx; \
     rm -f mise docker.tgz docker-compose docker-buildx; \
+    ln -s /usr/local/bin/docker /usr/bin/docker; \
+    ln -s /usr/local/lib/docker/cli-plugins/docker-compose /usr/bin/docker-compose; \
     mise --version; docker --version; docker compose version; docker buildx version
 
 # kran-init gives each job its user, then drops to it; it writes the job's
