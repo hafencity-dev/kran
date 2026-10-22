@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -348,6 +349,33 @@ func TestScanConcurrentScanners(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		if err := <-done; err != nil {
 			t.Fatal(err)
+		}
+	}
+}
+
+// sync.include comes from the repo's .kran.toml (untrusted): a symlinked
+// directory in the repo must not let it pull files from outside, such as
+// ~/.aws/credentials (SPEC §6.7: symlinks are never followed out).
+func TestIncludeDoesNotFollowSymlinkedDirs(t *testing.T) {
+	ctx := context.Background()
+	outside := realTempDir(t)
+	writeFile(t, outside, "credentials", "secret")
+	writeFile(t, outside, "sub/more", "secret")
+	root := newRepo(t)
+	writeFile(t, root, "a.txt", "a")
+	if err := os.Symlink(outside, filepath.Join(root, "cfg")); err != nil {
+		t.Fatal(err)
+	}
+	ws, _ := Detect(ctx, root)
+	for _, inc := range [][]string{{"cfg/credentials"}, {"cfg/*"}, {"cfg/sub/**"}, {"cfg/sub"}} {
+		m, err := testScanner(t).Scan(ctx, ws, inc, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range m.Entries {
+			if strings.HasPrefix(e.Path, "cfg/") {
+				t.Fatalf("include %v synced %s from outside the workspace", inc, e.Path)
+			}
 		}
 	}
 }
