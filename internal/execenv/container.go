@@ -19,6 +19,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/hafencity-dev/kran/internal/dockercli"
 	"github.com/hafencity-dev/kran/internal/proto"
 	"github.com/hafencity-dev/kran/internal/version"
 )
@@ -62,23 +63,7 @@ func (m *manager) containerSetting() string {
 
 // findDockerCLI looks on the login PATH, then where Docker Desktop, Colima,
 // OrbStack, Rancher Desktop and Homebrew put it.
-func findDockerCLI(path, home string) string {
-	if p, err := lookPathEnv("docker", path, "/"); err == nil {
-		return p
-	}
-	cands := []string{"/usr/local/bin/docker", "/opt/homebrew/bin/docker", "/usr/bin/docker",
-		"/Applications/Docker.app/Contents/Resources/bin/docker"}
-	if home != "" {
-		cands = append(cands, filepath.Join(home, ".orbstack", "bin", "docker"), filepath.Join(home, ".rd", "bin", "docker"),
-			filepath.Join(home, ".docker", "bin", "docker"))
-	}
-	for _, c := range cands {
-		if checkExecutable(c) == nil {
-			return c
-		}
-	}
-	return ""
-}
+func findDockerCLI(path, home string) string { return dockercli.Find(path, home) }
 
 func (m *manager) probeDocker(ctx context.Context) (*dockerEnv, string) {
 	if m.containerSetting() == "off" {
@@ -97,19 +82,11 @@ func (m *manager) probeDocker(ctx context.Context) (*dockerEnv, string) {
 		base = append(base, "DOCKER_CONFIG="+v)
 	}
 	host := os.Getenv("DOCKER_HOST")
+	ctxHost := ""
 	if host == "" {
-		cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		cmd := exec.CommandContext(cctx, cli, "context", "inspect", "--format", "{{.Endpoints.docker.Host}}")
-		cmd.Env = base
-		out, err := cmd.Output()
-		cancel()
-		if err == nil {
-			host = strings.TrimSpace(string(out))
-		}
+		ctxHost = dockercli.ContextHost(ctx, cli, base)
 	}
-	if host == "" {
-		host = "unix:///var/run/docker.sock"
-	}
+	host = dockercli.Endpoint(host, ctxHost, he.home, os.Getenv("XDG_RUNTIME_DIR"), nil)
 	dk := &dockerEnv{cli: cli, host: host, cliEnv: append(base, "DOCKER_HOST="+host)}
 	sock, ok := strings.CutPrefix(host, "unix://")
 	if !ok {

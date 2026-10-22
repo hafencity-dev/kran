@@ -5,13 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/hafencity-dev/kran/internal/dockercli"
 	"github.com/hafencity-dev/kran/internal/proto"
 )
 
@@ -21,27 +21,25 @@ const (
 	dockerStatsFresh = 15 * time.Second
 )
 
-// dockerCandidates are tried when docker is not on PATH (launchd agents get
-// a minimal PATH; Colima/Docker Desktop/Homebrew install elsewhere).
-var dockerCandidates = []string{
-	"/usr/local/bin/docker",
-	"/opt/homebrew/bin/docker",
-	"/usr/local/lokalaise/tools/bin/docker",
-	"/Applications/Docker.app/Contents/Resources/bin/docker",
-	"/usr/bin/docker",
-}
-
 // DockerBinary returns the docker CLI path, or "" when none is installed.
-func DockerBinary() string {
-	if p, err := exec.LookPath("docker"); err == nil {
-		return p
+// launchd agents get a minimal PATH, so well-known install locations of
+// Docker Desktop, Colima, OrbStack and Homebrew are tried too.
+func DockerBinary() string { return dockercli.FindHere() }
+
+// dockerHostOverride returns the endpoint to pass with --host when the
+// CLI's own choice (DOCKER_HOST, else its context) is a socket that does
+// not exist but a well-known one does (a Colima or OrbStack socket without
+// a docker context). "" otherwise.
+func dockerHostOverride(ctx context.Context, run runner, bin string) string {
+	if bin == "" || os.Getenv("DOCKER_HOST") != "" {
+		return ""
 	}
-	for _, c := range dockerCandidates {
-		if fileExists(c) {
-			return c
-		}
+	ctxHost := ""
+	if out, err := run(ctx, 5*time.Second, bin, "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"); err == nil {
+		ctxHost = strings.TrimSpace(string(out))
 	}
-	return ""
+	home, _ := os.UserHomeDir()
+	return dockercli.Override("", ctxHost, home, os.Getenv("XDG_RUNTIME_DIR"), nil)
 }
 
 func fileExists(path string) bool {
@@ -54,6 +52,7 @@ func fileExists(path string) bool {
 type DockerInfo struct {
 	Reachable bool
 	Binary    string
+	Host      string // passed with --host; "" = the CLI's own choice
 	CPUs      int
 	MemTotal  int64
 	Reason    string // why not reachable, one plain sentence
@@ -61,22 +60,31 @@ type DockerInfo struct {
 
 // ProbeDocker asks the Docker engine for its CPUs and memory.
 func ProbeDocker(ctx context.Context) DockerInfo {
-	return probeDocker(ctx, execRunner, DockerBinary())
+	bin := DockerBinary()
+	return probeDocker(ctx, execRunner, bin, dockerHostOverride(ctx, execRunner, bin))
 }
 
-func probeDocker(ctx context.Context, run runner, bin string) DockerInfo {
+func probeDocker(ctx context.Context, run runner, bin, host string) DockerInfo {
 	if bin == "" {
 		return DockerInfo{Reason: "docker is not installed"}
 	}
-	out, err := run(ctx, 5*time.Second, bin, "info", "--format", "{{.NCPU}} {{.MemTotal}}")
+	out, err := run(ctx, 5*time.Second, bin, hostArgs(host, "info", "--format", "{{.NCPU}} {{.MemTotal}}")...)
 	if err != nil {
-		return DockerInfo{Binary: bin, Reason: "Docker not reachable: " + firstLine(err.Error())}
+		return DockerInfo{Binary: bin, Host: host, Reason: "Docker not reachable: " + firstLine(err.Error())}
 	}
 	n, mem, err := parseDockerInfo(string(out))
 	if err != nil {
-		return DockerInfo{Binary: bin, Reason: "Docker not reachable: " + err.Error()}
+		return DockerInfo{Binary: bin, Host: host, Reason: "Docker not reachable: " + err.Error()}
 	}
-	return DockerInfo{Reachable: true, Binary: bin, CPUs: n, MemTotal: mem}
+	return DockerInfo{Reachable: true, Binary: bin, Host: host, CPUs: n, MemTotal: mem}
+}
+
+// hostArgs prefixes a docker CLI command with --host when one is set.
+func hostArgs(host string, args ...string) []string {
+	if host == "" {
+		return args
+	}
+	return append([]string{"--host", host}, args...)
 }
 
 func firstLine(s string) string {
@@ -124,7 +132,8 @@ func (d *dockerProbe) refresh(ctx context.Context) {
 	needInfo := d.infoAt.IsZero() || now.Sub(d.infoAt) >= dockerInfoEvery
 	d.mu.Unlock()
 	if needInfo {
-		info := probeDocker(ctx, d.p.run, d.lookup())
+		bin := d.lookup()
+		info := probeDocker(ctx, d.p.run, bin, dockerHostOverride(ctx, d.p.run, bin))
 		if ctx.Err() != nil {
 			return
 		}
@@ -141,7 +150,7 @@ func (d *dockerProbe) refresh(ctx context.Context) {
 	if !info.Reachable || !d.vm {
 		return
 	}
-	stats, err := d.stats(ctx, info.Binary)
+	stats, err := d.stats(ctx, info.Binary, info.Host)
 	if err != nil {
 		if ctx.Err() == nil {
 			d.p.logOnce("docker-stats", "metrics: docker stats failed: %v", err)
@@ -151,9 +160,9 @@ func (d *dockerProbe) refresh(ctx context.Context) {
 	d.store(stats, now)
 }
 
-func (d *dockerProbe) stats(ctx context.Context, bin string, names ...string) ([]dockerStat, error) {
+func (d *dockerProbe) stats(ctx context.Context, bin, host string, names ...string) ([]dockerStat, error) {
 	args := append([]string{"stats", "--no-stream", "--format", "{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}"}, names...)
-	out, err := d.p.run(ctx, 10*time.Second, bin, args...)
+	out, err := d.p.run(ctx, 10*time.Second, bin, hostArgs(host, args...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -207,7 +216,7 @@ func (d *dockerProbe) containerUsage(ctx context.Context, name string, now time.
 		return proto.Resources{}, errors.New("container usage: docker is not installed")
 	}
 	if runtime.GOOS == "linux" {
-		if dir, err := d.containerCgroup(ctx, bin, name); err == nil {
+		if dir, err := d.containerCgroup(ctx, bin, info.Host, name); err == nil {
 			return d.p.cgroupUsage(dir, now)
 		}
 	}
@@ -218,7 +227,7 @@ func (d *dockerProbe) containerUsage(ctx context.Context, name string, now time.
 	if fresh {
 		return proto.Resources{CPUs: s.cpus, Mem: s.mem}, nil
 	}
-	stats, err := d.stats(ctx, bin, name)
+	stats, err := d.stats(ctx, bin, info.Host, name)
 	if err != nil {
 		return proto.Resources{}, fmt.Errorf("container usage of %s: %w", name, err)
 	}
@@ -230,12 +239,12 @@ func (d *dockerProbe) containerUsage(ctx context.Context, name string, now time.
 	return proto.Resources{}, fmt.Errorf("container usage of %s: not listed by docker stats", name)
 }
 
-func (d *dockerProbe) containerCgroup(ctx context.Context, bin, name string) (string, error) {
+func (d *dockerProbe) containerCgroup(ctx context.Context, bin, host, name string) (string, error) {
 	d.mu.Lock()
 	id := d.idByName[name]
 	d.mu.Unlock()
 	if id == "" {
-		out, err := d.p.run(ctx, 5*time.Second, bin, "inspect", "--format", "{{.Id}}", name)
+		out, err := d.p.run(ctx, 5*time.Second, bin, hostArgs(host, "inspect", "--format", "{{.Id}}", name)...)
 		if err != nil {
 			return "", err
 		}
