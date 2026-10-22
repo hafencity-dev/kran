@@ -32,7 +32,6 @@ var (
 var (
 	jobIDRe  = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
 	repoIDRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$`)
-	hashRe   = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 func validJobID(id string) error {
@@ -50,7 +49,13 @@ func validRepoID(id string) error {
 }
 
 func validHash(h string) error {
-	if !hashRe.MatchString(h) {
+	// By hand: this runs for every file of every manifest.
+	ok := len(h) == 64
+	for i := 0; ok && i < len(h); i++ {
+		c := h[i]
+		ok = c >= '0' && c <= '9' || c >= 'a' && c <= 'f'
+	}
+	if !ok {
 		return fmt.Errorf("invalid blob hash %q", h)
 	}
 	return nil

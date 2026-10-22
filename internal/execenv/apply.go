@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -55,13 +54,20 @@ func (p *plan) changed() int { return len(p.writes) + len(p.chmods) + len(p.link
 // validRel checks a manifest path: relative, slash separated, no empty,
 // "." or ".." components, no NUL.
 func validRel(p string) bool {
-	if p == "" || strings.HasPrefix(p, "/") || strings.ContainsRune(p, 0) {
+	if p == "" || strings.IndexByte(p, 0) >= 0 {
 		return false
 	}
-	for _, c := range strings.Split(p, "/") {
-		if c == "" || c == "." || c == ".." {
+	for start := 0; start <= len(p); {
+		end := strings.IndexByte(p[start:], '/')
+		if end < 0 {
+			end = len(p)
+		} else {
+			end += start
+		}
+		if c := p[start:end]; c == "" || c == "." || c == ".." {
 			return false
 		}
+		start = end + 1
 	}
 	return true
 }
@@ -89,7 +95,7 @@ func checkManifest(m *proto.Manifest, caseInsensitive bool) (*manifestIndex, err
 		if !validRel(e.Path) {
 			return nil, fmt.Errorf("%w: unsafe path %q", ErrBadManifest, e.Path)
 		}
-		if strings.HasPrefix(path.Base(e.Path), tmpPrefix) {
+		if strings.HasPrefix(e.Path[strings.LastIndexByte(e.Path, '/')+1:], tmpPrefix) {
 			return nil, fmt.Errorf("%w: reserved name %q", ErrBadManifest, e.Path)
 		}
 		if _, dup := ix.kind[e.Path]; dup {
@@ -119,7 +125,12 @@ func checkManifest(m *proto.Manifest, caseInsensitive bool) (*manifestIndex, err
 			}
 			folded[k] = e.Path
 		}
-		for d := path.Dir(e.Path); d != "."; d = path.Dir(d) {
+		for d := e.Path; ; {
+			i := strings.LastIndexByte(d, '/')
+			if i < 0 {
+				break
+			}
+			d = d[:i]
 			if ix.parents[d] {
 				break
 			}
