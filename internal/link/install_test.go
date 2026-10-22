@@ -207,6 +207,7 @@ func TestPushLinuxBinaryForMacRemote(t *testing.T) {
 	os.MkdirAll(filepath.Dir(cache), 0o755)
 	os.WriteFile(cache, []byte("LINUX-KRAN"), 0o755)
 	c := newSSH(&w.opts)
+	defer c.exitMaster()
 	info := &Info{Version: "1.2.3", CacheDir: filepath.Join(w.remoteHome, "Caches", "kran")}
 	src := binarySource{o: &w.opts, r: w.runner}
 	changed := false
