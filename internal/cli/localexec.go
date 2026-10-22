@@ -166,7 +166,10 @@ func startLocal(j localJob) (*localProc, *localError) {
 			// loaded (failed, Result=oom-kill) until wait has read why.
 			argv = append([]string{"systemd-run", "--user", "--scope", "--quiet",
 				"--slice=" + slice, "--unit=kran-local-" + id,
-				"-p", "MemoryMax=" + strconv.FormatInt(j.Envelope.MemMax, 10), "--"}, argv...)
+				// No swap beyond the cap: a job over it is killed and told so
+				// (SPEC §6.8, as on remote targets), instead of swapping the
+				// machine to a crawl.
+				"-p", "MemoryMax=" + strconv.FormatInt(j.Envelope.MemMax, 10), "-p", "MemorySwapMax=0", "--"}, argv...)
 			if p, e := exec.LookPath("systemd-run"); e == nil {
 				argv[0] = p
 			}
