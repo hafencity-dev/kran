@@ -366,9 +366,15 @@ func TestAPIEventsStateFirstAndUIListener(t *testing.T) {
 	if err != nil || stTok.Mode().Perm() != 0o600 {
 		t.Fatalf("token file %v %v", stTok, err)
 	}
-	// UI listener: reads work, run sessions are refused, mutations need the token.
+	// UI listener: reads need the token (header or query), run sessions are
+	// refused, mutations need the token header.
 	base := "http://" + d.UIAddr()
 	resp, err := http.Get(base + "/api/v1/state")
+	if err != nil || resp.StatusCode != 401 {
+		t.Fatalf("GET state over tcp without token: %v %v", resp, err)
+	}
+	resp.Body.Close()
+	resp, err = http.Get(base + "/api/v1/state?token=" + d.Token())
 	if err != nil || resp.StatusCode != 200 {
 		t.Fatalf("GET state over tcp: %v %v", resp, err)
 	}
@@ -397,7 +403,7 @@ func TestAPIEventsStateFirstAndUIListener(t *testing.T) {
 		ns, _ := a.scheduler().node("a")
 		return ns.Status == proto.NodeDraining
 	})
-	resp, err = http.Get(base + "/api/v1/nodes/a/metrics")
+	resp, err = http.Get(base + "/api/v1/nodes/a/metrics?token=" + d.Token())
 	if err != nil || resp.StatusCode != 200 {
 		t.Fatalf("metrics history: %v %v", resp, err)
 	}
