@@ -225,3 +225,46 @@ func TestTargetRestartReleasesSlotOfJobThatEndedMeanwhile(t *testing.T) {
 	}
 	waitFor(t, 5*time.Second, "slot released after restart", func() bool { return b.exec.heldSlots() == 0 })
 }
+
+// A job that was still syncing when its origin daemon restarted is run
+// locally by its kran run (it had not started). The restarted daemon must
+// not place and start it again while nobody is attached: that would run the
+// command twice.
+func TestRestartedOriginDoesNotRerunPrestartJobWithoutCLI(t *testing.T) {
+	_, a, b := twoNodes(t)
+	gate := make(chan struct{})
+	b.exec.mu.Lock()
+	b.exec.acquireGate = gate
+	b.exec.mu.Unlock()
+	ws := workspaceDir(t, map[string]string{"f": "x"})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var once sync.Once
+	res, _ := runCLI(ctx, a.sock(), shSpec(ws, "echo ran"), cliOpts{
+		hook: func(rs client.RunSession, ft proto.FrameType, p []byte, r *cliResult) error {
+			if ft == proto.FrameDecision {
+				once.Do(func() { go a.stop() })
+			}
+			return nil
+		}})
+	waitFor(t, 10*time.Second, "origin stopped", func() bool {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		return a.cancel == nil
+	})
+	if res.jobID == "" {
+		t.Fatal("no job id")
+	}
+	b.exec.mu.Lock()
+	b.exec.acquireGate = nil
+	b.exec.mu.Unlock()
+	close(gate)
+	a.start()
+	waitFor(t, 15*time.Second, "job ended", func() bool {
+		j, err := a.store.GetJob(context.Background(), res.jobID)
+		return err == nil && j.State.Terminal()
+	})
+	if n, _, _ := b.exec.counts(); n != 0 {
+		t.Fatalf("the job was started on b %d time(s) after the origin restart with no kran run attached", n)
+	}
+}
