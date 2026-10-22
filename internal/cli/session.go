@@ -48,19 +48,20 @@ type runner struct {
 	color   style
 
 	// session state
-	cl       client.Client
-	sess     client.RunSession
-	gen      int
-	frames   chan frameMsg
-	jobID    string
-	decision *proto.Decision
-	remote   bool // a remote placement is active
-	started  bool // the user's command has started (remote running, or output seen)
-	offset   int64
-	local    *localProc
-	localCh  <-chan proto.Exit
-	fallback bool
-	lastInt  time.Time
+	cl        client.Client
+	sess      client.RunSession
+	gen       int
+	frames    chan frameMsg
+	jobID     string
+	decision  *proto.Decision
+	remote    bool // a remote placement is active
+	started   bool // the user's command has started (remote running, or output seen)
+	offset    int64
+	local     *localProc
+	localNode string // the daemon's node name for a local placement
+	localCh   <-chan proto.Exit
+	fallback  bool
+	lastInt   time.Time
 
 	// notices
 	pending   string
@@ -239,7 +240,7 @@ func defaultEnvelope() *proto.LocalEnvelope {
 }
 
 func (r *runner) localJob(env *proto.LocalEnvelope) localJob {
-	return localJob{JobID: r.jobID, Argv: r.spec.Argv, Dir: r.spec.Cwd, Env: r.env, Envelope: env,
+	return localJob{JobID: r.jobID, Node: r.localNode, Argv: r.spec.Argv, Dir: r.spec.Cwd, Env: r.env, Envelope: env,
 		Stdio: r.stdio, ScopeProbe: r.probe}
 }
 
@@ -253,7 +254,10 @@ func (r *runner) standalone(ctx context.Context) int {
 	for {
 		select {
 		case ex := <-r.localCh:
-			r.event("exit", map[string]any{"code": ex.Code, "signal": ex.Signal, "state": ex.State, "fallback": true})
+			if ex.Reason != "" {
+				r.sayAlways("%s", ex.Reason)
+			}
+			r.event("exit", map[string]any{"code": ex.Code, "signal": ex.Signal, "state": ex.State, "fallback": true, "reason": ex.Reason})
 			return ex.Code
 		case sig := <-r.signals:
 			r.forwardLocal(sig)
@@ -479,6 +483,7 @@ func (r *runner) onDecision(ctx context.Context, d proto.Decision) (int, bool) {
 		r.fallback = true
 	}
 	r.remote = false
+	r.localNode = d.Node
 	p, lerr := r.start(r.localJob(d.Envelope))
 	if lerr != nil {
 		r.sendJSON(proto.FrameExit, proto.Exit{JobID: d.JobID, Code: lerr.Code, State: proto.JobFailed, Reason: lerr.Msg})
@@ -495,7 +500,10 @@ func (r *runner) onLocalDone(ex proto.Exit) int {
 	ex.Fallback = r.fallback
 	r.local, r.localCh = nil, nil
 	r.sendJSON(proto.FrameExit, ex)
-	r.event("exit", map[string]any{"code": ex.Code, "signal": ex.Signal, "state": ex.State, "fallback": r.fallback})
+	if ex.Reason != "" {
+		r.sayAlways("%s", ex.Reason)
+	}
+	r.event("exit", map[string]any{"code": ex.Code, "signal": ex.Signal, "state": ex.State, "fallback": r.fallback, "reason": ex.Reason})
 	return ex.Code
 }
 
