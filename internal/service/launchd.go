@@ -73,7 +73,9 @@ func xmlEsc(s string) string {
 //
 // ProcessType Interactive: launchd applies CPU/IO throttling to Background
 // jobs and children inherit it; kran supervises build and test jobs that must
-// run at full speed. AbandonProcessGroup is the launchd counterpart of
+// run at full speed, and the daemon itself must answer its peers while they
+// load the machine (LowPriorityIO false keeps its I/O out of the throttled
+// class too). A negative Nice needs root, so there is none. AbandonProcessGroup is the launchd counterpart of
 // systemd KillMode=process: stopping or restarting the daemon must not kill
 // running job supervisors.
 func (l *launchd) Unit() string {
@@ -82,6 +84,7 @@ func (l *launchd) Unit() string {
 	flag := func(k string, v bool) { fmt.Fprintf(&b, "\t<key>%s</key>\n\t<%t/>\n", k, v) }
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Written by kran service install (` + formatMarker + `); kran upgrade and kran doctor --fix rewrite it. -->
 <plist version="1.0">
 <dict>
 `)
@@ -89,8 +92,10 @@ func (l *launchd) Unit() string {
 	fmt.Fprintf(&b, "\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>%s</string>\n\t\t<string>daemon</string>\n\t</array>\n", xmlEsc(l.o.KranPath))
 	flag("RunAtLoad", true)
 	flag("KeepAlive", true)
-	fmt.Fprintf(&b, "\t<key>ThrottleInterval</key>\n\t<integer>2</integer>\n")
+	fmt.Fprintf(&b, "\t<key>ThrottleInterval</key>\n\t<integer>5</integer>\n")
 	str("ProcessType", "Interactive")
+	flag("LowPriorityIO", false)
+	flag("LowPriorityBackgroundIO", false)
 	flag("AbandonProcessGroup", true)
 	if l.o.System {
 		str("UserName", l.o.User)
@@ -192,7 +197,7 @@ func (l *launchd) Install(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	if l.o.System {
-		if changed, err = l.writeSystemPlist(ctx); err != nil {
+		if changed, err = l.writeSystemPlist(ctx, l.Unit()); err != nil {
 			return false, err
 		}
 		l.removeAgent(ctx)
@@ -249,8 +254,7 @@ func (l *launchd) Uninstall(ctx context.Context) error {
 // writeSystemPlist installs the daemon plist as root:wheel 0644 (launchd
 // rejects daemon plists that others can write). It stages the file in the
 // user's temp dir and lets sudo move it into place.
-func (l *launchd) writeSystemPlist(ctx context.Context) (bool, error) {
-	want := l.Unit()
+func (l *launchd) writeSystemPlist(ctx context.Context, want string) (bool, error) {
 	if cur, err := os.ReadFile(l.plistPath()); err == nil && string(cur) == want {
 		return false, nil
 	}
@@ -338,11 +342,85 @@ func (l *launchd) Restart(ctx context.Context, ro RestartOptions) error {
 	if err := restartWhenIdle(ctx, l.o, ro); err != nil {
 		return err
 	}
+	// An upgrade restarts through here: bring the plist up to date first.
+	// launchd reads a changed plist only when it loads it again.
+	changed, err := l.Refresh(ctx)
+	if err != nil {
+		l.o.Logf("could not update %s: %v", l.plistPath(), err)
+	}
 	if !l.loaded(ctx) {
 		return l.bootstrap(ctx)
 	}
-	_, err := l.ctlWrite(ctx, "kickstart", "-k", l.target(ctx))
+	if changed {
+		if err := l.bootout(ctx); err != nil {
+			return err
+		}
+		return l.bootstrap(ctx)
+	}
+	_, err = l.ctlWrite(ctx, "kickstart", "-k", l.target(ctx))
 	return err
+}
+
+// Refresh rewrites the installed plist in the current format, keeping its
+// binary and environment. It takes effect when launchd loads it again
+// (Restart does that).
+func (l *launchd) Refresh(ctx context.Context) (bool, error) {
+	cur, err := os.ReadFile(l.plistPath())
+	if err != nil {
+		return false, ErrNotInstalled
+	}
+	exe, env := parsePlist(cur)
+	if exe == "" {
+		return false, nil // not a unit kran can read back: leave it alone
+	}
+	want := (&launchd{o: installedOptions(l.o, exe, env), label: l.label}).Unit()
+	if string(cur) == want {
+		return false, nil
+	}
+	if l.o.System {
+		return l.writeSystemPlist(ctx, want)
+	}
+	return writeIfChanged(l.plistPath(), want)
+}
+
+// parsePlist returns ProgramArguments[0] and EnvironmentVariables of a
+// plist kran wrote.
+func parsePlist(b []byte) (exe string, env map[string]string) {
+	env = map[string]string{}
+	dec := xml.NewDecoder(strings.NewReader(string(b)))
+	dec.Strict = false
+	var stack []string
+	var envKey, top string
+	first := true
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return exe, env
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			stack = append(stack, t.Name.Local)
+		case xml.EndElement:
+			if len(stack) > 0 {
+				stack = stack[:len(stack)-1]
+			}
+		case xml.CharData:
+			if len(stack) == 0 {
+				continue
+			}
+			text := string(t)
+			switch depth, el := len(stack), stack[len(stack)-1]; {
+			case depth == 3 && el == "key": // plist > dict > key
+				top = text
+			case depth == 4 && top == "ProgramArguments" && el == "string" && first:
+				exe, first = text, false
+			case depth == 4 && top == "EnvironmentVariables" && el == "key":
+				envKey = text
+			case depth == 4 && top == "EnvironmentVariables" && el == "string":
+				env[envKey] = text
+			}
+		}
+	}
 }
 
 var (
@@ -357,8 +435,9 @@ func (l *launchd) Status(ctx context.Context) (Status, error) {
 	} else {
 		st.NoGUI = !HasGUISession(ctx, l.o)
 	}
-	_, ferr := os.Stat(l.plistPath())
+	cur, ferr := os.ReadFile(l.plistPath())
 	st.Installed = ferr == nil
+	st.Outdated = st.Installed && !strings.Contains(string(cur), formatMarker)
 	out, err := l.ctl(ctx, "print", l.target(ctx))
 	if err == nil {
 		st.Enabled = true

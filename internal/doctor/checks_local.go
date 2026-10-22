@@ -127,6 +127,13 @@ func (c *checker) checkService(ctx context.Context) {
 	default:
 		c.add(Result{ID: "service", Title: "background service", Level: OK, Detail: fmt.Sprintf("%s, pid %d", modeText(st.Mode, st.Manager), st.PID)})
 	}
+	if st.Installed && st.Outdated {
+		detail := st.UnitPath + " was written by an older kran: the daemon runs without the scheduling priority that keeps it responsive (and its links up) on a loaded machine"
+		r := Result{ID: "service.unit", Title: "service definition", Level: Warn, Detail: detail,
+			Fix: "kran doctor --fix (or kran service install), then kran service restart"}
+		r.fix = func(ctx context.Context) error { _, err := m.Refresh(ctx); return err }
+		c.add(r)
+	}
 	if st.Linger != nil && !*st.Linger {
 		r := Result{ID: "linger", Title: "stays running after logout", Level: Warn,
 			Detail: "systemd stops your user services when you log out, so jobs from other machines would stop being accepted",
