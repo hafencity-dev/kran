@@ -50,6 +50,7 @@ func testTiming() Timing {
 	t.SlotWait = 3 * time.Second
 	t.PrestartTimeout = 10 * time.Second
 	t.KillGrace = 300 * time.Millisecond
+	t.CLIDropGrace = 2 * time.Second
 	return t
 }
 
@@ -107,6 +108,9 @@ type testNode struct {
 	dialer  PeerDialer // nil = in-memory network
 	real    bool       // C's scheduler and estimator instead of fakes
 	src     PeerSource // nil = peers
+	// clientAlive overrides the liveness check of a dropped CLI's process
+	// (nil: CLIs in this test process count as gone).
+	clientAlive func(pid int) bool
 
 	mu     sync.Mutex
 	d      *Daemon
@@ -197,6 +201,8 @@ func (n *testNode) start() *Daemon {
 		Session: testSessionConfig(),
 		Logf:    n.log.logf(n.name),
 		Timing:  n.timing,
+
+		ClientAlive: n.clientAlive,
 	})
 	if err != nil {
 		n.t.Fatal(err)

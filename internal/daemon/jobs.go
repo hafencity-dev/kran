@@ -359,17 +359,56 @@ func (e *jobEntry) attach() {
 
 // detach is called when a run session ends. The last CLI going away
 // without an exit cancels the job (SPEC §6.1: closing the CLI connection is
-// a cancel), except while the daemon itself shuts down.
-func (e *jobEntry) detach() {
+// a cancel), except while the daemon itself shuts down. A CLI whose process
+// still lives dropped a session it took for broken and is reconnecting: it
+// gets CLIDropGrace to reattach (and is canceled at once if it dies).
+func (e *jobEntry) detach(clientPID int) {
 	e.mu.Lock()
 	e.attached--
 	left := e.attached
 	fin := e.finished || e.exitReported
+	started := e.started
 	e.mu.Unlock()
 	if left > 0 || fin || e.d.stopping.Load() {
 		return
 	}
+	// Before the command started, kran run does not reattach: it runs the
+	// command itself, so waiting would only risk running it twice.
+	if started && clientPID > 0 && e.d.clientAlive(clientPID) {
+		go e.awaitCLI(clientPID)
+		return
+	}
 	e.requestCancel("the kran run that started it went away", "TERM")
+}
+
+// awaitCLI waits for a live CLI to reattach after dropping its session.
+func (e *jobEntry) awaitCLI(pid int) {
+	deadline := time.NewTimer(e.d.t.CLIDropGrace)
+	defer deadline.Stop()
+	tk := time.NewTicker(100 * time.Millisecond)
+	defer tk.Stop()
+	for {
+		n, ch := e.attachedCount()
+		if n > 0 {
+			return
+		}
+		select {
+		case <-ch:
+		case <-e.done:
+			return
+		case <-deadline.C:
+			if e.d.stopping.Load() {
+				return
+			}
+			e.requestCancel("its kran run lost the connection and did not reconnect", "TERM")
+			return
+		case <-tk.C:
+			if !e.d.clientAlive(pid) {
+				e.requestCancel("the kran run that started it went away", "TERM")
+				return
+			}
+		}
+	}
 }
 
 func (e *jobEntry) attachedCount() (int, <-chan struct{}) {

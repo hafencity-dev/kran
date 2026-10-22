@@ -55,6 +55,7 @@ type Timing struct {
 	MetricsEvery     time.Duration // self/peer status (2 s)
 	SliceEvery       time.Duration // kran.slice refresh (20 s)
 	CLIReattachWait  time.Duration // restored job waits for its CLI (20 s)
+	CLIDropGrace     time.Duration // a live CLI that dropped its session may reattach (12 s)
 	SlotWait         time.Duration // waiting for a free slot on a target (60 s)
 	PrestartTimeout  time.Duration // one remote prestart RPC (2 min)
 	KillGrace        time.Duration // TERM→KILL (5 s)
@@ -77,6 +78,7 @@ func DefaultTiming() Timing {
 		MetricsEvery:     2 * time.Second,
 		SliceEvery:       20 * time.Second,
 		CLIReattachWait:  20 * time.Second,
+		CLIDropGrace:     12 * time.Second,
 		SlotWait:         60 * time.Second,
 		PrestartTimeout:  2 * time.Minute,
 		KillGrace:        5 * time.Second,
@@ -103,6 +105,9 @@ type Deps struct {
 	// KillLocal kills a local job's process tree (default: scope or process
 	// group kill with KillGrace).
 	KillLocal func(pid, pgid int, scope string)
+	// ClientAlive reports whether the process of a CLI that dropped its run
+	// session still exists (nil: signal 0 to its pid).
+	ClientAlive func(pid int) bool
 	// NoListen skips the unix sockets and the UI listener (in-process tests
 	// that drive Handler and ServePeerConn directly).
 	NoListen bool
@@ -174,6 +179,11 @@ func New(deps Deps) (*Daemon, error) {
 		logf:     deps.Logf,
 		conns:    map[net.Conn]struct{}{},
 		sessions: map[transport.Session]struct{}{},
+	}
+	if d.deps.ClientAlive == nil {
+		self := os.Getpid()
+		// A client inside this process (tests) is never waited for.
+		d.deps.ClientAlive = func(pid int) bool { return pid != self && processAlive(pid) }
 	}
 	if d.deps.KillLocal == nil {
 		d.deps.KillLocal = func(pid, pgid int, scope string) { killLocal(pid, pgid, scope, d.t.KillGrace, d.logf) }
@@ -313,6 +323,8 @@ func (d *Daemon) trackSession(s transport.Session) func() {
 		d.connMu.Unlock()
 	}
 }
+
+func (d *Daemon) clientAlive(pid int) bool { return d.deps.ClientAlive(pid) }
 
 func (d *Daemon) storeCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 5*time.Second)
