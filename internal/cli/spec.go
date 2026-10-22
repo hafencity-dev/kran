@@ -143,6 +143,11 @@ func BuildSpec(ctx context.Context, in SpecInput) (proto.JobSpec, error) {
 	if reason := originOnlyReason(spec, ws, wsErr, in.Home); reason != "" && !req.OriginOnly {
 		req.OriginOnly, req.OriginOnlyReason = true, reason
 	}
+	// submit.prefer = "remote" in config.toml is a default, not --remote: a
+	// job that can only run here stays here instead of failing with 125.
+	if req.OriginOnly && req.Prefer == proto.PreferRemote && !f.Remote {
+		req.Prefer = proto.PreferAuto
+	}
 	spec.Req = req
 
 	// Priority: flag, rule, tty default.
