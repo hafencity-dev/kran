@@ -78,6 +78,9 @@ func (s *systemd) ctl(ctx context.Context, args ...string) (string, error) {
 }
 
 func (s *systemd) Install(ctx context.Context) (bool, error) {
+	if err := refuseRoot(s.o); err != nil {
+		return false, err
+	}
 	changed, err := writeIfChanged(s.unitPath(), s.Unit())
 	if err != nil {
 		return false, err
