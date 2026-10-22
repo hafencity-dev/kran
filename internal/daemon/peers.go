@@ -48,6 +48,9 @@ type peer struct {
 	degradedUntil time.Time
 	changed       chan struct{} // closed when sessions change
 	lastSig       string        // last published status signature
+	clock         clockSample   // last offset measurement (zero: none)
+	clockAt       time.Time
+	clockBusy     bool
 }
 
 var errIncompatible = errors.New("incompatible kran version")
@@ -85,6 +88,7 @@ func (m *peerManager) run(ctx context.Context) {
 		}
 		for _, p := range m.list() {
 			p.push(false)
+			p.maybeMeasureClock()
 		}
 	}
 }
@@ -663,6 +667,10 @@ func (p *peer) nodeState() proto.NodeState {
 		}
 	}
 	ns.Link = proto.LinkInfo{Direction: p.cfg.Direction, BandwidthBps: p.bandwidth, Connected: s != nil}
+	if s != nil && p.clock.rtt > 0 {
+		ns.Link.ClockOffsetMillis = float64(p.clock.offset.Microseconds()) / 1000
+		ns.Link.ClockRTTMillis = float64(p.clock.rtt.Microseconds()) / 1000
+	}
 	if s != nil {
 		ns.Link.Address = s.RemoteAddr()
 		ns.Link.RTTMillis = float64(s.RTT().Microseconds()) / 1000

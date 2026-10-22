@@ -69,3 +69,22 @@ func TestPrestartFailureMovesToAnotherPeer(t *testing.T) {
 		t.Fatalf("stored %+v", j)
 	}
 }
+
+// Each peer's clock offset is measured over the live session: on one
+// machine both clocks are the same, so it must come out near zero (the age
+// of the last metrics sample would not).
+func TestPeerClockOffsetMeasured(t *testing.T) {
+	_, a, _ := twoNodes(t)
+	var link proto.LinkInfo
+	waitFor(t, 5*time.Second, "clock measured", func() bool {
+		for _, n := range a.daemon().State().Nodes {
+			if n.Info.Name == "b" {
+				link = n.Link
+			}
+		}
+		return link.ClockRTTMillis > 0
+	})
+	if link.ClockOffsetMillis < -100 || link.ClockOffsetMillis > 100 || link.ClockRTTMillis > 1000 {
+		t.Fatalf("offset %.1f ms, rtt %.1f ms", link.ClockOffsetMillis, link.ClockRTTMillis)
+	}
+}

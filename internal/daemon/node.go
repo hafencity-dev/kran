@@ -58,6 +58,7 @@ type Timing struct {
 	CLIDropGrace     time.Duration // a live CLI that dropped its session may reattach (12 s)
 	StdinWindow      int64         // input in flight to a remote job, kran run to target (8 MiB)
 	StdinQueue       int64         // input a target holds for a job before refusing more (64 MiB)
+	ClockEvery       time.Duration // peer clock offset measurement (5 min)
 	SlotWait         time.Duration // waiting for a free slot on a target (60 s)
 	PrestartTimeout  time.Duration // one remote prestart RPC (2 min)
 	KillGrace        time.Duration // TERM→KILL (5 s)
@@ -83,6 +84,7 @@ func DefaultTiming() Timing {
 		CLIDropGrace:     12 * time.Second,
 		StdinWindow:      8 << 20,
 		StdinQueue:       64 << 20,
+		ClockEvery:       5 * time.Minute,
 		SlotWait:         60 * time.Second,
 		PrestartTimeout:  2 * time.Minute,
 		KillGrace:        5 * time.Second,

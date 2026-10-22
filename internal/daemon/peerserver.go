@@ -113,6 +113,8 @@ func (d *Daemon) servePeerStream(ps *peerSession, c net.Conn) {
 		d.handleSubscribe(pc)
 	case proto.PeerMeshPeers:
 		pc.respond(d.peers.names())
+	case proto.PeerClock:
+		pc.respond(clockBody{Time: time.Now()})
 	case proto.PeerAdmit:
 		t.handleAdmit(ps, pc, req)
 	case proto.PeerSlotAcquire:

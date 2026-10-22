@@ -86,6 +86,13 @@ func peerResult(p config.Peer, rs []link.ProbeResult) Result {
 		Fix: "check that " + p.Name + " is on and reachable (`ssh " + p.Name + "`), then `kran link " + p.Name + "` to repair the keys"}
 }
 
+// Clock offsets above clockWarnSeconds are reported, when the measurement's
+// round trip (twice its error bound) is at most maxClockRTTMillis.
+const (
+	clockWarnSeconds  = 2.0
+	maxClockRTTMillis = 1000.0
+)
+
 // stateChecks uses the daemon's live view of the node: clock, disk, bandwidth.
 func (c *checker) stateChecks(name string) {
 	if c.state == nil {
@@ -104,11 +111,13 @@ func (c *checker) stateChecks(name string) {
 		c.add(Result{ID: "peer.status", Title: name + " status", Level: Warn, Node: name, Detail: string(n.Status) + ": " + n.Reason})
 		return
 	}
-	if !n.Metrics.Time.IsZero() {
-		skew := c.o.Now().Sub(n.Metrics.Time)
-		if math.Abs(skew.Seconds()) > 5 {
+	// The daemon measures the offset over the live link (midpoint of a
+	// request, fastest of several samples; error at most RTT/2). The age of
+	// the last metrics sample is no clock measurement: it lags by seconds.
+	if l := n.Link; l.ClockRTTMillis > 0 && l.ClockRTTMillis <= maxClockRTTMillis {
+		if off := math.Abs(l.ClockOffsetMillis) / 1000; off > clockWarnSeconds {
 			c.add(Result{ID: "clock", Title: "clock of " + name, Level: Warn, Node: name,
-				Detail: fmt.Sprintf("differs by about %.0f s from this machine; file mtimes and logs will disagree", math.Abs(skew.Seconds())),
+				Detail: fmt.Sprintf("differs by about %.1f s from this machine; file mtimes and logs will disagree", off),
 				Fix:    "enable network time (Linux: `timedatectl set-ntp true`; macOS: System Settings > General > Date & Time)"})
 		}
 	}

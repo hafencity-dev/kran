@@ -149,6 +149,11 @@ type LinkInfo struct {
 	// BandwidthBps is the EWMA of measured upload throughput to this node.
 	BandwidthBps float64 `json:"bandwidth_bps,omitempty"`
 	Connected    bool    `json:"connected"`
+	// added by A: the node's clock minus this node's, measured over the
+	// link (midpoint of a request, fastest of several samples); the error is
+	// at most ClockRTTMillis/2. ClockRTTMillis is 0 when not measured.
+	ClockOffsetMillis float64 `json:"clock_offset_ms,omitempty"`
+	ClockRTTMillis    float64 `json:"clock_rtt_ms,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
