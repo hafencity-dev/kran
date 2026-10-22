@@ -23,7 +23,7 @@ import (
 // On Linux they run twice: slots on the host (bind mount, the Linux
 // default) and slots in the volume via the sync helper (the macOS path).
 
-const testRunnerDockerfile = "FROM alpine:3.20\nRUN apk add --no-cache coreutils\nLABEL kran.runner=\"test\"\n"
+const testRunnerDockerfile = "FROM alpine:3.20\nRUN apk add --no-cache coreutils setpriv\nCOPY kran-init /usr/local/lib/kran/init\nLABEL kran.runner=\"test\"\n"
 
 func dockerTests(t *testing.T) {
 	t.Helper()
@@ -103,7 +103,7 @@ func cleanupDocker(te *testEnv) {
 		return
 	}
 	ctx := context.Background()
-	if out, err := dk.run(ctx, nil, "ps", "--all", "--quiet", "--filter", "label=kran.ns=kran-test"); err == nil {
+	if out, err := dk.run(ctx, nil, "ps", "--all", "--quiet", "--filter", "label=kran.ns="+te.m.ns); err == nil {
 		if ids := strings.Fields(string(out)); len(ids) > 0 {
 			dk.run(ctx, nil, append([]string{"rm", "--force", "--volumes"}, ids...)...)
 		}
@@ -210,6 +210,27 @@ func testContainerRuntime(t *testing.T, volume bool) {
 			t.Errorf("stderr %q", errOut)
 		}
 		assertNoContainer(t, te, "kran-test-job-"+p.JobID())
+	})
+
+	// The job runs as the node's uid with a passwd entry named like the
+	// origin's user, the origin's home, and only kran-init's work done as
+	// root (SPEC §6.8).
+	t.Run("user-and-home", func(t *testing.T) {
+		p := te.startCtr(ref, sh(`echo "who=$(id -un) uid=$(id -u) grp=$(id -gn)"; grep "^alice:" /etc/passwd; echo "home=$HOME user=$USER logname=$LOGNAME"; touch "$HOME/.kran-test-w" && echo home-writable; env | grep -c '^KRAN_INIT_' ; ls /usr/local/lib/kran/shims | tr '\n' ' '; echo; grep -c '^node = "24.8.0"' /usr/local/lib/kran/mise.toml; grep NoNewPrivs /proc/self/status; touch /etc/passwd 2>/dev/null || echo etc-readonly`),
+			func(r *StartRequest) {
+				r.Spec.OriginEnv = &proto.OriginEnv{User: "alice", Home: "/work/kran-test", Toolchains: map[string]string{"node": "24.8.0", "go": "1.25.1"}}
+			})
+		exit := waitExit(t, p, 120*time.Second)
+		out, errOut := output(t, p)
+		if exit.Code != 0 {
+			t.Fatalf("exit %+v\n%s\n%s", exit, out, errOut)
+		}
+		for _, want := range []string{fmt.Sprintf("who=alice uid=%d", os.Getuid()), fmt.Sprintf("alice:x:%d:%d:", os.Getuid(), os.Getgid()) + "kran job:/work/kran-test:",
+			"home=/work/kran-test user=alice logname=alice", "home-writable", "\n0\n", "corepack go gofmt node npm npx", "\n1\n", "NoNewPrivs:\t1", "etc-readonly"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("missing %q in:\n%s\n%s", want, out, errOut)
+			}
+		}
 	})
 
 	// The sync helper writes every repo's slots: a job must not be able to

@@ -305,9 +305,12 @@ URL with a password, `scheme://user:pass@…`) unless listed in `.kran.toml
 env.forward` or `--env NAME`. `TERM`, `COLORTERM`, `NO_COLOR`,
 `FORCE_COLOR`, `CI`, `LANG`, `LC_*` (unless the name looks like a secret),
 `TZ` are forwarded. The target sets
-`PATH` (runtime default + toolchains), `HOME` (real), `TMPDIR` (per job),
+`PATH` (runtime default + toolchains), `HOME` (native: real; container: the
+origin's home path, §6.8), `USER`/`LOGNAME`, `TMPDIR` (per job),
 `GOCACHE`/`GOMODCACHE`/`npm_config_store_dir` (node-shared caches),
 `KRAN_JOB_ID`, `KRAN_NODE`, `KRAN_ORIGIN`, `KRAN_ORIGIN_ROOT`.
+The origin daemon adds `origin_env` to every job it submits: its user name,
+home directory, time zone (IANA name) and native toolchain versions.
 
 ### 6.6 Estimates (`internal/estimate`)
 
@@ -368,18 +371,54 @@ process tree RSS + CPU time).
   satisfies the workspace's pin, else `mise exec tool@ver --` if mise exists,
   else ineligible with reason.
 * `container`: image `kran-runner:<kran version>` built on the node from an
-  embedded Dockerfile (debian stable-slim, git, build-essential,
-  ca-certificates, curl, unzip, xz, pkg-config, mise). Built lazily by the
+  embedded Dockerfile and `kran-init` (debian stable-slim, git,
+  build-essential, ca-certificates, curl, unzip, xz, pkg-config, locales with
+  common UTF-8 locales prebuilt, tzdata, setpriv, mise; git trusts every
+  directory). Built lazily by the
   first container job (phase `setup`, "preparing the Linux runtime (first
   use, ~30 s)"), one build at a time; until then the runtime reports
   `first_use` but counts as available whenever Docker is reachable. A job
   that gives up waiting falls back as any prestart failure; the build goes
-  on. The reaper removes `kran-runner` images of other kran versions. Toolchains via mise
-  into volume `kran-tools`; caches in volume `kran-cache`
-  (GOCACHE, GOMODCACHE, pnpm store, npm cache, uv cache, mise). Job =
-  `docker run --rm --init --network host --name kran-job-<id> --label
-  kran.job=<id> --memory <cap> --cpus <n> -v /var/run/docker.sock:… -e …
-  -w <origin cwd> --user <uid>:<gid>`. The Docker socket is available so
+  on. The reaper removes `kran-runner` images of other kran versions.
+  **Toolchains** via mise into volume `kran-tools`, lazily: the job's mise
+  global config lists the origin's native version of every tool kran knows
+  (go, node, python — same minor, as distribution pythons are patch
+  releases mise cannot verify — pnpm, yarn, bun, deno, rust, uv), overridden
+  by the workspace's pins (§6.7 detection: `.tool-versions`, mise config,
+  `.nvmrc`/`.node-version`, `.python-version`, `go.mod`, `packageManager`,
+  `engines`; a pin the origin's version satisfies keeps that exact version).
+  The repo's own mise config, read by mise itself, wins over the global one.
+  `PATH` starts with a shim for each binary of those tools only (`node`,
+  `npm`, `go`, `python3`, …); the first call installs that tool's version
+  (mise locks the install, so concurrent jobs share it) and later calls run
+  it from the volume (~10 ms). mise's own shim directory is not on `PATH`, so
+  a tool neither the origin nor the repo has is "not found", never "No
+  version is set". Pinned tools kran has no shims for run via `mise exec
+  tool@ver --`. Caches in volume `kran-cache` (GOCACHE, GOMODCACHE, pnpm
+  store, npm cache, uv cache, mise). Job = `docker run --rm --init --network
+  host --name kran-job-<id> --label kran.job=<id> --memory <cap> --cpus <n>
+  --shm-size <cap/2, 2 GiB uncapped> --ulimit nofile=65536:524288 (not on
+  rootless Docker) -v /var/run/docker.sock:… -e … -w <origin cwd> --user 0:0
+  --entrypoint kran-init --cap-drop ALL --cap-add SETUID,SETGID,KILL
+  --security-opt no-new-privileges`. **kran-init** runs as root only to
+  describe the job's machine, then `setpriv`s to the node's `<uid>:<gid>`
+  (plus the Docker socket's group) for good: it writes a passwd entry for
+  the uid named like the origin's user with `HOME` as its home (and a group
+  entry for the gid), the mise config and shims, `/etc/localtime` for the
+  origin's time zone (`TZ` itself is only what the origin forwarded), builds
+  a missing UTF-8 locale named in `LANG`/`LC_*` (≈1 s; one that cannot exist,
+  like macOS's `LC_CTYPE=UTF-8`, becomes `C.UTF-8`) and unsets CA bundle and
+  SDK path variables (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `JAVA_HOME`,
+  `VIRTUAL_ENV`, …) that name files missing in the container. Its inputs
+  come as `KRAN_INIT_*` variables, validated in kran and again in the script,
+  and are unset before the job starts. `HOME` is the origin's home path, a
+  mount of the node's persistent container home (`kran-cache`, subpath
+  `home`); `/kran/cache/home` when that path cannot be mounted (Docker < 26,
+  a reserved path, or inside the workspace) and the workspace itself when
+  it is the home directory. `USER`/`LOGNAME` match the passwd entry. The
+  origin's `DOCKER_HOST` (unix sockets), `DOCKER_CONTEXT`, `DOCKER_CONFIG`
+  and `DOCKER_CERT_PATH` are dropped: the job's Docker is the mounted
+  socket. The Docker socket is available so
   testcontainers / `docker compose` in tests work (not with `.kran.toml
   docker = false` or `kran run --no-docker`); host networking makes
   `localhost:<published port>` work as on Linux. The slot sync helper lives
@@ -465,7 +504,11 @@ target side delegates to `execenv.Manager` (§10). Methods: `hello`,
 * Secrets never synced (§6.7) nor forwarded (§6.5) by default.
 * Jobs run as the node's user, never root; the daemon refuses to run as
   root (`kran daemon --allow-root` overrides) and `kran service install`
-  never installs one that would.
+  never installs one that would. A container job starts as root in its own
+  container only for kran-init (§6.8), with no capabilities but SETUID,
+  SETGID and KILL, under `no-new-privileges`; it writes only the
+  container's own `/etc` and image files, never the mounted volumes, and the
+  job's process has no capabilities and cannot regain any.
 * **Container jobs get the Docker socket by default**, so testcontainers and
   `docker compose` work. With rootful Docker (Linux without rootless mode)
   that is root-equivalent on the node: a job can start a privileged

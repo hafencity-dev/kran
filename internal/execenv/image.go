@@ -1,8 +1,13 @@
 package execenv
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
+	_ "embed"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,7 +41,42 @@ type runnerImage struct {
 	lastPruned time.Time
 }
 
-func (m *manager) dockerfileLabel() string { return hashString(m.dockerfile())[:16] }
+// runnerInit is the job containers' entrypoint, built into the image as
+// /usr/local/lib/kran/init (SPEC §6.8).
+//
+//go:embed runner-init.sh
+var runnerInit string
+
+// dockerfileLabel identifies what the image was built from.
+func (m *manager) dockerfileLabel() string {
+	return hashString(m.dockerfile() + "\x00" + runnerInit)[:16]
+}
+
+// buildContext is the image's build context: the Dockerfile and kran-init.
+func buildContext(dockerfile string) ([]byte, error) {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(zw)
+	for _, f := range []struct {
+		name, body string
+		mode       int64
+	}{{"Dockerfile", dockerfile, 0o644}, {"kran-init", runnerInit, 0o755}} {
+		hdr := &tar.Header{Name: f.name, Mode: f.mode, Size: int64(len(f.body)), Typeflag: tar.TypeReg, ModTime: time.Unix(0, 0)}
+		if err := tw.WriteHeader(hdr); err != nil {
+			return nil, err
+		}
+		if _, err := io.WriteString(tw, f.body); err != nil {
+			return nil, err
+		}
+	}
+	if err := tw.Close(); err != nil {
+		return nil, err
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
 
 // imageExists asks Docker whether the current tag was built from the
 // current Dockerfile.
@@ -137,7 +177,11 @@ func (m *manager) buildImageLocked(ctx context.Context, dk *dockerEnv) error {
 	}
 	m.logf("building %s (first container job on this node)", tag)
 	start := time.Now()
-	_, err = dk.run(ctx, []byte(m.dockerfile()), "build", "--quiet", "--tag", tag,
+	bctx, err := buildContext(m.dockerfile())
+	if err != nil {
+		return fmt.Errorf("runner image build context: %w", err)
+	}
+	_, err = dk.run(ctx, bctx, "build", "--quiet", "--tag", tag,
 		"--label", "kran.dockerfile="+m.dockerfileLabel(), "--label", "kran.ns="+m.ns, "-")
 	if err != nil {
 		return fmt.Errorf("%w: building the runner image failed: %v", ErrRuntimeUnavailable, err)

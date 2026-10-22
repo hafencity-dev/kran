@@ -85,6 +85,19 @@ type dockerInfo struct {
 	Architecture  string `json:"Architecture"`
 	ServerVersion string `json:"ServerVersion"`
 	Name          string `json:"Name"`
+	// SecurityOptions lists e.g. "name=rootless" for a rootless daemon.
+	SecurityOptions []string `json:"SecurityOptions"`
+}
+
+// rootless reports a rootless Docker daemon: it cannot raise limits above
+// its own.
+func (i dockerInfo) rootless() bool {
+	for _, o := range i.SecurityOptions {
+		if o == "name=rootless" || strings.HasPrefix(o, "name=rootless,") {
+			return true
+		}
+	}
+	return false
 }
 
 type containerSummary struct {

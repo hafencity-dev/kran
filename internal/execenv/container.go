@@ -401,35 +401,40 @@ func (m *manager) containerSpec(ctx context.Context, spec *superSpec, req *Start
 		slotMount = fmt.Sprintf("type=bind,src=%s,dst=%s", m.pool.hostPath(s), root)
 	}
 
-	// Toolchains always come from mise in the container (installed once
-	// into the shared tools volume).
-	var miseTools []string
-	keys := make([]string, 0, len(req.Spec.Req.Toolchains))
-	for k := range req.Spec.Req.Toolchains {
-		keys = append(keys, k)
+	// Toolchains come from mise: the origin's versions unless the
+	// workspace pins its own, each installed on first use into the shared
+	// tools volume (SPEC §6.8).
+	oe := req.Spec.OriginEnv
+	if oe == nil {
+		oe = &proto.OriginEnv{}
 	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		if k == "mise" {
-			continue
-		}
-		miseTools = append(miseTools, k+"@"+miseVersion(req.Spec.Req.Toolchains[k]))
-	}
+	tools := containerToolchains(oe.Toolchains, req.Spec.Req.Toolchains)
 	wrap := func(argv []string) []string {
-		if len(miseTools) == 0 {
+		if len(tools.eager) == 0 {
 			return argv
 		}
-		return append(append(append([]string{"mise", "exec"}, miseTools...), "--"), argv...)
+		return append(append(append([]string{"mise", "exec"}, tools.eager...), "--"), argv...)
+	}
+	home, homeMount := ctrHomeFor(root, oe.Home, apiVersionAtLeast(dk.ver.APIVersion, 1, 45))
+	user := ctrUser(oe, m.hostEnv().user)
+	initTools, initShims := tools.initEnv()
+	var groups []string
+	if !req.Spec.Req.NoDocker && dk.sockGID > 0 {
+		groups = append(groups, strconv.Itoa(dk.sockGID))
 	}
 
 	fixed := map[string]string{
-		"HOME": ctrHome, "TMPDIR": "/tmp",
+		"HOME": home, "USER": user, "LOGNAME": user, "SHELL": "/bin/bash", "PATH": ctrPath(home), "TMPDIR": "/tmp",
 		"GOCACHE": ctrCache + "/go-build", "GOMODCACHE": ctrCache + "/gomod",
 		"npm_config_cache": ctrCache + "/npm", "npm_config_store_dir": ctrCache + "/pnpm-store",
 		"UV_CACHE_DIR": ctrCache + "/uv", "PIP_CACHE_DIR": ctrCache + "/pip", "CARGO_HOME": ctrCache + "/cargo",
-		"MISE_DATA_DIR": ctrTools + "/mise", "MISE_CACHE_DIR": ctrCache + "/mise", "MISE_YES": "1",
-		"MISE_TRUSTED_CONFIG_PATHS": root,
-		"KRAN_JOB_ID":               req.Spec.ID, "KRAN_NODE": m.opts.NodeName, "KRAN_ORIGIN": req.Origin, "KRAN_ORIGIN_ROOT": root,
+		"MISE_DATA_DIR": ctrTools + "/mise", "MISE_CACHE_DIR": ctrCache + "/mise", "MISE_STATE_DIR": ctrCache + "/mise-state", "MISE_YES": "1",
+		"MISE_GLOBAL_CONFIG_FILE": ctrMiseConf, "MISE_TRUSTED_CONFIG_PATHS": root,
+		"KRAN_JOB_ID": req.Spec.ID, "KRAN_NODE": m.opts.NodeName, "KRAN_ORIGIN": req.Origin, "KRAN_ORIGIN_ROOT": root,
+		// Read by kran-init, which unsets them before the job starts.
+		"KRAN_INIT_UID": strconv.Itoa(os.Getuid()), "KRAN_INIT_GID": strconv.Itoa(os.Getgid()),
+		"KRAN_INIT_GROUPS": strings.Join(groups, ","), "KRAN_INIT_USER": user, "KRAN_INIT_GROUP": nodeGroupName(),
+		"KRAN_INIT_TOOLS": initTools, "KRAN_INIT_SHIMS": initShims, "KRAN_INIT_TZ": oe.TZ,
 	}
 	if req.Spec.TTY != nil && req.Spec.Env["TERM"] == "" {
 		fixed["TERM"] = "xterm-256color"
@@ -450,7 +455,7 @@ func (m *manager) containerSpec(ctx context.Context, spec *superSpec, req *Start
 	sort.Strings(userKeys)
 	for _, k := range userKeys {
 		v := req.Spec.Env[k]
-		if k == "" || strings.ContainsAny(k, "=\x00") || hostSpecificEnv(k) {
+		if k == "" || strings.ContainsAny(k, "=\x00") || hostSpecificEnv(k) || ctrDropEnv(k, v) {
 			continue
 		}
 		if _, ok := fixed[k]; ok {
@@ -473,21 +478,34 @@ func (m *manager) containerSpec(ctx context.Context, spec *superSpec, req *Start
 	}
 
 	common := func(name string) []string {
+		// kran-init starts as root with only the capabilities it needs to
+		// write the user entry and drop to the job's uid (KILL: tini
+		// forwards signals to it); the job never gains privileges.
 		a := []string{"run", "--name", name, "--label", "kran.job=" + req.Spec.ID, "--label", "kran.ns=" + m.ns,
 			"--init", "--network", "host",
-			"--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
-			"--mount", slotMount,
+			"--user", "0:0", "--entrypoint", ctrInit,
+			"--cap-drop", "ALL", "--cap-add", "SETUID", "--cap-add", "SETGID", "--cap-add", "KILL",
+			"--security-opt", "no-new-privileges",
+			"--shm-size", strconv.FormatInt(ctrShmSize(spec.MemMax), 10),
 			"--mount", "type=volume,src=" + m.volume("cache") + ",dst=" + ctrCache,
 			"--mount", "type=volume,src=" + m.volume("tools") + ",dst=" + ctrTools,
+		}
+		if homeMount {
+			// nocopy: Docker would otherwise hand the home directory to
+			// root when it creates the workdir's mount points in it.
+			a = append(a, "--mount", "type=volume,src="+m.volume("cache")+",dst="+home+",volume-subpath=home,volume-nocopy=true")
+		}
+		a = append(a, "--mount", slotMount)
+		if !dk.info.rootless() {
+			// Docker's default soft limit of 1024 open files breaks file
+			// watchers and big test runs; the hard limit stays Docker's.
+			a = append(a, "--ulimit", "nofile=65536:524288")
 		}
 		// The Docker socket lets testcontainers and docker compose work in
 		// jobs; it is root-equivalent on rootful Docker (SPEC §9), so a
 		// project can opt out.
 		if !req.Spec.Req.NoDocker {
 			a = append(a, "-v", "/var/run/docker.sock:/var/run/docker.sock")
-			if dk.sockGID > 0 {
-				a = append(a, "--group-add", strconv.Itoa(dk.sockGID))
-			}
 		}
 		if spec.MemMax > 0 {
 			a = append(a, "--memory", strconv.FormatInt(spec.MemMax, 10), "--memory-swap", strconv.FormatInt(spec.MemMax, 10))
