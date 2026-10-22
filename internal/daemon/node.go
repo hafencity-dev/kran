@@ -56,6 +56,8 @@ type Timing struct {
 	SliceEvery       time.Duration // kran.slice refresh (20 s)
 	CLIReattachWait  time.Duration // restored job waits for its CLI (20 s)
 	CLIDropGrace     time.Duration // a live CLI that dropped its session may reattach (12 s)
+	StdinWindow      int64         // input in flight to a remote job, kran run to target (8 MiB)
+	StdinQueue       int64         // input a target holds for a job before refusing more (64 MiB)
 	SlotWait         time.Duration // waiting for a free slot on a target (60 s)
 	PrestartTimeout  time.Duration // one remote prestart RPC (2 min)
 	KillGrace        time.Duration // TERM→KILL (5 s)
@@ -79,6 +81,8 @@ func DefaultTiming() Timing {
 		SliceEvery:       20 * time.Second,
 		CLIReattachWait:  20 * time.Second,
 		CLIDropGrace:     12 * time.Second,
+		StdinWindow:      8 << 20,
+		StdinQueue:       64 << 20,
 		SlotWait:         60 * time.Second,
 		PrestartTimeout:  2 * time.Minute,
 		KillGrace:        5 * time.Second,

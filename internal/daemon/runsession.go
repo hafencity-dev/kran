@@ -128,6 +128,11 @@ func (d *Daemon) serveRun(conn net.Conn, br *bufio.Reader, clientPID int) {
 			return
 		}
 		defer rd.Close()
+		if reattach {
+			// Input sent on the lost session may be gone: ask for it again
+			// (written after the reader's start, so this session sees it).
+			e.cliReattached()
+		}
 		for {
 			ft, fp, err := rd.Next(ctx)
 			if err != nil {
@@ -187,17 +192,21 @@ func (d *Daemon) serveRun(conn net.Conn, br *bufio.Reader, clientPID int) {
 func (d *Daemon) onCLIFrame(ctx context.Context, e *jobEntry, t proto.FrameType, p []byte) bool {
 	switch t {
 	case proto.FrameHeartbeat:
-	case proto.FrameStdin:
-		// Back-pressure: wait while the target is slow to take stdin.
-		for !e.outbox.put(proto.FrameStdin, p) {
+	case proto.FrameStdin, proto.FrameStdinEOF:
+		// kran run keeps to its credit, so this waits only for a target
+		// without flow control.
+		for !e.cliInput(t, p) {
 			select {
 			case <-ctx.Done():
 				return false
 			case <-time.After(50 * time.Millisecond):
 			}
 		}
-	case proto.FrameStdinEOF:
-		e.outbox.put(proto.FrameStdinEOF, nil)
+	case proto.FrameStdinResume:
+		var r proto.StdinResume
+		if json.Unmarshal(p, &r) == nil {
+			e.cliResume(r)
+		}
 	case proto.FrameResize:
 		var tty proto.TTY
 		if json.Unmarshal(p, &tty) == nil {

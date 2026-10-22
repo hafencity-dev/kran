@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -53,6 +54,7 @@ func (d *Daemon) runRemote(ctx context.Context, e *jobEntry, p scheduler.Placeme
 	}
 	e.sendFrame(proto.FrameDecision, proto.Decision{
 		JobID: e.id, Mode: "remote", Node: node, Runtime: p.Runtime, Reason: p.Reason, Estimate: job.Estimate,
+		StdinLimit: e.stdinLimit(),
 	})
 
 	actx, cancel := rpc(30 * time.Second)
@@ -130,9 +132,13 @@ func (d *Daemon) runRemote(ctx context.Context, e *jobEntry, p scheduler.Placeme
 
 	spec.ID = e.id
 	stctx, cancel := rpc(d.t.PrestartTimeout)
+	var info jobStreamInfo
 	pc, err := peerCall(stctx, sess, proto.PeerJobStart, e.id, jobStartBody{
 		Spec: spec, Slot: slot, Runtime: p.Runtime, Alloc: p.Alloc, Origin: d.self,
-	}, nil)
+	}, &info)
+	if pc != nil {
+		pc.stdinWindow = info.StdinWindow
+	}
 	cancel()
 	if err != nil {
 		abandon()
@@ -296,10 +302,12 @@ func (d *Daemon) reattachRemote(ctx context.Context, e *jobEntry, node string, d
 			continue
 		}
 		cctx, c2 := context.WithTimeout(actx, 10*time.Second)
-		pc, err := peerCall(cctx, sess, proto.PeerJobAttach, e.id, jobAttachBody{Offset: e.spool.outputBytes()}, nil)
+		var info jobStreamInfo
+		pc, err := peerCall(cctx, sess, proto.PeerJobAttach, e.id, jobAttachBody{Offset: e.spool.outputBytes()}, &info)
 		c2()
 		cancel()
 		if err == nil {
+			pc.stdinWindow = info.StdinWindow
 			d.logf("job %s: reattached to %s at offset %d", e.id, node, e.spool.outputBytes())
 			return pc, nil
 		}
@@ -327,6 +335,10 @@ func (d *Daemon) pumpJob(ctx context.Context, e *jobEntry, node string, pc *peer
 	results := make(chan pumpResult, 2)
 	silent := make(chan struct{})
 	readerDone := make(chan struct{})
+	// With flow control, input waits for the target's first report on this
+	// stream (it says from where kran run must send).
+	var inputReady atomic.Bool
+	inputReady.Store(!e.targetStream(pc.stdinWindow))
 
 	// Target → origin.
 	go func() {
@@ -359,6 +371,17 @@ func (d *Daemon) pumpJob(ctx context.Context, e *jobEntry, node string, pc *peer
 				}
 				d.onRemotePhase(e, node, ph)
 				e.phase(ph)
+			case pfStdinCredit:
+				var r stdinReport
+				if json.Unmarshal(p, &r) != nil {
+					continue
+				}
+				first := !inputReady.Load()
+				e.targetReport(r, first, node)
+				if first {
+					inputReady.Store(true)
+					e.outbox.wake()
+				}
 			case proto.FrameExit:
 				var x proto.Exit
 				if err := json.Unmarshal(p, &x); err != nil {
@@ -392,8 +415,9 @@ func (d *Daemon) pumpJob(ctx context.Context, e *jobEntry, node string, pc *peer
 		for {
 			// One frame at a time: a signal queued while input is being
 			// written goes out next.
-			for f, ok := e.outbox.next(); ok; f, ok = e.outbox.next() {
+			for f, ok := e.outbox.next(inputReady.Load()); ok; f, ok = e.outbox.next(inputReady.Load()) {
 				if !send(f.t, f.p) {
+					e.outbox.unget(f)
 					return
 				}
 			}

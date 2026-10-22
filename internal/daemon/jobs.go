@@ -62,6 +62,7 @@ type jobEntry struct {
 	scope   string
 
 	outbox       *outbox // remote: frames for the target
+	in           inFlow  // remote: input flow control
 	lastPhasePub time.Time
 	tty          *proto.TTY
 }
@@ -84,6 +85,7 @@ func (t *jobTable) newEntry(job proto.Job, sp *spool) *jobEntry {
 		outbox:   newOutbox(),
 		tty:      job.Spec.TTY,
 	}
+	e.in.on = job.Spec.Stdin
 	return e
 }
 
@@ -206,6 +208,8 @@ func (t *jobTable) restore() {
 		}
 		e := t.newEntry(j, sp)
 		e.restored = true
+		// Input offsets are known again only once the target reports.
+		e.in.awaitResume, e.in.resumeAt = true, -1
 		t.add(e)
 		mode := driveResubmit
 		switch {
@@ -546,8 +550,9 @@ func (o *outbox) put(t proto.FrameType, p []byte) bool {
 	return true
 }
 
-// next pops the next frame to send, control frames first.
-func (o *outbox) next() (outFrame, bool) {
+// next pops the next frame to send, control frames first; input only when
+// allowInput (a stream waits for the target's first report).
+func (o *outbox) next(allowInput bool) (outFrame, bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if len(o.ctl) > 0 {
@@ -555,11 +560,29 @@ func (o *outbox) next() (outFrame, bool) {
 		o.ctl = o.ctl[1:]
 		return f, true
 	}
-	if len(o.data) > 0 {
+	if allowInput && len(o.data) > 0 {
 		f := o.data[0]
 		o.data = o.data[1:]
 		o.bytes -= len(f.p)
 		return f, true
 	}
 	return outFrame{}, false
+}
+
+// unget puts back a control frame a broken stream did not take.
+func (o *outbox) unget(f outFrame) {
+	if isInput(f.t) {
+		return // input is sent again from the target's report
+	}
+	o.mu.Lock()
+	o.ctl = append([]outFrame{f}, o.ctl...)
+	o.mu.Unlock()
+}
+
+// dropInput forgets queued input: kran run sends it again from the offset
+// the target reports.
+func (o *outbox) dropInput() {
+	o.mu.Lock()
+	o.data, o.bytes = nil, 0
+	o.mu.Unlock()
 }

@@ -58,7 +58,11 @@ type tjob struct {
 
 	phase   proto.Phase
 	phaseCh chan struct{}
-	live    *proto.Resources // sampled every MetricsEvery
+	// in holds the job's input across streams (created by the first one);
+	// startedHere: this daemon started the job, so it saw all its input.
+	in          *stdinPump
+	startedHere bool
+	live        *proto.Resources // sampled every MetricsEvery
 }
 
 type tjobRecord struct {
@@ -467,6 +471,9 @@ func (t *targetSide) watch(ctx context.Context, j *tjob) {
 	t.mu.Lock()
 	j.ended = true
 	j.endedAt = t.d.now()
+	if j.in != nil {
+		j.in.close()
+	}
 	slot := j.Slot
 	t.persistLocked()
 	t.mu.Unlock()
@@ -508,4 +515,28 @@ func humanBytes(n int64) string {
 		}
 	}
 	return fmt.Sprintf("%.0f PiB", f/unit)
+}
+
+// inputPump returns the job's input queue, starting its writer on first use.
+func (t *targetSide) inputPump(j *tjob, proc execenv.Process) *stdinPump {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if j.in != nil {
+		return j.in
+	}
+	q := newStdinPump(t.d.t.StdinQueue, j.startedHere)
+	j.in = q
+	if j.ended {
+		q.close()
+		return q
+	}
+	t.d.goLoop(func(ctx context.Context) {
+		w := proc.Stdin()
+		if w == nil {
+			q.close()
+			return
+		}
+		q.run(ctx, w)
+	})
+	return q
 }

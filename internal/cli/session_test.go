@@ -490,6 +490,7 @@ func TestStdinForwarding(t *testing.T) {
 	h.r.stdin = pr
 	go func() {
 		s.push(proto.FrameDecision, proto.Decision{JobID: "j", Mode: "remote", Node: "n"})
+		s.push(proto.FramePhase, proto.Phase{State: proto.JobRunning}) // input is read once the command runs
 		pw.Write([]byte("hello"))
 		waitFor(t, func() bool { return s.count(proto.FrameStdin) >= 1 })
 		pw.Close()

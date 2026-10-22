@@ -102,7 +102,7 @@ func TestOutboxControlBeforeInput(t *testing.T) {
 	o.put(proto.FrameSignal, []byte(`{"name":"INT"}`))
 	o.put(proto.FrameResize, []byte(`{}`))
 	var got []string
-	for f, ok := o.next(); ok; f, ok = o.next() {
+	for f, ok := o.next(true); ok; f, ok = o.next(true) {
 		got = append(got, f.t.String()+":"+string(f.p))
 	}
 	want := `signal:{"name":"INT"} resize:{} stdin:a stdin:b stdin_eof:`
