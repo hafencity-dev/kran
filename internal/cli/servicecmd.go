@@ -119,7 +119,7 @@ func (a *App) serviceCommand() *cobra.Command {
 
 	var asJSON bool
 	status := &cobra.Command{
-		Use: "status", Short: "Show whether the service is installed and running", Args: cobra.NoArgs,
+		Use: "status", Short: "Show whether the service is installed and running (exit 3 if not running)", Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			m, err := a.serviceManager()
 			if err != nil {
@@ -136,11 +136,11 @@ func (a *App) serviceCommand() *cobra.Command {
 			case !st.Installed && st.NoGUI:
 				fmt.Fprintln(a.Out, "no background service installed: the daemon starts on demand.")
 			case !st.Installed:
-				fmt.Fprintf(a.Out, "not installed (%s). Install it with `kran service install`.\n", st.Manager)
+				fmt.Fprintf(a.Out, "not installed (%s).\n", st.Manager)
 			case st.Running:
 				fmt.Fprintf(a.Out, "running as %s (pid %d), unit %s\n", modeLabel(st.Mode, st.Manager), st.PID, st.UnitPath)
 			default:
-				fmt.Fprintf(a.Out, "installed under %s but not running. Start it with `kran service start`.\n", st.Manager)
+				fmt.Fprintf(a.Out, "installed under %s but not running.\n", st.Manager)
 			}
 			for _, adv := range st.Advice {
 				fmt.Fprintln(a.Out, adv)

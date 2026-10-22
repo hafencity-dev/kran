@@ -221,12 +221,22 @@ func (r *runner) noSession(ctx context.Context, why string, cause error) int {
 		if cause != nil && !errors.Is(cause, client.ErrNoDaemon) {
 			msg += " (" + cause.Error() + ")"
 		}
-		r.sayAlways("%s, and --remote/--no-fallback forbids running locally; check the daemon with `kran doctor` or start it with `kran service start`", msg)
+		flag := "--no-fallback"
+		if r.spec.Req.Prefer == proto.PreferRemote {
+			flag = "--remote"
+		}
+		hint := "check: kran doctor"
+		if i := strings.LastIndex(why, "("); i >= 0 && strings.HasSuffix(why, ")") {
+			hint = why[i+1 : len(why)-1] // the "start it: …" advice of the original message
+		}
+		r.sayAlways("%s; %s forbids running here (%s)", msg, flag, hint)
 		r.event("exit", map[string]any{"code": proto.ExitInfra, "state": proto.JobInfraErr})
 		return proto.ExitInfra
 	}
 	r.event("fallback", map[string]any{"reason": why})
-	r.say("%s", why)
+	if !r.flags.JSONEvents { // the fallback event already carries the reason
+		r.say("%s", why)
+	}
 	return r.standalone(ctx)
 }
 

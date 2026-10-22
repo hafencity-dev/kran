@@ -167,7 +167,11 @@ func (a *App) runSetup(ctx context.Context, f setupFlags) error {
 
 	if !f.Quiet {
 		fmt.Fprintln(a.Out)
-		fmt.Fprintln(a.Out, "kran is ready. Try:  kran run -- <command>   |   kran link <host>   |   kran status")
+		if ps, err := config.LoadPeers(""); err == nil && len(ps.Peer) > 0 {
+			fmt.Fprintln(a.Out, "kran is ready. Try: kran run -- <command>   or   kran status")
+		} else {
+			fmt.Fprintln(a.Out, "kran is ready on this machine. Next: kran link <host> to add another machine, then kran run -- <command>.")
+		}
 	}
 	return nil
 }

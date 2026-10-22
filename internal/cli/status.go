@@ -111,17 +111,34 @@ func (a *App) printStatus(st *proto.State, now time.Time) {
 	}
 	fmt.Fprintln(a.Out)
 	sts := st.Stats
-	fmt.Fprintf(a.Out, "today: %d jobs, %d offloaded, %d ran locally after a fallback", sts.JobsToday, sts.OffloadedToday, sts.FallbacksToday)
-	if sts.FailedInfraToday > 0 {
-		fmt.Fprintf(a.Out, ", %d failed on kran's side (kran doctor)", sts.FailedInfraToday)
+	if sts.JobsToday == 0 {
+		fmt.Fprintln(a.Out, "today: no jobs yet")
+	} else {
+		parts := []string{fmt.Sprintf("%d %s", sts.JobsToday, plural(sts.JobsToday, "job", "jobs"))}
+		if sts.OffloadedToday > 0 || len(st.Nodes) > 1 {
+			parts = append(parts, fmt.Sprintf("%d offloaded", sts.OffloadedToday))
+		}
+		if sts.FallbacksToday > 0 {
+			parts = append(parts, fmt.Sprintf("%d ran here after a remote attempt failed", sts.FallbacksToday))
+		}
+		if sts.FailedInfraToday > 0 {
+			parts = append(parts, fmt.Sprintf("%d failed on kran's side (kran doctor)", sts.FailedInfraToday))
+		}
+		if sts.SavedSecondsToday >= 1 {
+			parts = append(parts, "about "+humanDuration(time.Duration(sts.SavedSecondsToday*float64(time.Second)).Truncate(time.Second))+" saved")
+		}
+		fmt.Fprintln(a.Out, "today: "+strings.Join(parts, ", "))
 	}
-	if sts.SavedSecondsToday >= 1 {
-		fmt.Fprintf(a.Out, ", about %s saved", humanDuration(time.Duration(sts.SavedSecondsToday*float64(time.Second)).Truncate(time.Second)))
-	}
-	fmt.Fprintln(a.Out)
 	if len(st.Nodes) == 1 {
 		fmt.Fprintln(a.Out, "only this machine so far; add another with `kran link <host>`")
 	}
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 func jobCommand(sp proto.JobSpec) string {
@@ -159,7 +176,7 @@ func (a *App) jobsCommand() *cobra.Command {
 					return nil
 				}
 				w := tabwriter.NewWriter(a.Out, 0, 4, 2, ' ', 0)
-				fmt.Fprintln(w, "ID\tSTATE\tNODE\tTIME\tOWNER\tCOMMAND")
+				fmt.Fprintln(w, "ID\tSTATE\tNODE\tTOOK\tOWNER\tCOMMAND")
 				for _, j := range jobs {
 					node := j.Node
 					if node == "" {

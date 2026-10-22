@@ -343,8 +343,19 @@ func TestNoDaemonNoFallback(t *testing.T) {
 	if code := h.run(t); code != 125 {
 		t.Fatal(code)
 	}
-	if !strings.Contains(h.stderr.String(), "no-fallback") {
-		t.Fatalf("%q", h.stderr.String())
+	if want := "kran: daemon not running; --no-fallback forbids running here (start it: kran service start)\n"; h.stderr.String() != want {
+		t.Fatalf("%q, want %q", h.stderr.String(), want)
+	}
+}
+
+func TestNoDaemonJSONEventsSaysItOnce(t *testing.T) {
+	h := newHarness(t, nil, "true")
+	h.r.flags.JSONEvents = true
+	if code := h.run(t); code != 0 {
+		t.Fatal(code)
+	}
+	if n := strings.Count(h.stderr.String(), "daemon not running"); n != 1 {
+		t.Fatalf("the fallback reason appears %d times:\n%s", n, h.stderr.String())
 	}
 }
 

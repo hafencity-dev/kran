@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -47,6 +48,10 @@ known_hosts to choose from.`,
 			}
 			f.Interactive = isTerminal(a.In) && a.outTTY
 			if err := a.linkHost(cmd.Context(), f); err != nil {
+				var ue *UsageError
+				if errors.As(err, &ue) {
+					return err
+				}
 				return &ExitError{Code: 1, Msg: err.Error()}
 			}
 			return nil
