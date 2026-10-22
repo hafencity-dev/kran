@@ -57,7 +57,7 @@ type runner struct {
 	jobID    string
 	decision *proto.Decision
 	remote   bool // a remote placement is active
-	started  bool // the user's command has started (remote running, or output seen)
+	started  bool // the user's command has started (remote running phase, or local start)
 	offset   int64
 	lastRecv time.Time
 	local    *localProc
@@ -397,12 +397,13 @@ func (r *runner) onFrame(ctx context.Context, m frameMsg) (int, bool) {
 	r.lastRecv = time.Now()
 	switch m.t {
 	case proto.FrameHeartbeat:
+	// Output alone does not mean the command started: a remote job's setup
+	// prints too. Only the running phase (sent before the command's first
+	// byte) or a local start does.
 	case proto.FrameStdout:
-		r.started = true
 		r.offset += int64(len(m.payload))
 		_, _ = r.stdout.Write(m.payload)
 	case proto.FrameStderr:
-		r.started = true
 		r.offset += int64(len(m.payload))
 		_, _ = r.stderr.Write(m.payload)
 	case proto.FrameNotice:

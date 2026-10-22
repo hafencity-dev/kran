@@ -693,3 +693,21 @@ func TestJobTTYNeedsStdoutAndStderrTerminals(t *testing.T) {
 		t.Fatal("a redirected stream must keep its own pipe")
 	}
 }
+
+// Output before the running phase is setup output: the command has not
+// started, and the daemon treats the job that way after a restart (it stops
+// it). Losing the daemon then means running the command here.
+func TestSetupOutputIsNotAStart(t *testing.T) {
+	s := newFakeSession()
+	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s}}, "sh", "-c", "exit 6")
+	go func() {
+		s.push(proto.FrameDecision, proto.Decision{JobID: "j", Mode: "remote", Node: "n"})
+		s.push(proto.FramePhase, proto.Phase{State: proto.JobSetup, Message: "running setup: pnpm install"})
+		s.push(proto.FrameStdout, []byte("Packages: +12\n"))
+		time.Sleep(50 * time.Millisecond)
+		s.drop()
+	}()
+	if code := h.run(t); code != 6 {
+		t.Fatalf("code %d: %s", code, h.stderr.String())
+	}
+}

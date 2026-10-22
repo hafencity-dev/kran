@@ -85,8 +85,14 @@ func (d *Daemon) drive(ctx context.Context, e *jobEntry, mode driveMode) {
 	case driveRestoreRemote:
 		// Heartbeats must resume at once (the target's lease is short);
 		// the CLI gets CLIReattachWait to come back.
-		go d.cancelWithoutCLI(ctx, e)
 		job := e.snapshot()
+		if job.State != proto.JobRunning {
+			// Its kran run did not see the command start, so it ran it
+			// locally when we went away: stop it here before setup ends.
+			e.requestCancel("its kran run ran it locally when the daemon restarted before the job started", "TERM")
+		} else {
+			go d.cancelWithoutCLI(ctx, e)
+		}
 		p := scheduler.Placement{JobID: e.id, Node: job.Node, Runtime: job.Runtime, Alloc: job.Alloc}
 		if err := d.followRemote(ctx, e, p, nil); err != nil {
 			// Before running there is nothing to fall back to here: the

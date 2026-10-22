@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -267,4 +268,42 @@ func TestRestartedOriginDoesNotRerunPrestartJobWithoutCLI(t *testing.T) {
 	if n, _, _ := b.exec.counts(); n != 0 {
 		t.Fatalf("the job was started on b %d time(s) after the origin restart with no kran run attached", n)
 	}
+}
+
+// Same for a job still in setup on the target: its kran run did not see it
+// start and runs it locally, so the restarted origin must stop it before
+// the command starts there too.
+func TestRestartedOriginStopsJobStillInSetup(t *testing.T) {
+	_, a, b := twoNodes(t)
+	b.exec.mu.Lock()
+	b.exec.setup = 1500 * time.Millisecond
+	b.exec.mu.Unlock()
+	ws := workspaceDir(t, map[string]string{"f": "x"})
+	marker := filepath.Join(shortDir(t), "ran")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var once sync.Once
+	res, _ := runCLI(ctx, a.sock(), shSpec(ws, "touch "+marker), cliOpts{
+		hook: func(rs client.RunSession, ft proto.FrameType, p []byte, r *cliResult) error {
+			var ph proto.Phase
+			if ft == proto.FramePhase && json.Unmarshal(p, &ph) == nil && ph.State == proto.JobSetup {
+				once.Do(func() { go a.stop() })
+			}
+			return nil
+		}})
+	waitFor(t, 10*time.Second, "origin stopped", func() bool {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		return a.cancel == nil
+	})
+	a.start()
+	waitFor(t, 10*time.Second, "job ended", func() bool {
+		j, err := a.store.GetJob(context.Background(), res.jobID)
+		return err == nil && j.State.Terminal()
+	})
+	time.Sleep(2 * time.Second) // past the setup
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("the command ran on b although its kran run had already run it locally")
+	}
+	waitFor(t, 5*time.Second, "b clean", func() bool { return len(b.exec.Active()) == 0 && b.exec.heldSlots() == 0 })
 }

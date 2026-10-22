@@ -418,6 +418,9 @@ type fakeExec struct {
 	// endBeforeStart: Start succeeds but the job ends with this exit
 	// without running the command (setup failed, command not found …).
 	endBeforeStart *proto.Exit
+	// setup: the job reports a setup phase this long before the command
+	// starts (a TERM meanwhile cancels it).
+	setup time.Duration
 	starting       int
 	putBlobs       int
 	acquires       int
@@ -561,7 +564,7 @@ func (x *fakeExec) Start(ctx context.Context, req execenv.StartRequest) (execenv
 		<-gate
 	}
 	x.mu.Lock()
-	err, ended := x.startErr, x.endBeforeStart
+	err, ended, setup := x.startErr, x.endBeforeStart, x.setup
 	x.mu.Unlock()
 	if err != nil {
 		return nil, err
@@ -576,7 +579,7 @@ func (x *fakeExec) Start(ctx context.Context, req execenv.StartRequest) (execenv
 		return p, nil
 	}
 	dir := filepath.Join(req.Slot.Path, filepath.FromSlash(req.Spec.Workspace.Rel))
-	p, err := startFakeProc(req.Spec, dir, x.leaseTTL, req.OnPhase)
+	p, err := startFakeProc(req.Spec, dir, x.leaseTTL, req.OnPhase, setup)
 	if err != nil {
 		return nil, err
 	}
@@ -639,6 +642,9 @@ type fakeProc struct {
 	lastRenew time.Time
 	lost      bool
 	doneCh    chan struct{}
+
+	setupCancel chan struct{}
+	cancelOnce  sync.Once
 }
 
 type procWriter struct {
@@ -655,8 +661,9 @@ func (w procWriter) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-func startFakeProc(spec proto.JobSpec, dir string, lease time.Duration, onPhase func(proto.Phase)) (*fakeProc, error) {
-	p := &fakeProc{id: spec.ID, leaseTTL: lease, notify: make(chan struct{}), doneCh: make(chan struct{}), lastRenew: time.Now()}
+func startFakeProc(spec proto.JobSpec, dir string, lease time.Duration, onPhase func(proto.Phase), setup time.Duration) (*fakeProc, error) {
+	p := &fakeProc{id: spec.ID, leaseTTL: lease, notify: make(chan struct{}), doneCh: make(chan struct{}), lastRenew: time.Now(),
+		setupCancel: make(chan struct{})}
 	cmd := exec.Command(spec.Argv[0], spec.Argv[1:]...)
 	cmd.Dir = dir
 	cmd.Stdout = procWriter{p, proto.FrameStdout}
@@ -670,9 +677,40 @@ func startFakeProc(spec proto.JobSpec, dir string, lease time.Duration, onPhase 
 		}
 		p.stdin = w
 	}
-	if onPhase != nil {
-		onPhase(proto.Phase{State: proto.JobRunning})
+	if onPhase == nil {
+		onPhase = func(proto.Phase) {}
 	}
+	if setup > 0 {
+		onPhase(proto.Phase{State: proto.JobSetup, Message: "running setup: fake"})
+		go func() {
+			select {
+			case <-time.After(setup):
+			case <-p.setupCancel:
+				p.mu.Lock()
+				p.exit = proto.Exit{JobID: p.id, Code: 143, Signal: "TERM", State: proto.JobCanceled, BeforeStart: true, Reason: "canceled during setup"}
+				p.done = true
+				close(p.notify)
+				p.notify = make(chan struct{})
+				close(p.doneCh)
+				p.mu.Unlock()
+				return
+			}
+			onPhase(proto.Phase{State: proto.JobRunning})
+			p.mu.Lock()
+			err := cmd.Start()
+			if err == nil {
+				p.cmd = cmd
+			}
+			p.mu.Unlock()
+			if err != nil {
+				return
+			}
+			go p.wait()
+			go p.watchLease()
+		}()
+		return p, nil
+	}
+	onPhase(proto.Phase{State: proto.JobRunning})
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
@@ -812,10 +850,16 @@ func (p *fakeProc) Signal(name string) error {
 	if sig == 0 {
 		return fmt.Errorf("unknown signal %s", name)
 	}
-	if p.cmd == nil {
+	p.mu.Lock()
+	cmd := p.cmd
+	p.mu.Unlock()
+	if cmd == nil {
+		if p.setupCancel != nil && (sig == syscall.SIGTERM || sig == syscall.SIGKILL || sig == syscall.SIGINT) {
+			p.cancelOnce.Do(func() { close(p.setupCancel) })
+		}
 		return nil
 	}
-	return syscall.Kill(-p.cmd.Process.Pid, sig)
+	return syscall.Kill(-cmd.Process.Pid, sig)
 }
 func (p *fakeProc) Renew() error {
 	p.mu.Lock()
