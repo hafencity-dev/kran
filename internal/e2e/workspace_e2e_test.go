@@ -50,6 +50,12 @@ func TestE2EEnvFiltering(t *testing.T) {
 		"LANG": "C.UTF-8", "TZ": "Europe/Berlin", "FORCE_COLOR": "1", "KRAN_OWNER": "human:e2e",
 		"KRAN_NODE": "b", "KRAN_ORIGIN": "a", "KRAN_ORIGIN_ROOT": repo}
 	for k, v := range want {
+		if k == "KRAN_ORIGIN_ROOT" && got[k] != v {
+			// kran reports the root git resolves: /private/tmp/… on macOS.
+			if r, err := filepath.EvalSymlinks(v); err == nil && got[k] == r {
+				continue
+			}
+		}
 		if got[k] != v {
 			t.Errorf("remote %s = %q, want %q", k, got[k], v)
 		}

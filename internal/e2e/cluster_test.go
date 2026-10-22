@@ -619,6 +619,11 @@ func processesWith(marker string) []procInfo {
 }
 
 func processesWithDarwin(marker string) []procInfo {
+	// ps -E appends the environment separated by spaces; a marker ends in
+	// NUL for /proc/<pid>/environ, so match it followed by a space or the
+	// end of the line instead.
+	exact := strings.HasSuffix(marker, "\x00")
+	marker = strings.TrimSuffix(marker, "\x00")
 	out, err := exec.Command("ps", "-Eww", "-axo", "pid=,command=").Output()
 	if err != nil {
 		return nil
@@ -626,7 +631,7 @@ func processesWithDarwin(marker string) []procInfo {
 	var res []procInfo
 	self := os.Getpid()
 	for _, l := range strings.Split(string(out), "\n") {
-		if !strings.Contains(l, marker) {
+		if exact && !strings.Contains(l+" ", marker+" ") || !exact && !strings.Contains(l, marker) {
 			continue
 		}
 		var pid int
