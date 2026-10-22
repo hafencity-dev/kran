@@ -92,6 +92,19 @@ func (a *App) internalCommand() *cobra.Command {
 			return nil
 		},
 	})
+	cmd.AddCommand(&cobra.Command{
+		Use:                "apply",
+		Hidden:             true,
+		DisableFlagParsing: true,
+		RunE: func(c *cobra.Command, args []string) error {
+			// Runs inside the kran-sync container (container runtime on
+			// macOS): applies a slot update streamed on stdin.
+			if code := execenv.Apply(args); code != 0 {
+				return &ExitError{Code: code}
+			}
+			return nil
+		},
+	})
 	a.addInternalLink(cmd)
 	return cmd
 }

@@ -123,6 +123,10 @@ type Exit struct {
 	Usage    Usage    `json:"usage"`
 	Node     string   `json:"node"`
 	Fallback bool     `json:"fallback,omitempty"`
+	// added by B: set when the job ended before the user's command started
+	// (setup failed, toolchain missing, runtime not ready). Nothing of the
+	// command ran, so the origin may still fall back to running it locally.
+	BeforeStart bool `json:"before_start,omitempty"`
 }
 
 type Reattach struct {
