@@ -488,6 +488,13 @@ func (r *runner) onDecision(ctx context.Context, d proto.Decision) (int, bool) {
 			r.say("%s", line)
 		}
 		r.startStdin()
+		if r.spec.TTY != nil && !r.flags.Stdin && !r.stdinOnce {
+			// The job reads its remote terminal, where nothing typed here
+			// arrives without -i: end its input instead of letting a
+			// prompt wait forever.
+			r.stdinOnce = true
+			r.send(proto.FrameStdinEOF, nil)
+		}
 		return 0, false
 	}
 	// Local placement (or a fallback after a failed remote attempt).

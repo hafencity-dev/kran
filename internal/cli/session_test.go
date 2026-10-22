@@ -658,3 +658,38 @@ func TestSlowStdoutIsNotADeadDaemon(t *testing.T) {
 		t.Fatalf("a slow stdout reader was taken for a dead daemon: %q", h.stderr.String())
 	}
 }
+
+// A remote job with a terminal reads from its pty. Without -i nothing ever
+// arrives there: the job must see end of input instead of waiting forever
+// (a prompt would hang the run).
+func TestRemoteTTYWithoutStdinGetsEOF(t *testing.T) {
+	s := newFakeSession()
+	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s}}, "x")
+	h.r.spec.TTY = &proto.TTY{Rows: 24, Cols: 80}
+	go func() {
+		s.push(proto.FrameDecision, proto.Decision{JobID: "j", Mode: "remote", Node: "n"})
+		waitFor(t, func() bool { return s.count(proto.FrameStdinEOF) == 1 })
+		s.push(proto.FrameExit, proto.Exit{JobID: "j", Code: 0, State: proto.JobSucceeded})
+	}()
+	done := make(chan int, 1)
+	go func() { done <- h.r.Run(context.Background()) }()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatal(code)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no stdin EOF for a remote terminal job without -i")
+	}
+}
+
+func TestJobTTYNeedsStdoutAndStderrTerminals(t *testing.T) {
+	size := func() *proto.TTY { return &proto.TTY{Rows: 1, Cols: 2} }
+	if jobTTY(true, true, size) == nil {
+		t.Fatal("both terminals: want a TTY")
+	}
+	// kran run make 2>err.log: a pty would merge stderr into the terminal.
+	if jobTTY(true, false, size) != nil || jobTTY(false, true, size) != nil {
+		t.Fatal("a redirected stream must keep its own pipe")
+	}
+}
