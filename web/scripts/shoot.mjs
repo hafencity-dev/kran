@@ -35,7 +35,7 @@ async function page(size, scheme) {
   const ctx = await browser.newContext({ viewport: sizes[size], colorScheme: scheme, deviceScaleFactor: size === 'phone' ? 2 : 1, reducedMotion: 'reduce' })
   const p = await ctx.newPage()
   p.on('pageerror', e => errors.push(`${size}/${scheme}: ${e.message}`))
-  p.on('console', m => m.type() === 'error' && errors.push(`${size}/${scheme} console: ${m.text()}`))
+  p.on('console', m => m.type() === 'error' && !m.text().startsWith('Failed to load resource') && errors.push(`${size}/${scheme} console: ${m.text()}`))
   return { ctx, p }
 }
 
@@ -55,13 +55,13 @@ async function shot(name, size, scheme, fn, full = true) {
 const settle = async p => {
   await p.goto(base)
   await p.waitForSelector('.berth')
-  await p.waitForTimeout(2500)
+  // Sparklines are client-side history; give them some samples.
+  await p.waitForTimeout(Number(process.env.SETTLE ?? 2500))
 }
 
-for (const size of ['desktop', 'phone'])
-  for (const scheme of ['light', 'dark']) {
-    await shot(`${size}-${scheme}`, size, scheme, settle)
-  }
+await Promise.all(
+  ['desktop', 'phone'].flatMap(size => ['light', 'dark'].map(scheme => shot(`${size}-${scheme}`, size, scheme, settle))),
+)
 
 await shot('desktop-drawer-dark', 'desktop', 'dark', async p => {
   await settle(p)
@@ -89,16 +89,22 @@ await shot('desktop-confirm-light', 'desktop', 'light', async p => {
   await p.waitForSelector('dialog.confirm[open]')
 }, false)
 
-await shot('desktop-down-light', 'desktop', 'light', async p => {
-  await settle(p)
-  await p.route('**/api/**', r => r.abort('connectionrefused'))
-  await p.evaluate(() => window.dispatchEvent(new Event('offline')))
-  // Kill the open stream: closing the page's EventSource triggers the error path.
-  await p.waitForTimeout(500)
-  await p.context().setOffline(true)
-  await p.waitForSelector('.banner', { timeout: 15000 })
-  await p.waitForTimeout(500)
-}, false)
+// Daemon dies while the page is open: run a private mock and kill it.
+if (process.env.MOCK)
+  await shot('desktop-down-light', 'desktop', 'light', async p => {
+    const { spawn } = await import('node:child_process')
+    const proc = spawn(process.env.MOCK, ['-addr', '127.0.0.1:7279'], { stdio: 'ignore' })
+    try {
+      await new Promise(r => setTimeout(r, 1500))
+      await p.goto('http://127.0.0.1:7279/')
+      await p.waitForSelector('.berth')
+      await p.waitForTimeout(2500)
+    } finally {
+      proc.kill('SIGKILL')
+    }
+    await p.waitForSelector('.banner', { timeout: 15000 })
+    await p.waitForTimeout(1200)
+  }, false)
 
 await shot('desktop-empty-dark', 'desktop', 'dark', async p => {
   const one = async () => {

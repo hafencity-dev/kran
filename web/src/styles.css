@@ -546,6 +546,9 @@ main {
 .sw-outside {
   background: var(--rule-2);
 }
+.sw-others {
+  background: var(--ink-3);
+}
 .sw-free {
   background: var(--sunken);
   outline: 1px solid var(--rule-2);
@@ -715,6 +718,9 @@ main {
 .seg-free {
   background: transparent;
 }
+.seg-others {
+  background: var(--ink-3);
+}
 .seg-outside {
   background: var(--rule-2);
 }
@@ -745,7 +751,7 @@ main {
   display: block;
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: clip;
+  text-overflow: ellipsis;
   min-width: 0;
 }
 @container (max-width: 42px) {
@@ -1734,6 +1740,9 @@ main.is-stale .today {
 
   .drawer-inner {
     padding: 14px 16px 24px;
+  }
+  .facts {
+    grid-template-columns: 1fr 1fr;
   }
   .log-body {
     height: 50vh;

@@ -3,7 +3,8 @@ import type { Sample } from '../store'
 
 const W = 160
 const H = 36
-const WINDOW = 10 * 60 * 1000
+const MAX_WINDOW = 10 * 60 * 1000
+const MIN_WINDOW = 3 * 60 * 1000
 
 interface Props {
   samples: readonly Sample[]
@@ -14,7 +15,7 @@ interface Props {
 }
 
 /**
- * Ten minutes of one measure. The domain is fixed (0..max, last 10 min) so
+ * Up to ten minutes of one measure. The value axis is fixed (0..max) so
  * shapes are comparable between machines; the current value is always
  * printed next to it, the line only adds the trend.
  */
@@ -28,6 +29,9 @@ export function Sparkline({ samples, pick, max, label, format }: Props) {
     )
   }
   const end = samples[samples.length - 1].t
+  // Grows from 3 to 10 minutes as history accumulates, so a freshly
+  // opened page shows a readable line instead of a sliver at the edge.
+  const WINDOW = Math.min(MAX_WINDOW, Math.max(MIN_WINDOW, end - samples[0].t))
   const start = end - WINDOW
   const x = (t: number) => ((t - start) / WINDOW) * W
   const y = (v: number) => H - 2 - Math.max(0, Math.min(1, v / max)) * (H - 4)

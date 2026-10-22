@@ -269,26 +269,32 @@ func (s *Sim) waitReason(j *simJob, cands []*simNode, why []string, need proto.R
 		}
 		return "waiting: no node can take jobs (" + strings.Join(why, ", ") + ")"
 	}
-	// Explain against the node that comes closest.
-	var best *simNode
-	bestScore := math.Inf(-1)
+	where := func(n *simNode) string {
+		if n.linuxJobsVia() == proto.RuntimeContainer {
+			return n.name() + "'s Docker VM"
+		}
+		return n.name()
+	}
+	memShort := true
 	for _, n := range cands {
-		f := s.freeFor(n)
-		score := math.Min(float64(f.Mem)/float64(need.Mem), f.CPUs*1.25/need.CPUs)
-		if score > bestScore {
-			best, bestScore = n, score
+		if s.freeFor(n).Mem >= need.Mem {
+			memShort = false
 		}
 	}
-	f := s.freeFor(best)
-	where := best.name()
-	if best.linuxJobsVia() == proto.RuntimeContainer {
-		where = best.name() + "'s Docker VM"
+	var parts []string
+	for _, n := range cands {
+		f := s.freeFor(n)
+		if memShort {
+			parts = append(parts, fmt.Sprintf("%s has %s free", where(n), fmtGiB(f.Mem)))
+		} else {
+			parts = append(parts, fmt.Sprintf("%s has %s free", where(n), fmtCores(f.CPUs)))
+		}
 	}
 	var r string
-	if need.Mem > f.Mem {
-		r = fmt.Sprintf("waiting: needs %s, %s has %s free", fmtGiB(need.Mem), where, fmtGiB(f.Mem))
+	if memShort {
+		r = fmt.Sprintf("waiting: needs %s; %s", fmtGiB(need.Mem), strings.Join(parts, ", "))
 	} else {
-		r = fmt.Sprintf("waiting: needs %s cores, %s has %s free", fmtCores(need.CPUs), where, fmtCores(f.CPUs))
+		r = fmt.Sprintf("waiting: needs %s cores; %s", fmtCores(need.CPUs), strings.Join(parts, ", "))
 	}
 	if j.job.Spec.Req.OriginOnly {
 		r += " (must run here: " + j.job.Spec.Req.OriginOnlyReason + ")"
@@ -330,6 +336,11 @@ func (s *Sim) place(j *simJob, n *simNode, now time.Time, expected float64) {
 	j.job.QueuePos = 0
 	j.runFor *= s.speed(n)
 	f := s.freeFor(n)
+	// Later placements in the same pass must see this allocation.
+	n.st.Free.CPUs = math.Max(0, n.st.Free.CPUs-j.job.Alloc.CPUs)
+	n.st.Free.Mem = max(0, n.st.Free.Mem-j.job.Alloc.Mem)
+	n.st.Allocated.CPUs += j.job.Alloc.CPUs
+	n.st.Allocated.Mem += j.job.Alloc.Mem
 	here := j.job.Estimate.Duration * s.speed(s.self())
 	switch {
 	case j.job.Spec.Req.OriginOnly:

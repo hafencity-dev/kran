@@ -329,7 +329,9 @@ class Store {
       else finished.push(j)
     }
     placed.sort((a, b) => (a.spec.id < b.spec.id ? -1 : 1))
-    finished.sort((a, b) => (a.spec.id < b.spec.id ? 1 : -1))
+    // Newest result first; ended_at can be missing on odd records.
+    const endKey = (j: Job) => validTime(j.ended_at) || validTime(j.queued_at) || 0
+    finished.sort((a, b) => endKey(b) - endKey(a) || (a.spec.id < b.spec.id ? 1 : -1))
     const order = new Map(this.queue.map((id, i) => [id, i]))
     queuedSet.sort((a, b) => (order.get(a.spec.id) ?? 1e9) - (order.get(b.spec.id) ?? 1e9) || (a.spec.id < b.spec.id ? -1 : 1))
     const nodes = [...this.nodes.values()].sort((a, b) => Number(b.self) - Number(a.self) || a.info.name.localeCompare(b.info.name))

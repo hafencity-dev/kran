@@ -60,6 +60,10 @@ function Legend({ kinds }: { kinds: Set<OwnerKind> }) {
           </li>
         ))}
       <li>
+        <span class="swatch sw-others" aria-hidden="true" />
+        Jobs from other machines
+      </li>
+      <li>
         <span class="swatch sw-phase" aria-hidden="true" />
         Syncing or setting up
       </li>
@@ -248,6 +252,10 @@ function Strip({ kind, node: n, jobs, onOpenJob }: { kind: 'cpu' | 'mem'; node: 
   const outside = offline ? 0 : Math.max(0, cap - used - free)
   const total = Math.max(cap, used + outside + free) + reserve
   const segs: Seg[] = jobs.map(j => ({ key: j.spec.id, v: val(j.alloc), cls: '', job: j }))
+  // Jobs submitted on other machines run here too; this daemon only sees
+  // them as part of the node's allocation.
+  const others = offline ? 0 : Math.max(0, alloc - jobsSum)
+  if (others > (cpu ? 0.05 : 64 * 1024 * 1024)) segs.push({ key: 'others', v: others, cls: 'seg-others' })
   if (outside > 0) segs.push({ key: 'outside', v: outside, cls: 'seg-outside' })
   if (free > 0) segs.push({ key: 'free', v: free, cls: 'seg-free' })
   if (reserve > 0) segs.push({ key: 'reserve', v: reserve, cls: 'seg-reserve' })
@@ -256,7 +264,7 @@ function Strip({ kind, node: n, jobs, onOpenJob }: { kind: 'cpu' | 'mem'; node: 
   const over = used > cap
   const summary = offline
     ? `${n.info.name} is offline`
-    : `${fmt(used)} ${unit} allocated to ${jobs.length} ${jobs.length === 1 ? 'job' : 'jobs'}${over ? `, ${fmt(used - cap)} over capacity` : ''}, ${fmt(free)} free, ${fmt(reserve)} kept for you`
+    : `${fmt(used)} ${unit} allocated to ${jobs.length} ${jobs.length === 1 ? 'job' : 'jobs'}${others > 0 ? ' from here and more from other machines' : ''}${over ? `, ${fmt(used - cap)} over capacity` : ''}, ${fmt(free)} free, ${fmt(reserve)} kept for you`
   let x = 0
   return (
     <div class={`strip-row strip-${kind}`}>
