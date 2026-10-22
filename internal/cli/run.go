@@ -76,13 +76,14 @@ func (a *App) doRun(ctx context.Context, f RunFlags, args []string) int {
 	}
 	home, _ := os.UserHomeDir()
 	env := a.Env()
-	var tty *proto.TTY
-	stdoutIsTTY := a.outTTY
-	if stdoutIsTTY {
-		if w, h, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
-			tty = &proto.TTY{Rows: uint16(h), Cols: uint16(w)}
+	termSize := func() *proto.TTY {
+		w, h, err := term.GetSize(int(os.Stdout.Fd()))
+		if err != nil {
+			return nil
 		}
+		return &proto.TTY{Rows: uint16(h), Cols: uint16(w)}
 	}
+	tty := jobTTY(a.outTTY, a.errTTY, termSize)
 	cfg, cerr := config.Load("")
 	if cerr != nil {
 		// A broken config must not block a job: warn and use defaults.
@@ -118,15 +119,20 @@ func (a *App) doRun(ctx context.Context, f RunFlags, args []string) int {
 		spec: spec, flags: f, env: env, dial: a.Dial, stdin: a.In, stdout: a.Out,
 		stderr: &lineWriter{w: a.Err}, stdio: localStdio{In: a.In, Out: asFile(a.Out, os.Stdout), Err: asFile(a.Err, os.Stderr)},
 		signals: sigs, winch: winch, tm: defaultTiming(), start: startLocal, color: a.styleErr(),
-		size: func() *proto.TTY {
-			w, h, err := term.GetSize(int(os.Stdout.Fd()))
-			if err != nil {
-				return nil
-			}
-			return &proto.TTY{Rows: uint16(h), Cols: uint16(w)}
-		},
+		size: termSize,
 	}
 	return r.Run(ctx)
+}
+
+// jobTTY is the terminal a remote job gets. A remote terminal carries
+// stdout and stderr as one stream, so both must be terminals here: with
+// `2>err.log` the job keeps separate pipes and its errors land in the file
+// as they would locally.
+func jobTTY(outTTY, errTTY bool, size func() *proto.TTY) *proto.TTY {
+	if !outTTY || !errTTY {
+		return nil
+	}
+	return size()
 }
 
 func asFile(w interface{}, def *os.File) *os.File {

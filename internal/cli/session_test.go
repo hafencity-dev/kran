@@ -81,6 +81,21 @@ func (s *fakeSession) push(t proto.FrameType, v any) {
 
 func (s *fakeSession) drop() { s.once.Do(func() { close(s.toClient) }) }
 
+// tryPush is push for a session the CLI may have closed already.
+func (s *fakeSession) tryPush(t proto.FrameType, v any) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	b, _ := v.([]byte)
+	if v != nil && b == nil {
+		b, _ = json.Marshal(v)
+	}
+	s.toClient <- sentFrame{t, b}
+	return true
+}
+
 func (s *fakeSession) sentTypes() []proto.FrameType {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -599,5 +614,126 @@ func TestLaunchFailureCodes(t *testing.T) {
 	}
 	if !strings.Contains(h.stderr.String(), "command not found") {
 		t.Fatal(h.stderr.String())
+	}
+}
+
+// slowWriter blocks its first write, like a pager nobody scrolls or a full
+// pipe to a slow consumer.
+type slowWriter struct {
+	mu    sync.Mutex
+	buf   bytes.Buffer
+	delay time.Duration
+	once  sync.Once
+}
+
+func (w *slowWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() { time.Sleep(w.delay) })
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+func TestSlowStdoutIsNotADeadDaemon(t *testing.T) {
+	s := newFakeSession()
+	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s}}, "x")
+	out := &slowWriter{delay: 1500 * time.Millisecond} // longer than DeadAfter
+	h.r.stdout = out
+	go func() {
+		s.push(proto.FrameDecision, proto.Decision{JobID: "j", Mode: "remote", Node: "n"})
+		s.push(proto.FramePhase, proto.Phase{State: proto.JobRunning})
+		s.push(proto.FrameStdout, []byte("first"))
+		// The daemon keeps the session alive meanwhile (its heartbeats are
+		// swallowed by the client); the job ends a little after the write.
+		time.Sleep(1700 * time.Millisecond)
+		s.tryPush(proto.FrameStdout, []byte(" second"))
+		s.tryPush(proto.FrameExit, proto.Exit{JobID: "j", Code: 0, State: proto.JobSucceeded})
+	}()
+	if code := h.run(t); code != 0 {
+		t.Fatalf("code %d: %s", code, h.stderr.String())
+	}
+	if got := out.buf.String(); got != "first second" {
+		t.Fatalf("stdout %q", got)
+	}
+	if strings.Contains(h.stderr.String(), "lost the connection") {
+		t.Fatalf("a slow stdout reader was taken for a dead daemon: %q", h.stderr.String())
+	}
+}
+
+// A remote job with a terminal reads from its pty. Without -i nothing ever
+// arrives there: the job must see end of input instead of waiting forever
+// (a prompt would hang the run).
+func TestRemoteTTYWithoutStdinGetsEOF(t *testing.T) {
+	s := newFakeSession()
+	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s}}, "x")
+	h.r.spec.TTY = &proto.TTY{Rows: 24, Cols: 80}
+	go func() {
+		s.push(proto.FrameDecision, proto.Decision{JobID: "j", Mode: "remote", Node: "n"})
+		waitFor(t, func() bool { return s.count(proto.FrameStdinEOF) == 1 })
+		s.push(proto.FrameExit, proto.Exit{JobID: "j", Code: 0, State: proto.JobSucceeded})
+	}()
+	done := make(chan int, 1)
+	go func() { done <- h.r.Run(context.Background()) }()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatal(code)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no stdin EOF for a remote terminal job without -i")
+	}
+}
+
+func TestJobTTYNeedsStdoutAndStderrTerminals(t *testing.T) {
+	size := func() *proto.TTY { return &proto.TTY{Rows: 1, Cols: 2} }
+	if jobTTY(true, true, size) == nil {
+		t.Fatal("both terminals: want a TTY")
+	}
+	// kran run make 2>err.log: a pty would merge stderr into the terminal.
+	if jobTTY(true, false, size) != nil || jobTTY(false, true, size) != nil {
+		t.Fatal("a redirected stream must keep its own pipe")
+	}
+}
+
+// Output before the running phase is setup output: the command has not
+// started, and the daemon treats the job that way after a restart (it stops
+// it). Losing the daemon then means running the command here.
+func TestSetupOutputIsNotAStart(t *testing.T) {
+	s := newFakeSession()
+	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s}}, "sh", "-c", "exit 6")
+	go func() {
+		s.push(proto.FrameDecision, proto.Decision{JobID: "j", Mode: "remote", Node: "n"})
+		s.push(proto.FramePhase, proto.Phase{State: proto.JobSetup, Message: "running setup: pnpm install"})
+		s.push(proto.FrameStdout, []byte("Packages: +12\n"))
+		time.Sleep(50 * time.Millisecond)
+		s.drop()
+	}()
+	if code := h.run(t); code != 6 {
+		t.Fatalf("code %d: %s", code, h.stderr.String())
+	}
+}
+
+// After the daemon restarted, it no longer knows the local child's process
+// group: the reattaching CLI must report it again, or a later CLI death
+// would leave the child running (SPEC §6.1 step 5).
+func TestLocalReattachReportsStartedAgain(t *testing.T) {
+	s1, s2 := newFakeSession(), newFakeSession()
+	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s1, s2}}, "sh", "-c", "sleep 0.5")
+	go func() {
+		s1.push(proto.FrameDecision, proto.Decision{JobID: "jl", Mode: "local", Envelope: &proto.LocalEnvelope{}})
+		waitFor(t, func() bool { return s1.count(proto.FrameStarted) == 1 })
+		s1.drop()
+	}()
+	if code := h.run(t); code != 0 {
+		t.Fatal(code, h.stderr.String())
+	}
+	types := s2.sentTypes()
+	if len(types) < 2 || types[0] != proto.FrameReattach || types[1] != proto.FrameStarted {
+		t.Fatalf("after reattach sent %v", types)
+	}
+	f, _ := s2.find(proto.FrameStarted)
+	var st proto.Started
+	json.Unmarshal(f.payload, &st)
+	if st.PGID == 0 || st.JobID != "jl" {
+		t.Fatalf("%+v", st)
 	}
 }

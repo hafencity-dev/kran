@@ -198,7 +198,10 @@ func (t *targetSide) handleAdmit(ps *peerSession, pc *peerConn, req rawPeerReque
 }
 
 // begin marks a prestart operation in flight (keeps the reservation alive).
-func (t *targetSide) begin(id string) (*tjob, error) {
+// usesSlot marks operations that work in the job's slot (all but blob.put,
+// which writes only the shared blob store): a cancel releases the slot only
+// once none of them is in flight.
+func (t *targetSide) begin(id string, usesSlot bool) (*tjob, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	j := t.jobs[id]
@@ -208,14 +211,26 @@ func (t *targetSide) begin(id string) (*tjob, error) {
 	if j.started {
 		return nil, &peerError{Code: codeJobStarted, Msg: fmt.Sprintf("job %s already started on %s", id, t.d.self)}
 	}
+	if j.canceled {
+		return nil, &peerError{Code: codeUnknownJob, Msg: fmt.Sprintf("job %s was canceled on %s", id, t.d.self)}
+	}
 	j.busy++
+	if usesSlot {
+		j.slotOps++
+	}
 	return j, nil
 }
 
-func (t *targetSide) end(j *tjob) {
+func (t *targetSide) end(j *tjob, usesSlot bool) {
 	t.mu.Lock()
 	j.busy--
+	if usesSlot {
+		j.slotOps--
+	}
 	j.reservedAt = t.d.now()
+	if j.canceled && j.slotOps == 0 && !j.started && t.jobs[j.ID] == j {
+		t.releaseLocked(j, "canceled by origin")
+	}
 	t.mu.Unlock()
 }
 
@@ -234,12 +249,12 @@ func (t *targetSide) handleSlotAcquire(pc *peerConn, req rawPeerRequest) {
 		pc.fail(codeBadRequest, "malformed slot.acquire")
 		return
 	}
-	j, err := t.begin(req.JobID)
+	j, err := t.begin(req.JobID, true)
 	if err != nil {
 		failPeer(pc, err)
 		return
 	}
-	defer t.end(j)
+	defer t.end(j, true)
 	t.mu.Lock()
 	if j.Slot != nil {
 		s := *j.Slot
@@ -281,12 +296,12 @@ func newZstdDecoder() (*zstd.Decoder, error) {
 }
 
 func (t *targetSide) handleSlotDiff(pc *peerConn, req rawPeerRequest) {
-	j, err := t.begin(req.JobID)
+	j, err := t.begin(req.JobID, true)
 	if err != nil {
 		failPeer(pc, err)
 		return
 	}
-	defer t.end(j)
+	defer t.end(j, true)
 	t.mu.Lock()
 	slot := j.Slot
 	t.mu.Unlock()
@@ -334,11 +349,11 @@ func (t *targetSide) handleBlobPut(pc *peerConn, req rawPeerRequest) {
 	var j *tjob
 	if req.JobID != "" {
 		var err error
-		if j, err = t.begin(req.JobID); err != nil {
+		if j, err = t.begin(req.JobID, false); err != nil {
 			failPeer(pc, err)
 			return
 		}
-		defer t.end(j)
+		defer t.end(j, false)
 	}
 	if err := pc.respond(nil); err != nil {
 		return
@@ -438,12 +453,12 @@ func (t *targetSide) putBlob(ctx context.Context, pc *peerConn, dec *zstd.Decode
 }
 
 func (t *targetSide) handleSlotCommit(pc *peerConn, req rawPeerRequest) {
-	j, err := t.begin(req.JobID)
+	j, err := t.begin(req.JobID, true)
 	if err != nil {
 		failPeer(pc, err)
 		return
 	}
-	defer t.end(j)
+	defer t.end(j, true)
 	t.mu.Lock()
 	slot, m := j.Slot, j.manifest
 	t.mu.Unlock()
@@ -462,8 +477,8 @@ func (t *targetSide) handleSlotCommit(pc *peerConn, req rawPeerRequest) {
 
 func (t *targetSide) handleSlotRelease(pc *peerConn, req rawPeerRequest) {
 	t.mu.Lock()
-	if j := t.jobs[req.JobID]; j != nil && !j.started {
-		t.releaseLocked(j, "released by origin")
+	if j := t.jobs[req.JobID]; j != nil {
+		t.cancelLocked(j, "released by origin")
 	}
 	t.mu.Unlock()
 	t.d.publishSelf()
@@ -476,7 +491,7 @@ func (t *targetSide) handleJobStart(ps *peerSession, pc *peerConn, req rawPeerRe
 		pc.fail(codeBadRequest, "malformed job.start")
 		return
 	}
-	j, err := t.begin(req.JobID)
+	j, err := t.begin(req.JobID, true)
 	if err != nil {
 		failPeer(pc, err)
 		return
@@ -485,7 +500,7 @@ func (t *targetSide) handleJobStart(ps *peerSession, pc *peerConn, req rawPeerRe
 	slot := j.Slot
 	t.mu.Unlock()
 	if slot == nil {
-		t.end(j)
+		t.end(j, true)
 		pc.fail(codeBadRequest, "job.start before slot.commit")
 		return
 	}
@@ -502,17 +517,27 @@ func (t *targetSide) handleJobStart(ps *peerSession, pc *peerConn, req rawPeerRe
 	})
 	cancel()
 	if err != nil {
-		t.end(j)
+		t.end(j, true)
 		pc.fail(codeInternal, "start on %s: %v", t.d.self, err)
 		return
 	}
 	j.setProc(proc)
 	t.mu.Lock()
 	j.busy--
+	j.slotOps--
 	j.started = true
+	canceled := j.canceled
 	t.persistLocked()
+	// From here watch owns the slot and the allocation, also for a job the
+	// origin canceled while it was starting.
 	t.startWatchLocked(j)
 	t.mu.Unlock()
+	if canceled {
+		t.d.logf("target: job %s from %s was canceled while it started; stopping it", j.ID, j.Origin)
+		t.cancelProc(j, proc)
+		pc.fail(codeUnknownJob, "job %s was canceled on %s", j.ID, t.d.self)
+		return
+	}
 	t.d.logf("target: started job %s from %s", j.ID, j.Origin)
 	t.d.publishSelf()
 	if err := pc.respond(nil); err != nil {
@@ -567,11 +592,14 @@ func (t *targetSide) handleJobControl(pc *peerConn, req rawPeerRequest) {
 		pc.fail(codeUnknownJob, "%s has no job %s", t.d.self, req.JobID)
 		return
 	}
-	if !j.started {
+	t.mu.Lock()
+	started := j.started
+	if !started && req.Method == proto.PeerJobCancel {
+		t.cancelLocked(j, "canceled by origin")
+	}
+	t.mu.Unlock()
+	if !started {
 		if req.Method == proto.PeerJobCancel {
-			t.mu.Lock()
-			t.releaseLocked(j, "canceled by origin")
-			t.mu.Unlock()
 			t.d.publishSelf()
 		}
 		pc.respond(nil)
@@ -642,6 +670,26 @@ func (t *targetSide) streamJob(pc *peerConn, j *tjob, proc execenv.Process, offs
 	defer closeOut()
 	context.AfterFunc(ctx, closeOut)
 
+	// Phase changes go out from both goroutines below, serialized: output is
+	// written only after the phase current at that moment, so the running
+	// phase (reported before the command starts) always precedes the
+	// command's first byte. The origin decides fallback vs. exit 125 by it.
+	var phMu sync.Mutex
+	var lastPhase proto.Phase
+	sendPhase := func() error {
+		phMu.Lock()
+		defer phMu.Unlock()
+		ph, _ := j.currentPhase()
+		if ph == lastPhase || ph.State == "" {
+			return nil
+		}
+		if err := pc.writeJSONFrame(proto.FramePhase, ph); err != nil {
+			return err
+		}
+		lastPhase = ph
+		return nil
+	}
+
 	// Output and exit.
 	go func() {
 		defer cancel()
@@ -656,6 +704,9 @@ func (t *targetSide) streamJob(pc *peerConn, j *tjob, proc execenv.Process, offs
 				return
 			}
 			buf = p[:0]
+			if err := sendPhase(); err != nil {
+				return
+			}
 			if err := pc.writeFrame(ft, p); err != nil {
 				return
 			}
@@ -681,15 +732,11 @@ func (t *targetSide) streamJob(pc *peerConn, j *tjob, proc execenv.Process, offs
 	go func() {
 		tk := time.NewTicker(d.t.Heartbeat)
 		defer tk.Stop()
-		var last proto.Phase
 		for {
-			ph, ch := j.currentPhase()
-			if ph != last && ph.State != "" {
-				if pc.writeJSONFrame(proto.FramePhase, ph) != nil {
-					cancel()
-					return
-				}
-				last = ph
+			_, ch := j.currentPhase()
+			if sendPhase() != nil {
+				cancel()
+				return
 			}
 			select {
 			case <-ctx.Done():

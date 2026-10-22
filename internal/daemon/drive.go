@@ -85,8 +85,14 @@ func (d *Daemon) drive(ctx context.Context, e *jobEntry, mode driveMode) {
 	case driveRestoreRemote:
 		// Heartbeats must resume at once (the target's lease is short);
 		// the CLI gets CLIReattachWait to come back.
-		go d.cancelWithoutCLI(ctx, e)
 		job := e.snapshot()
+		if job.State != proto.JobRunning {
+			// Its kran run did not see the command start, so it ran it
+			// locally when we went away: stop it here before setup ends.
+			e.requestCancel("its kran run ran it locally when the daemon restarted before the job started", "TERM")
+		} else {
+			go d.cancelWithoutCLI(ctx, e)
+		}
 		p := scheduler.Placement{JobID: e.id, Node: job.Node, Runtime: job.Runtime, Alloc: job.Alloc}
 		if err := d.followRemote(ctx, e, p, nil); err != nil {
 			// Before running there is nothing to fall back to here: the
@@ -96,7 +102,17 @@ func (d *Daemon) drive(ctx context.Context, e *jobEntry, mode driveMode) {
 		return
 	case driveResubmit:
 		e.setState(proto.JobQueued, "queued again after a daemon restart")
-		go d.cancelWithoutCLI(ctx, e)
+		// A kran run that lost us before its job started runs the command
+		// itself: placing it again without a reattached CLI would run it
+		// twice.
+		if !d.waitForCLI(ctx, e) {
+			if ctx.Err() != nil {
+				return
+			}
+			e.requestCancel("its kran run did not reconnect after the daemon restarted", "TERM")
+			d.finishCanceledBeforeStart(e)
+			return
+		}
 	}
 
 	j := e.snapshot()
@@ -330,14 +346,17 @@ func (d *Daemon) waitLocal(ctx context.Context, e *jobEntry) {
 		if killed {
 			return
 		}
-		killed = true
 		e.mu.Lock()
 		pid, pgid, scope := e.pid, e.pgid, e.scope
 		e.mu.Unlock()
 		if pid > 0 || pgid > 0 || scope != "" {
+			killed = true
 			go d.deps.KillLocal(pid, pgid, scope)
 		}
-		killDeadline = time.After(d.t.KillGrace + 5*time.Second)
+		// Nothing reported yet: the started frame (if it comes) kills it.
+		if killDeadline == nil {
+			killDeadline = time.After(d.t.KillGrace + 5*time.Second)
+		}
 	}
 	cancelCh := e.cancelCh
 	for {

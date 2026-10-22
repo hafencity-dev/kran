@@ -227,9 +227,16 @@ func (d *Daemon) followRemote(ctx context.Context, e *jobEntry, p scheduler.Plac
 		switch {
 		case res.exit != nil:
 			x := *res.exit
-			if c, reason, _ := e.canceled(); c {
+			canceled, reason, _ := e.canceled()
+			if canceled {
 				x.State = proto.JobCanceled
 				x.Reason = reason
+			}
+			if !canceled && x.BeforeStart && x.State != proto.JobCanceled {
+				// The target says nothing of the command ran (setup failed,
+				// command not found there, runtime not ready): a local run
+				// may still work (SPEC §6.1).
+				return &prestartError{node: node, err: errors.New(firstNonEmpty(x.Reason, "the job did not start"))}
 			}
 			if x.State == proto.JobInfraErr || x.State == proto.JobLost {
 				e.mu.Lock()
@@ -319,9 +326,11 @@ func (d *Daemon) pumpJob(ctx context.Context, e *jobEntry, node string, pc *peer
 	defer cancel()
 	results := make(chan pumpResult, 2)
 	silent := make(chan struct{})
+	readerDone := make(chan struct{})
 
 	// Target → origin.
 	go func() {
+		defer close(readerDone)
 		for {
 			pc.SetReadDeadline(time.Now().Add(d.t.StreamSilence))
 			t, p, err := pc.readFrame()
@@ -419,6 +428,10 @@ func (d *Daemon) pumpJob(ctx context.Context, e *jobEntry, node string, pc *peer
 	case <-ctx.Done():
 		res = pumpResult{err: ctx.Err()}
 	}
+	// The caller reattaches at the spool's output offset: nothing may be
+	// appended from this stream once we return.
+	pc.Close()
+	<-readerDone
 	select {
 	case <-silent:
 		// Silence on a stream means the session is most likely half-open;

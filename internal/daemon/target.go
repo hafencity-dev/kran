@@ -24,6 +24,11 @@ type targetSide struct {
 
 	mu   sync.Mutex
 	jobs map[string]*tjob
+	// persistSeq numbers record snapshots (under mu); writes run outside
+	// mu and skip a snapshot older than the one already written.
+	persistSeq uint64
+	writeMu    sync.Mutex
+	written    uint64
 }
 
 type tjob struct {
@@ -38,10 +43,14 @@ type tjob struct {
 	sess       transport.Session // session that admitted it
 	reservedAt time.Time
 	busy       int // in-flight prestart operations (holds the reservation)
-	started    bool
-	ended      bool
-	endedAt    time.Time
-	watching   bool
+	slotOps    int // those of them working in the slot
+	// canceled: the origin gave the job up while an operation was in
+	// flight; the last one to finish releases (or stops) it.
+	canceled bool
+	started  bool
+	ended    bool
+	endedAt  time.Time
+	watching bool
 
 	attachMu sync.Mutex // serializes attaching through execenv
 	procMu   sync.Mutex // guards proc and phase
@@ -83,7 +92,17 @@ func (t *targetSide) persistLocked() {
 		}
 	}
 	b, _ := json.Marshal(recs)
-	go t.d.kvSet(targetJobsKey, string(b))
+	t.persistSeq++
+	seq := t.persistSeq
+	go func() {
+		t.writeMu.Lock()
+		defer t.writeMu.Unlock()
+		if seq < t.written {
+			return // a newer snapshot is already stored
+		}
+		t.d.kvSet(targetJobsKey, string(b))
+		t.written = seq
+	}()
 }
 
 // restore rebuilds the job table after a restart: supervisors kept running
@@ -99,7 +118,20 @@ func (t *targetSide) restore() {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	for _, id := range ex.Active() {
+	active := ex.Active()
+	live := map[string]bool{}
+	for _, id := range active {
+		live[id] = true
+	}
+	for id, r := range recs {
+		// Ended while the daemon was down: execenv keeps its slot busy
+		// until it is released with the recorded SlotRef.
+		if !live[id] && r.Slot != nil {
+			ex.ReleaseSlot(*r.Slot)
+			t.d.logf("target: job %s from %s ended while the daemon was down; released its slot", id, r.Origin)
+		}
+	}
+	for _, id := range active {
 		r := recs[id]
 		j := &tjob{ID: id, Origin: r.Origin, Alloc: r.Alloc, Runtime: r.Runtime, Slot: r.Slot, Owner: r.Owner, Argv: r.Argv,
 			started: true, phaseCh: make(chan struct{}), reservedAt: t.d.now()}
@@ -206,6 +238,21 @@ func runtimeInfo(info proto.NodeInfo, rt proto.RuntimeKind) *proto.Runtime {
 		}
 	}
 	return nil
+}
+
+// cancelLocked drops a reservation the origin gave up. With an operation
+// in flight (slot.acquire, commit, job.start …) the slot is still in use:
+// the operation releases it when it ends (end), or stops the job it
+// started (handleJobStart).
+func (t *targetSide) cancelLocked(j *tjob, why string) {
+	if j.started {
+		return
+	}
+	if j.slotOps > 0 {
+		j.canceled = true
+		return
+	}
+	t.releaseLocked(j, why)
 }
 
 // releaseLocked drops a reservation that never started.

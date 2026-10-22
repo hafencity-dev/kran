@@ -57,7 +57,7 @@ type runner struct {
 	jobID    string
 	decision *proto.Decision
 	remote   bool // a remote placement is active
-	started  bool // the user's command has started (remote running, or output seen)
+	started  bool // the user's command has started (remote running phase, or local start)
 	offset   int64
 	lastRecv time.Time
 	local    *localProc
@@ -325,6 +325,7 @@ func (r *runner) loop(ctx context.Context) int {
 	defer hb.Stop()
 	defer r.closeSession()
 	defer r.clearNote()
+	lastTick := time.Now()
 	for {
 		select {
 		case m := <-r.frames:
@@ -336,7 +337,16 @@ func (r *runner) loop(ctx context.Context) int {
 			}
 		case <-hb.C:
 			r.send(proto.FrameHeartbeat, nil)
-			if r.sess != nil && time.Since(r.lastRecv) > r.tm.DeadAfter {
+			now := time.Now()
+			if now.Sub(lastTick) > r.tm.DeadAfter/2 {
+				// This loop itself stood still (blocked writing output to a
+				// slow reader such as a pager, or the process was stopped):
+				// that silence is ours, not the daemon's. Frames may be
+				// waiting; start counting again.
+				r.lastRecv = now
+			}
+			lastTick = now
+			if r.sess != nil && now.Sub(r.lastRecv) > r.tm.DeadAfter {
 				r.closeSession()
 				if code, done := r.onDisconnect(ctx, errors.New("no heartbeat from the daemon")); done {
 					return code
@@ -387,12 +397,13 @@ func (r *runner) onFrame(ctx context.Context, m frameMsg) (int, bool) {
 	r.lastRecv = time.Now()
 	switch m.t {
 	case proto.FrameHeartbeat:
+	// Output alone does not mean the command started: a remote job's setup
+	// prints too. Only the running phase (sent before the command's first
+	// byte) or a local start does.
 	case proto.FrameStdout:
-		r.started = true
 		r.offset += int64(len(m.payload))
 		_, _ = r.stdout.Write(m.payload)
 	case proto.FrameStderr:
-		r.started = true
 		r.offset += int64(len(m.payload))
 		_, _ = r.stderr.Write(m.payload)
 	case proto.FrameNotice:
@@ -478,6 +489,13 @@ func (r *runner) onDecision(ctx context.Context, d proto.Decision) (int, bool) {
 			r.say("%s", line)
 		}
 		r.startStdin()
+		if r.spec.TTY != nil && !r.flags.Stdin && !r.stdinOnce {
+			// The job reads its remote terminal, where nothing typed here
+			// arrives without -i: end its input instead of letting a
+			// prompt wait forever.
+			r.stdinOnce = true
+			r.send(proto.FrameStdinEOF, nil)
+		}
 		return 0, false
 	}
 	// Local placement (or a fallback after a failed remote attempt).
@@ -598,6 +616,11 @@ func (r *runner) onReconnect(ctx context.Context, rr reconnectResult) (int, bool
 	r.cl = rr.cl
 	r.attach(rr.sess)
 	r.sendJSON(proto.FrameReattach, proto.Reattach{JobID: r.jobID, Offset: r.offset})
+	if r.local != nil {
+		// A restarted daemon lost the child's process group: without it, it
+		// could not kill the child if this kran run dies later.
+		r.sendJSON(proto.FrameStarted, r.local.Started)
+	}
 	return 0, false
 }
 
