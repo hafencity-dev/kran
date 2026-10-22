@@ -13,6 +13,7 @@ import (
 
 	"github.com/hafencity-dev/kran/internal/agents"
 	"github.com/hafencity-dev/kran/internal/config"
+	"github.com/hafencity-dev/kran/internal/link"
 	"github.com/hafencity-dev/kran/internal/paths"
 	"github.com/hafencity-dev/kran/internal/service"
 )
@@ -155,8 +156,15 @@ func (a *App) runSetup(ctx context.Context, f setupFlags) error {
 	// 4. link
 	if !f.NoLink {
 		hosts := f.Link
-		if len(hosts) == 0 && interactive && pr.confirm("Link another machine now?", false) {
-			hosts = []string{""}
+		if len(hosts) == 0 && interactive {
+			n := linkableCandidates(link.Candidates(ctx, link.ExecRunner{}))
+			q := "Link another machine now?"
+			if n > 0 {
+				q = fmt.Sprintf("Link another machine now? (%d found in your SSH config and Tailscale)", n)
+			}
+			if pr.confirm(q, n > 0) {
+				hosts = []string{""}
+			}
 		}
 		for _, h := range hosts {
 			if err := a.linkHost(ctx, linkFlags{Host: h, Interactive: interactive, Quiet: f.Quiet}); err != nil {
@@ -174,6 +182,22 @@ func (a *App) runSetup(ctx context.Context, f setupFlags) error {
 		}
 	}
 	return nil
+}
+
+// linkableCandidates counts machines worth offering for a link right away:
+// SSH config hosts and Tailscale peers that are not linked yet. known_hosts
+// entries alone are too weak a hint to default to yes.
+func linkableCandidates(cands []link.Candidate) int {
+	n := 0
+	for _, c := range cands {
+		if c.Linked || unsupportedPlatform(c.Detail) {
+			continue
+		}
+		if c.Source == "ssh-config" || c.Source == "tailscale" {
+			n++
+		}
+	}
+	return n
 }
 
 func agentToolsPresent() bool {
