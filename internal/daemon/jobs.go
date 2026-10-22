@@ -62,8 +62,14 @@ type jobEntry struct {
 	scope   string
 
 	outbox       *outbox // remote: frames for the target
+	in           inFlow  // remote: input flow control
 	lastPhasePub time.Time
 	tty          *proto.TTY
+
+	// Output of a local job, sent by its CLI for the history (spooled,
+	// never echoed back).
+	localOut int64
+	localCut bool
 }
 
 type localEvent struct {
@@ -84,6 +90,7 @@ func (t *jobTable) newEntry(job proto.Job, sp *spool) *jobEntry {
 		outbox:   newOutbox(),
 		tty:      job.Spec.TTY,
 	}
+	e.in.on = job.Spec.Stdin
 	return e
 }
 
@@ -206,6 +213,8 @@ func (t *jobTable) restore() {
 		}
 		e := t.newEntry(j, sp)
 		e.restored = true
+		// Input offsets are known again only once the target reports.
+		e.in.awaitResume, e.in.resumeAt = true, -1
 		t.add(e)
 		mode := driveResubmit
 		switch {
@@ -229,6 +238,11 @@ func (e *jobEntry) snapshot() proto.Job {
 
 func (e *jobEntry) persistLocked() {
 	j := cloneJob(e.job)
+	if j.State.Terminal() {
+		// History is kept for days; the forwarded env (secret-filtered,
+		// but personal) is only needed while the job may still run.
+		j.Spec.Env = nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := e.d.deps.Store.PutJob(ctx, &j); err != nil {
@@ -359,17 +373,56 @@ func (e *jobEntry) attach() {
 
 // detach is called when a run session ends. The last CLI going away
 // without an exit cancels the job (SPEC §6.1: closing the CLI connection is
-// a cancel), except while the daemon itself shuts down.
-func (e *jobEntry) detach() {
+// a cancel), except while the daemon itself shuts down. A CLI whose process
+// still lives dropped a session it took for broken and is reconnecting: it
+// gets CLIDropGrace to reattach (and is canceled at once if it dies).
+func (e *jobEntry) detach(clientPID int) {
 	e.mu.Lock()
 	e.attached--
 	left := e.attached
 	fin := e.finished || e.exitReported
+	started := e.started
 	e.mu.Unlock()
 	if left > 0 || fin || e.d.stopping.Load() {
 		return
 	}
+	// Before the command started, kran run does not reattach: it runs the
+	// command itself, so waiting would only risk running it twice.
+	if started && clientPID > 0 && e.d.clientAlive(clientPID) {
+		go e.awaitCLI(clientPID)
+		return
+	}
 	e.requestCancel("the kran run that started it went away", "TERM")
+}
+
+// awaitCLI waits for a live CLI to reattach after dropping its session.
+func (e *jobEntry) awaitCLI(pid int) {
+	deadline := time.NewTimer(e.d.t.CLIDropGrace)
+	defer deadline.Stop()
+	tk := time.NewTicker(100 * time.Millisecond)
+	defer tk.Stop()
+	for {
+		n, ch := e.attachedCount()
+		if n > 0 {
+			return
+		}
+		select {
+		case <-ch:
+		case <-e.done:
+			return
+		case <-deadline.C:
+			if e.d.stopping.Load() {
+				return
+			}
+			e.requestCancel("its kran run lost the connection and did not reconnect", "TERM")
+			return
+		case <-tk.C:
+			if !e.d.clientAlive(pid) {
+				e.requestCancel("the kran run that started it went away", "TERM")
+				return
+			}
+		}
+	}
 }
 
 func (e *jobEntry) attachedCount() (int, <-chan struct{}) {
@@ -425,17 +478,19 @@ func (e *jobEntry) finish(x proto.Exit) {
 	d.bus.publish(proto.EventJob, publicJob(final))
 	e.mu.Unlock()
 
-	e.sendFrame(proto.FrameExit, x)
-	e.spool.finish()
-	e.spool.close() // readers keep their own handles
+	// Free the allocation before the CLI learns the exit: `kran run a &&
+	// kran run b` must not see a's resources still taken.
 	if placed {
 		u := x.Usage
 		d.deps.Sched.Release(e.id, &u)
 	}
+	d.stats.record(final) // `kran status` right after kran run sees this job
+	e.sendFrame(proto.FrameExit, x)
+	e.spool.finish()
+	e.spool.close() // readers keep their own handles
 	if final.State == proto.JobSucceeded || final.State == proto.JobFailed {
 		d.deps.Est.Observe(&final)
 	}
-	d.stats.record(final)
 	d.bus.publish(proto.EventStats, d.stats.snapshot())
 	d.jobs.retire(e, final)
 	close(e.done)
@@ -459,9 +514,13 @@ func stateForExit(x proto.Exit) proto.JobState {
 
 // --- outbox: frames from the origin to the target, kept across reattach ---
 
+// outbox queues frames for the target. Control frames (signals, resizes)
+// overtake queued input so Ctrl-C never waits behind stdin; input (data
+// and EOF) keeps its order.
 type outbox struct {
 	mu     sync.Mutex
-	frames []outFrame
+	ctl    []outFrame
+	data   []outFrame
 	bytes  int
 	notify chan struct{}
 }
@@ -482,6 +541,8 @@ func (o *outbox) wake() {
 	}
 }
 
+func isInput(t proto.FrameType) bool { return t == proto.FrameStdin || t == proto.FrameStdinEOF }
+
 // put queues a frame; data beyond outboxMax is refused (control frames are
 // always accepted).
 func (o *outbox) put(t proto.FrameType, p []byte) bool {
@@ -490,17 +551,50 @@ func (o *outbox) put(t proto.FrameType, p []byte) bool {
 	if t == proto.FrameStdin && o.bytes+len(p) > outboxMax {
 		return false
 	}
-	o.frames = append(o.frames, outFrame{t, append([]byte(nil), p...)})
-	o.bytes += len(p)
+	f := outFrame{t, append([]byte(nil), p...)}
+	if isInput(t) {
+		o.data = append(o.data, f)
+		o.bytes += len(p)
+	} else {
+		o.ctl = append(o.ctl, f)
+	}
 	o.wake()
 	return true
 }
 
-func (o *outbox) take() []outFrame {
+// next pops the next frame to send, control frames first; input only when
+// allowInput (a stream waits for the target's first report).
+func (o *outbox) next(allowInput bool) (outFrame, bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	f := o.frames
-	o.frames = nil
-	o.bytes = 0
-	return f
+	if len(o.ctl) > 0 {
+		f := o.ctl[0]
+		o.ctl = o.ctl[1:]
+		return f, true
+	}
+	if allowInput && len(o.data) > 0 {
+		f := o.data[0]
+		o.data = o.data[1:]
+		o.bytes -= len(f.p)
+		return f, true
+	}
+	return outFrame{}, false
+}
+
+// unget puts back a control frame a broken stream did not take.
+func (o *outbox) unget(f outFrame) {
+	if isInput(f.t) {
+		return // input is sent again from the target's report
+	}
+	o.mu.Lock()
+	o.ctl = append([]outFrame{f}, o.ctl...)
+	o.mu.Unlock()
+}
+
+// dropInput forgets queued input: kran run sends it again from the offset
+// the target reports.
+func (o *outbox) dropInput() {
+	o.mu.Lock()
+	o.data, o.bytes = nil, 0
+	o.mu.Unlock()
 }

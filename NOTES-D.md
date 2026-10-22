@@ -16,7 +16,7 @@ No changes to `internal/proto` or any other owner's interface.
   * a `Sim` with the local-API HTTP handler (state, SSE events, jobs, log follow, cancel, priority, drain/resume, token rules);
   * `mock.Client`, a `client.Client` backed by the simulation, used by the TUI tests and by `-top`.
 * `go run ./internal/ui/mockserver [-nodes 10 -jobs 200] [-token x] [-top]` serves the API and the built UI on :7271. `web/` `npm run dev` proxies `/api` there.
-* Build: `make -f ui.mk ui` (or `go generate ./internal/ui`) runs `npm ci && npm run build` in `web/`. **Lead:** add `include ui.mk` to the root Makefile (E owns it; a second root Makefile would conflict).
+* Build: `make ui` (root Makefile) or `go generate ./internal/ui` runs `npm ci && npm run build` in `web/`. `ui.mk` (included by the root Makefile) adds `ui-mock`, `ui-dev`, `ui-shots`.
 * Budget: JS is 24.5 KB gzipped (the target was under 100 KB), CSS 6 KB. One 90 KB variable font (Archivo, latin) is served from the binary, so nothing loads from the network.
 * Measured with `web/scripts/perf.mjs` (10 nodes, 200 active jobs, about 120 events/s, 12× the target rate): 59.5 fps, zero long tasks, worst single frame 100 ms on this loaded host, 14 MB heap. No virtualization and no `content-visibility`: an earlier `content-visibility: auto` on queue and history rows left them unpainted in full-page captures, so it was removed.
 
@@ -35,7 +35,7 @@ mux.Handle("/", ui.Handler())        // D
   * mutations must require the header (the mock does exactly this);
   * a 401 or 403 should carry `APIError{error, hint}`, and the UI shows a "needs a token: run kran ui --print-url" banner.
 * `kran ui` (E) opens `http://127.0.0.1:7270/` (plus `#token=…` when a token is configured). `kran top` (E) dials the client and calls `tui.Run(ctx, c)`. If the daemon is down, E prints the usual "start it with kran service start" line instead of opening the TUI.
-* The TUI now imports bubbletea, lipgloss, x/ansi and termenv directly. After merging, `go mod tidy` moves them out of `// indirect`. I did not run it here, because on this branch alone it would drop modules other owners use.
+* The TUI uses Bubble Tea v2 (`charm.land/bubbletea/v2`) and Lip Gloss v2, which do no terminal I/O at package init (v1 queried the terminal background on every kran command with a tty).
 
 ## SSE contracts the UI relies on (A, please confirm or tell me to adapt)
 
@@ -75,4 +75,4 @@ mux.Handle("/", ui.Handler())        // D
 
 `web/scripts/shoot.mjs` also fails unless every machine, running, queue and history row is actually painted (checked with `checkVisibility` including `content-visibility`) and the row counts match the section headers.
 
-Screenshots: `web/screenshots/` (gitignored), regenerated with `make -f ui.mk ui-mock` in one shell and `make -f ui.mk ui-shots` in another.
+Screenshots: `web/screenshots/` (gitignored), regenerated with `make ui-mock` in one shell and `make ui-shots` in another.

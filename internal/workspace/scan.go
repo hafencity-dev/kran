@@ -161,6 +161,7 @@ func (s *scanner) Scan(ctx context.Context, ws proto.Workspace, include, exclude
 // repositories).
 func (s *scanner) collect(ctx context.Context, root string, gitMode bool, names []string, keep func(string) bool) ([]candidate, error) {
 	seen := make(map[string]bool, len(names))
+	realDir := map[string]bool{} // dir rel → a real directory, not a symlink
 	var out []candidate
 	pending := names
 	for depth := 0; len(pending) > 0; depth++ {
@@ -170,7 +171,7 @@ func (s *scanner) collect(ctx context.Context, root string, gitMode bool, names 
 		var batch []string
 		for _, n := range pending {
 			n = strings.TrimSuffix(n, "/")
-			if n == "" || seen[n] || !keep(n) {
+			if n == "" || seen[n] || !keep(n) || throughSymlink(root, n, realDir) {
 				continue
 			}
 			seen[n] = true
@@ -204,6 +205,29 @@ func (s *scanner) collect(ctx context.Context, root string, gitMode bool, names 
 		}
 	}
 	return out, nil
+}
+
+// throughSymlink reports whether a parent directory of rel is a symlink (or
+// not a directory): Lstat resolves every component but the last, so such a
+// path reads files from wherever the link points (sync.include "cfg/x" with
+// cfg -> ~/.aws). known caches verdicts per directory.
+func throughSymlink(root, rel string, known map[string]bool) bool {
+	for i := 0; i < len(rel); i++ {
+		if rel[i] != '/' {
+			continue
+		}
+		dir := rel[:i]
+		ok, seen := known[dir]
+		if !seen {
+			fi, err := os.Lstat(filepath.Join(root, filepath.FromSlash(dir)))
+			ok = err == nil && fi.IsDir()
+			known[dir] = ok
+		}
+		if !ok {
+			return true
+		}
+	}
+	return false
 }
 
 // lstatAll stats rel paths in parallel; missing files yield nil.
@@ -346,22 +370,28 @@ func LinkStaysInside(rel, target string) bool {
 	if dir == "." {
 		dir = ""
 	}
-	// Walk components so "a/../../x" is caught even though Clean would
-	// collapse intermediate escapes of deeper links.
+	// Only "../" steps first, then names: the link's own parent dirs are
+	// real directories, but a name in the target may itself be a link
+	// (d/up -> ..), so a ".." after it (x -> d/up/..) would climb out.
+	// Links reached through names are checked by this same rule.
 	depth := 0
 	if dir != "" {
 		depth = strings.Count(dir, "/") + 1
 	}
+	named := false
 	for _, c := range strings.Split(target, "/") {
 		switch c {
 		case "", ".":
 		case "..":
+			if named {
+				return false
+			}
 			depth--
 			if depth < 0 {
 				return false
 			}
 		default:
-			depth++
+			named = true
 		}
 	}
 	return true

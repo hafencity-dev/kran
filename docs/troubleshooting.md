@@ -19,10 +19,24 @@ Run `kran doctor` first. Add `--fix` to repair permissions, a missing key, and t
 
 ## Jobs
 
-- Everything ran locally: `kran status` shows why nodes were skipped (offline, draining, different OS, missing toolchain, disk floor). Waiting jobs print the reason after two seconds.
+- Everything ran locally: that is often right. `kran jobs --why` says why each job ran where it did ("too short to send elsewhere", "no other node has room", "not inside a project"). `kran status` shows why a machine was skipped (offline, draining, different OS, missing toolchain, disk floor). Waiting jobs print the reason after two seconds.
+- Jobs outside a git repository, in your home directory or in `/tmp` always stay here; commands that mention `localhost` do too.
 - A job hit its memory cap: the message names the cap and the flag, e.g. `rerun with --mem 12G`. kran learns the peak for next time.
 - Files created by a remote job do not appear locally. Use `kran run --local` for commands whose output files you need here.
-- Mac jobs for Linux projects need a container runtime: `colima start` or Docker Desktop.
+- Mac jobs for Linux projects need a container runtime: `colima start` or Docker Desktop. `kran doctor` reports `docker` as `not installed` or `not reachable`; without it that Mac only runs native macOS jobs. A Linux machine does not need Docker for kran.
+- A tool is missing on the other machine ("missing toolchain node@24"): install it there, or install `mise`, which lets kran fetch the pinned version.
+
+## Network and versions
+
+- Slow uploads: `kran doctor` warns when a machine is below 10 MiB/s and says whether this machine's default route is Wi-Fi. Ethernet, or a direct Tailscale path (`tailscale ping <host>`) instead of a relay, is the fix. The first sync of a repository is the slow one; later runs send only what changed.
+- Version skew: machines with different kran versions still work as long as the protocol matches; `kran doctor` warns about a difference and `kran upgrade` updates this machine and every linked one. A running daemon keeps its old binary until `kran service restart`.
+- A machine that is `degraded` failed to start three jobs in a row and is skipped for a minute; `kran doctor <node>` shows the error.
+
+## Agents
+
+- `kran agents status` shows what is installed; `outdated` means `kran agents install` has newer text.
+- A Claude Code command was not wrapped: that is the hook's rule for servers, installs, quick commands and anything that writes a file you want here (see [agents.md](agents.md)). The hook also stays out when no daemon is running.
+- Turn the hook off for a moment with `KRAN_NO_HOOK=1`, for good with `kran agents uninstall`.
 
 ## Starting over
 

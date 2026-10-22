@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/hafencity-dev/kran/internal/config"
 	"github.com/hafencity-dev/kran/internal/paths"
+	"github.com/hafencity-dev/kran/internal/transport"
 )
 
 // AuthorizedKeysLine renders the forced-command entry for a kran public key:
@@ -18,7 +20,17 @@ import (
 // pubKey may be a full "type blob comment" line. The key can then do nothing
 // except speak the kran protocol (SPEC §3).
 func AuthorizedKeysLine(kranPath, pubKey, tag string) string {
-	return authorizedKeysLine(kranPath, pubKey, tag, nil)
+	return keyLine(kranPath, "", pubKey, tag, nil)
+}
+
+// PeerKeyLine is AuthorizedKeysLine for a key linked as peer: the forced
+// command becomes `<kranPath> serve --stdio --peer <peer>`, so the daemon
+// binds the session to that linked name instead of trusting the hello.
+func PeerKeyLine(kranPath, peer, pubKey, tag string) string {
+	if !transport.ValidPeerName(peer) {
+		return ""
+	}
+	return keyLine(kranPath, peer, pubKey, tag, nil)
 }
 
 // installEnv are the variables that place a kran install (KRAN_*_DIR and
@@ -42,15 +54,18 @@ func InstallEnv() map[string]string {
 	return m
 }
 
-// AuthorizedKeysLineEnv is AuthorizedKeysLine for an install placed by env
-// (see InstallEnv): the forced command runs `env K='v' … <kran> serve --stdio`.
-func AuthorizedKeysLineEnv(kranPath, pubKey, tag string, env map[string]string) string {
-	return authorizedKeysLine(kranPath, pubKey, tag, env)
+// PeerKeyLineEnv is PeerKeyLine for an install placed by env (see
+// InstallEnv): the forced command runs `env K='v' … <kran> serve --stdio …`.
+func PeerKeyLineEnv(kranPath, peer, pubKey, tag string, env map[string]string) string {
+	if !transport.ValidPeerName(peer) {
+		return ""
+	}
+	return keyLine(kranPath, peer, pubKey, tag, env)
 }
 
-func authorizedKeysLine(kranPath, pubKey, tag string, env map[string]string) string {
+func keyLine(kranPath, peer, pubKey, tag string, env map[string]string) string {
 	f := strings.Fields(pubKey)
-	if len(f) < 2 {
+	if len(f) < 2 || hasControl(kranPath+tag+strings.Join(f, " ")) { // a newline would start another key line
 		return ""
 	}
 	comment := strings.Join(f[2:], " ")
@@ -60,23 +75,38 @@ func authorizedKeysLine(kranPath, pubKey, tag string, env map[string]string) str
 	if tag != "" && !strings.Contains(" "+comment+" ", " "+tag+" ") {
 		comment += " " + tag
 	}
+	// sshd runs the command with the user's shell and only undoes \" (so
+	// a backslash stays as is); the path must be one word for that shell.
 	cmd := kranPath
+	if !plainPath.MatchString(cmd) {
+		cmd = shq(cmd)
+	}
 	if len(env) > 0 {
-		// sshd runs the command with the user's shell: quote for it.
 		var b strings.Builder
 		b.WriteString("env")
 		for _, k := range installEnv {
 			if v, ok := env[k]; ok {
-				fmt.Fprintf(&b, " %s=%s", k, shellQuote(v))
+				if hasControl(v) {
+					return ""
+				}
+				fmt.Fprintf(&b, " %s=%s", k, shq(v))
 			}
 		}
-		cmd = b.String() + " " + shellQuote(kranPath)
+		cmd = b.String() + " " + cmd
 	}
-	esc := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(cmd)
-	return fmt.Sprintf(`command="%s serve --stdio",restrict %s %s %s`, esc, f[0], f[1], comment)
+	cmd += " serve --stdio"
+	if peer != "" {
+		cmd += " --peer " + peer
+	}
+	esc := strings.ReplaceAll(cmd, `"`, `\"`)
+	return fmt.Sprintf(`command="%s",restrict %s %s %s`, esc, f[0], f[1], comment)
 }
 
-func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+var plainPath = regexp.MustCompile(`^[A-Za-z0-9_./+:@,=-]+$`)
+
+func hasControl(s string) bool {
+	return strings.IndexFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0
+}
 
 // authLine is a parsed authorized_keys line.
 type authLine struct {

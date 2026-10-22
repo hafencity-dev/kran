@@ -30,6 +30,9 @@ func (m *manager) Reap(ctx context.Context) error {
 		errs = append(errs, err)
 	}
 	m.reapProcesses()
+	if err := m.pruneImages(ctx); err != nil {
+		errs = append(errs, err)
+	}
 	if err := m.reapJobDirs(); err != nil {
 		errs = append(errs, err)
 	}

@@ -13,6 +13,7 @@ import (
 
 	"github.com/hafencity-dev/kran/internal/agents"
 	"github.com/hafencity-dev/kran/internal/config"
+	"github.com/hafencity-dev/kran/internal/link"
 	"github.com/hafencity-dev/kran/internal/paths"
 	"github.com/hafencity-dev/kran/internal/service"
 )
@@ -43,7 +44,7 @@ already done.`,
 	fs := cmd.Flags()
 	fs.BoolVarP(&f.Yes, "yes", "y", false, "accept the defaults without asking")
 	fs.BoolVarP(&f.Quiet, "quiet", "q", false, "print only errors")
-	fs.StringVar(&f.Name, "name", "", "node name (default: short hostname)")
+	fs.StringVar(&f.Name, "name", "", "name for this machine (default: short hostname)")
 	fs.BoolVar(&f.NoService, "no-service", false, "do not install the background service")
 	fs.BoolVar(&f.Agents, "agents", false, "install the agent integration without asking")
 	fs.BoolVar(&f.NoAgents, "no-agents", false, "skip the agent integration")
@@ -104,16 +105,16 @@ func (a *App) runSetup(ctx context.Context, f setupFlags) error {
 			return &ExitError{Code: 2, Msg: err.Error()}
 		}
 		cfg.Name = f.Name
-		say("node name set to %s", f.Name)
+		say("this machine is now called %s", f.Name)
 	}
 	id, created, err := config.EnsureNodeID()
 	if err != nil {
 		return &ExitError{Code: 1, Msg: err.Error()}
 	}
 	if created {
-		say("created node %s (%s)", cfg.Name, id[:8])
+		say("this machine is %s (id %s)", cfg.Name, id[:8])
 	} else {
-		say("node %s already set up (%s)", cfg.Name, id[:8])
+		say("this machine is %s (id %s)", cfg.Name, id[:8])
 	}
 	_, keyNew, err := config.EnsureKey(cfg.Name)
 	if err != nil {
@@ -155,8 +156,15 @@ func (a *App) runSetup(ctx context.Context, f setupFlags) error {
 	// 4. link
 	if !f.NoLink {
 		hosts := f.Link
-		if len(hosts) == 0 && interactive && pr.confirm("Link another machine now?", false) {
-			hosts = []string{""}
+		if len(hosts) == 0 && interactive {
+			n := linkableCandidates(link.Candidates(ctx, link.ExecRunner{}))
+			q := "Link another machine now?"
+			if n > 0 {
+				q = fmt.Sprintf("Link another machine now? (%d found in your SSH config and Tailscale)", n)
+			}
+			if pr.confirm(q, n > 0) {
+				hosts = []string{""}
+			}
 		}
 		for _, h := range hosts {
 			if err := a.linkHost(ctx, linkFlags{Host: h, Interactive: interactive, Quiet: f.Quiet}); err != nil {
@@ -167,9 +175,29 @@ func (a *App) runSetup(ctx context.Context, f setupFlags) error {
 
 	if !f.Quiet {
 		fmt.Fprintln(a.Out)
-		fmt.Fprintln(a.Out, "kran is ready. Try:  kran run -- <command>   |   kran link <host>   |   kran status")
+		if ps, err := config.LoadPeers(""); err == nil && len(ps.Peer) > 0 {
+			fmt.Fprintln(a.Out, "kran is ready. Try: kran run -- <command>   or   kran status")
+		} else {
+			fmt.Fprintln(a.Out, "kran is ready on this machine. Next: kran link <host> to add another machine, then kran run -- <command>.")
+		}
 	}
 	return nil
+}
+
+// linkableCandidates counts machines worth offering for a link right away:
+// SSH config hosts and Tailscale peers that are not linked yet. known_hosts
+// entries alone are too weak a hint to default to yes.
+func linkableCandidates(cands []link.Candidate) int {
+	n := 0
+	for _, c := range cands {
+		if c.Linked || unsupportedPlatform(c.Detail) {
+			continue
+		}
+		if c.Source == "ssh-config" || c.Source == "tailscale" {
+			n++
+		}
+	}
+	return n
 }
 
 func agentToolsPresent() bool {
@@ -199,6 +227,11 @@ func (a *App) setupService(ctx context.Context, say func(string, ...any)) error 
 	if err != nil {
 		return err
 	}
+	release, err := a.handOver(ctx, m, false)
+	if err != nil {
+		return fmt.Errorf("service: %w", err)
+	}
+	defer release()
 	changed, err := m.Install(ctx)
 	if err != nil {
 		return fmt.Errorf("service: %w", err)

@@ -81,6 +81,8 @@ type manager struct {
 	runtimes []proto.Runtime
 	dk       *dockerEnv // nil when Docker is not usable
 	dkReason string     // why not
+
+	img runnerImage
 }
 
 func newManager(opts Options) (Manager, error) { return newManagerWith(opts, defaultTunables()) }
@@ -190,22 +192,19 @@ func (m *manager) reindex() {
 			writeJSONAtomic(filepath.Join(dir, fileStatus), exit)
 			continue
 		}
-		js := m.track(spec.JobID, dir, spec, nil)
 		// The slot stays busy across the restart; the daemon releases it
 		// with its persisted SlotRef once the job ended (and the reaper
 		// frees it if nobody does within slotHoldIdle).
-		if sl := m.pool.markBusy(spec.Slot, spec.JobID); sl != nil {
-			js.mu.Lock()
-			js.slot = sl
-			js.mu.Unlock()
-		}
+		m.track(spec.JobID, dir, spec, nil, m.pool.markBusy(spec.Slot, spec.JobID))
 		m.logf("re-attached running job %s", spec.JobID)
 	}
 }
 
 // track registers a job and starts its watcher.
-func (m *manager) track(id, dir string, spec superSpec, onPhase func(proto.Phase)) *jobState {
-	js := &jobState{m: m, id: id, dir: dir, spec: spec, done: make(chan struct{}), onPhase: onPhase}
+// The slot is set before the watcher starts: a job that ends at once must
+// still find it to free it.
+func (m *manager) track(id, dir string, spec superSpec, onPhase func(proto.Phase), sl *slot) *jobState {
+	js := &jobState{m: m, id: id, dir: dir, spec: spec, done: make(chan struct{}), onPhase: onPhase, slot: sl}
 	m.jobsMu.Lock()
 	m.jobs[id] = js
 	m.jobsMu.Unlock()
@@ -241,6 +240,9 @@ func (m *manager) Refresh(ctx context.Context) error {
 	native.Docker = dk != nil
 	rts := []proto.Runtime{native}
 	if crt, ok := m.containerRuntime(ctx, dk, reason); ok {
+		if crt.Available {
+			crt.FirstUse = !m.imageBuilt(ctx, dk)
+		}
 		rts = append(rts, crt)
 	}
 	m.rtMu.Lock()
@@ -388,6 +390,9 @@ func (m *manager) Commit(ctx context.Context, ref proto.SlotRef, mf *proto.Manif
 }
 
 func (m *manager) openBlob(hash string) (io.ReadCloser, int64, error) {
+	if err := validHash(hash); err != nil { // the apply side names it
+		return nil, 0, err
+	}
 	f, err := os.Open(m.blobs.path(hash))
 	if err != nil {
 		return nil, 0, fmt.Errorf("%w: %s", ErrMissingBlob, short(hash))
@@ -480,11 +485,7 @@ func (m *manager) Start(ctx context.Context, req StartRequest) (Process, error) 
 		return nil, fmt.Errorf("start job on %s: %w", m.opts.NodeName, err)
 	}
 	ok = true
-	js := m.track(id, dir, spec, req.OnPhase)
-	js.mu.Lock()
-	js.slot = s
-	js.mu.Unlock()
-	return &process{js: js}, nil
+	return &process{js: m.track(id, dir, spec, req.OnPhase, s)}, nil
 }
 
 // nativeSpec fills spec for the native runtime.
@@ -596,7 +597,7 @@ func (m *manager) Attach(ctx context.Context, jobID string) (Process, error) {
 		return &process{js: js}, nil
 	}
 	m.jobsMu.Unlock()
-	return &process{js: m.track(jobID, dir, spec, nil)}, nil
+	return &process{js: m.track(jobID, dir, spec, nil, nil)}, nil
 }
 
 func (m *manager) Active() []string {
@@ -613,17 +614,10 @@ func (m *manager) Active() []string {
 }
 
 func (m *manager) Run(ctx context.Context) error {
+	// The runner image is built on the first container job (see
+	// ensureImage), not here: most nodes never run one, and a build at
+	// every start would cost minutes of CPU and gigabytes of disk.
 	m.Reap(ctx)
-	// Build the runner image (minutes on first use) in the background so
-	// the first container job does not hit the daemon's prestart timeout;
-	// until it is ready such jobs fall back to running locally.
-	if dk, _ := m.docker(); dk != nil && m.containerSetting() != "off" {
-		go func() {
-			if err := m.ensureContainerReady(ctx, nil); err != nil && ctx.Err() == nil {
-				m.logf("container runtime: %v", err)
-			}
-		}()
-	}
 	reap := time.NewTicker(m.tun.reapEvery)
 	defer reap.Stop()
 	trim := time.NewTicker(m.tun.trimEvery)

@@ -88,6 +88,8 @@ type spoolReader struct {
 	maxPoll time.Duration
 	eof     bool
 	pending []byte // encoded bytes not yet returned
+	// beforeFrame runs before a frame is handed out (outside mu).
+	beforeFrame func()
 }
 
 var errReaderClosed = errors.New("output reader closed")
@@ -198,6 +200,9 @@ func (r *spoolReader) Read(p []byte) (int, error) {
 			return 0, err
 		}
 		if ok {
+			if r.beforeFrame != nil {
+				r.beforeFrame()
+			}
 			r.pending = r.encodeCurrent()
 			if len(p) >= len(r.pending) {
 				n := copy(p, r.pending)

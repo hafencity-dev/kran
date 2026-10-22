@@ -43,7 +43,10 @@ func (d *Daemon) routes(unix bool) http.Handler {
 		mux.HandleFunc("GET /api/v1/debug/goroutines", handleGoroutines)
 		mux.HandleFunc("GET /api/v1/debug/slots", d.handleSlots)
 	}
+
+	mux.HandleFunc("GET /api/v1/daemon", d.handleDaemonInfo)
 	if unix {
+		mux.HandleFunc("POST /api/v1/daemon/stop", d.handleDaemonStop)
 		mux.HandleFunc("POST /api/v1/run", d.handleRun)
 	} else {
 		mux.HandleFunc("POST /api/v1/run", func(w http.ResponseWriter, r *http.Request) {
@@ -88,6 +91,7 @@ func (d *Daemon) loadToken() error {
 		return fmt.Errorf("create %s: %w", filepath.Dir(path), err)
 	}
 	tmp := path + ".tmp"
+	os.Remove(tmp) // WriteFile keeps the mode of a leftover file
 	if err := os.WriteFile(tmp, []byte(tok+"\n"), 0o600); err != nil {
 		return fmt.Errorf("write UI token: %w", err)
 	}
@@ -109,13 +113,17 @@ func (d *Daemon) tokenOK(r *http.Request, allowQuery bool) bool {
 	return got != "" && subtle.ConstantTimeCompare([]byte(got), []byte(d.token)) == 1
 }
 
-// tcpAuth guards the UI listener. Loopback: reads are open (the browser UI
-// loads without ceremony), mutations need X-Kran-Token, and the Host header
-// must be a loopback name (DNS rebinding). Non-loopback: every API call
-// needs the token (header, or ?token= for GETs such as SSE); static UI
-// assets stay public because they carry no data.
+// tcpAuth guards the UI listener. Every API call needs the token (header,
+// or ?token= for GETs such as SSE; mutations only the header), loopback
+// included: loopback TCP is open to every account on the machine, and job
+// output and argv are the owner's. Static UI assets stay public because
+// they carry no data. On loopback the Host header must be a loopback name
+// (DNS rebinding).
 func (d *Daemon) tcpAuth(next http.Handler, loopback bool, bindHost string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// No cross-origin embedding (<script src=…/log>) of API output.
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 		if loopback && !loopbackHost(r.Host) {
 			writeAPIError(w, http.StatusForbidden, "unexpected Host header", "open the UI through 127.0.0.1 or localhost")
 			return
@@ -130,7 +138,7 @@ func (d *Daemon) tcpAuth(next http.Handler, loopback bool, bindHost string) http
 		case !read && !d.tokenOK(r, false):
 			writeAPIError(w, http.StatusUnauthorized, "this action needs the kran token (header X-Kran-Token)", "open the UI with kran ui")
 			return
-		case read && isAPI && !loopback && !d.tokenOK(r, true):
+		case read && isAPI && !d.tokenOK(r, true):
 			writeAPIError(w, http.StatusUnauthorized, "this listener needs the kran token", "open the UI with kran ui --print-url")
 			return
 		}
@@ -319,7 +327,7 @@ func (d *Daemon) handleDrain(on bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
 		if !d.peers.setDrained(name, on) {
-			writeAPIError(w, http.StatusNotFound, "no node "+name, "see linked nodes: kran status")
+			writeAPIError(w, http.StatusNotFound, "no machine named "+name, "machine names are in `kran status`")
 			return
 		}
 		if name == d.self {
@@ -338,7 +346,7 @@ func (d *Daemon) handleLog(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "invalid job id", "")
 		return
 	}
-	job, ok := d.jobs.find(id)
+	_, ok := d.jobs.find(id)
 	if !ok {
 		writeAPIError(w, http.StatusNotFound, "no job "+id, "list jobs: kran jobs")
 		return
@@ -359,11 +367,7 @@ func (d *Daemon) handleLog(w http.ResponseWriter, r *http.Request) {
 	} else {
 		path := filepath.Join(d.deps.Dirs.spoolDir(), id)
 		if _, err := os.Stat(path); err != nil {
-			if job.Local {
-				writeAPIError(w, http.StatusNotFound, "job "+id+" ran locally; kran does not capture the output of local jobs", "")
-			} else {
-				writeAPIError(w, http.StatusNotFound, "the output of job "+id+" is no longer kept", "")
-			}
+			writeAPIError(w, http.StatusNotFound, "the output of job "+id+" is no longer kept", "output is kept for 7 days")
 			return
 		}
 		var err error
@@ -490,4 +494,49 @@ func utf8Complete(b []byte) int {
 		}
 	}
 	return n
+}
+
+func (d *Daemon) handleDaemonInfo(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, proto.DaemonInfo{PID: os.Getpid(), Supervisor: d.deps.Supervisor, StartedAt: d.startedAt.UTC()})
+}
+
+// handleDaemonStop lets `kran service` replace a daemon its service manager
+// does not run: stop now ("now", graceful: jobs are restored by the next
+// daemon) or once no job is active here ("idle").
+func (d *Daemon) handleDaemonStop(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		When string `json:"when"`
+	}
+	json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body)
+	switch body.When {
+	case "", "idle":
+		d.goLoop(d.stopWhenIdle)
+	case "now":
+		d.requestStop()
+	default:
+		writeAPIError(w, http.StatusBadRequest, `when must be "idle" or "now"`, "")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, proto.DaemonInfo{PID: os.Getpid(), Supervisor: d.deps.Supervisor, StartedAt: d.startedAt.UTC()})
+}
+
+func (d *Daemon) requestStop() { d.stopOnce.Do(func() { close(d.stopReq) }) }
+
+// stopWhenIdle stops the daemon once it originates no active job and holds
+// no reservation for a job that has not started (running guest jobs survive
+// under their supervisors and are picked up by the next daemon).
+func (d *Daemon) stopWhenIdle(ctx context.Context) {
+	tk := time.NewTicker(250 * time.Millisecond)
+	defer tk.Stop()
+	for {
+		if len(d.jobs.list()) == 0 && d.target.reservations() == 0 {
+			d.requestStop()
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-tk.C:
+		}
+	}
 }

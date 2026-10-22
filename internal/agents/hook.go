@@ -4,11 +4,14 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+
+	"github.com/hafencity-dev/kran/internal/paths"
 )
 
 // hookInput is the part of Claude Code's PreToolUse payload we care about.
 // Docs: https://code.claude.com/docs/en/hooks (PreToolUse input and decision control).
 type hookInput struct {
+	Cwd       string                     `json:"cwd"`
 	ToolName  string                     `json:"tool_name"`
 	ToolInput map[string]json.RawMessage `json:"tool_input"`
 }
@@ -22,14 +25,27 @@ type hookSpecific struct {
 	// UpdatedInput replaces the ENTIRE tool input, so it carries every field
 	// of the original (description, timeout, …) next to the new command.
 	UpdatedInput map[string]json.RawMessage `json:"updatedInput"`
-	// No permissionDecision on purpose: kran must not approve commands on the
-	// user's behalf. The user's normal permission flow still applies, now
-	// evaluated against the wrapped command. Verified with claude 2.1.308
-	// (`claude -p --settings`): updatedInput is applied without a decision.
-	AdditionalContext string `json:"additionalContext,omitempty"`
+	// PermissionDecision is "allow" only when the user's own allow rules
+	// cover the original command (see permissions.go); otherwise it is
+	// absent and Claude Code asks as it would have. updatedInput is applied
+	// without a decision (verified with claude 2.1.308, `claude -p`).
+	PermissionDecision       string `json:"permissionDecision,omitempty"`
+	PermissionDecisionReason string `json:"permissionDecisionReason,omitempty"`
+	AdditionalContext        string `json:"additionalContext,omitempty"`
 }
 
-const hookContext = "kran moved this command: it ran as `kran run --sh '…'`. Output and exit code are the command's own; a `kran:` line on stderr is kran talking; exit 125 means kran itself failed (retry with `kran run --local --sh '…'`)."
+// hookContext reaches the agent with every wrapped command, so it says only
+// what changes its next move: the output is the command's own, the files may
+// not be here, and what 125 means.
+const hookContext = "kran ran this command (as `kran run --sh '…'`), possibly on another machine. Output and exit code are the command's own; a `kran:` line on stderr is kran's. Files it wrote may not be in this checkout: rerun with `kran run --local --sh '…'` if you need them. Exit 125 means kran itself failed."
+
+// daemonUp reports whether a kran daemon has a socket. Without one kran could
+// only run the command here and say so on every call, so the hook stays out
+// of the way. A variable so tests can set it.
+var daemonUp = func() bool {
+	_, err := os.Stat(paths.Socket())
+	return err == nil
+}
 
 // HookClaude implements `kran hook claude`, a Claude Code PreToolUse hook. It
 // reads the hook payload from in and, for heavy Bash commands that are safe
@@ -57,7 +73,15 @@ func HookClaude(in io.Reader, out io.Writer, kranPath string) int {
 		return 0
 	}
 	wrapped, ok := wrapWith(kranPath, cmd)
-	if !ok {
+	if !ok || !daemonUp() {
+		return 0
+	}
+	rules, err := loadRules(settingsFiles(h.Cwd))
+	if err != nil {
+		return 0 // rules we cannot read: let Claude Code apply them unwrapped
+	}
+	wrap, allowRule := permissionVerdict(rules, cmd, []string{wrapped, "kran run --sh " + ShellQuote(cmd)})
+	if !wrap {
 		return 0
 	}
 	enc, err := json.Marshal(wrapped)
@@ -69,11 +93,16 @@ func HookClaude(in io.Reader, out io.Writer, kranPath string) int {
 		upd[k] = v
 	}
 	upd["command"] = enc
-	b, err := json.Marshal(hookOutput{hookSpecific{
+	o := hookOutput{hookSpecific{
 		HookEventName:     "PreToolUse",
 		UpdatedInput:      upd,
 		AdditionalContext: hookContext,
-	}})
+	}}
+	if allowRule != "" {
+		o.HookSpecificOutput.PermissionDecision = "allow"
+		o.HookSpecificOutput.PermissionDecisionReason = "allowed by your rule " + allowRule + " (kran runs the same command)"
+	}
+	b, err := json.Marshal(o)
 	if err != nil {
 		return 0
 	}

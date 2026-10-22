@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -12,6 +13,10 @@ import (
 )
 
 func versionString() string {
+	// Untagged builds use the commit as the version; do not print it twice.
+	if version.Commit == "" || version.Commit == "none" || strings.HasPrefix(version.Version, version.Commit) {
+		return fmt.Sprintf("kran %s (built %s)", version.Version, version.BuildDate)
+	}
 	return fmt.Sprintf("kran %s (%s, built %s)", version.Version, version.Commit, version.BuildDate)
 }
 

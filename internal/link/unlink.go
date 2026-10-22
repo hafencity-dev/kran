@@ -72,6 +72,7 @@ func UnlinkDetailed(ctx context.Context, name string, o Options) (*UnlinkResult,
 	if o.Host != "" && p.KranPath != "" {
 		o.progress("remote", "Removing this machine from "+name)
 		c := newSSH(&o)
+		defer c.exitMaster()
 		if err := c.connect(ctx); err == nil {
 			selfPub, _ := config.PublicKey()
 			var fr ForgetResponse
@@ -81,7 +82,6 @@ func UnlinkDetailed(ctx context.Context, name string, o Options) (*UnlinkResult,
 			} else {
 				res.Leftover = append(res.Leftover, fmt.Sprintf("On %s, run `kran internal link-forget` or remove the kran line for %s from ~/.ssh/authorized_keys and the %s entry from peers.toml (%v).", name, o.SelfName, o.SelfName, ferr))
 			}
-			c.exitMaster()
 		} else {
 			res.Leftover = append(res.Leftover, fmt.Sprintf("%s is not reachable, so its side was not touched. There, remove the authorized_keys line ending in \"kran@%s\" and the %s entry in peers.toml (or run `kran unlink %s` on it).", name, o.SelfName, o.SelfName, o.SelfName))
 		}

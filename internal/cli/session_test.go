@@ -81,6 +81,21 @@ func (s *fakeSession) push(t proto.FrameType, v any) {
 
 func (s *fakeSession) drop() { s.once.Do(func() { close(s.toClient) }) }
 
+// tryPush is push for a session the CLI may have closed already.
+func (s *fakeSession) tryPush(t proto.FrameType, v any) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	b, _ := v.([]byte)
+	if v != nil && b == nil {
+		b, _ = json.Marshal(v)
+	}
+	s.toClient <- sentFrame{t, b}
+	return true
+}
+
 func (s *fakeSession) sentTypes() []proto.FrameType {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -258,6 +273,30 @@ func TestRemoteRunPassthroughAndNotices(t *testing.T) {
 	}
 }
 
+// A wait whose only change is a live number ("3.1 GiB free" -> "3.0 GiB free")
+// is one reason, so it is said once; a different reason is said again.
+func TestWaitingLineIsNotRepeatedForChangingNumbers(t *testing.T) {
+	s := newFakeSession()
+	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s}}, "true")
+	go func() {
+		waitFor(t, func() bool { return s.count(proto.FrameSubmit) == 1 })
+		s.push(proto.FrameNotice, proto.Notice{Kind: "queued", Message: "waiting: needs 6 GiB, devmac has 3.1 GiB free"})
+		time.Sleep(250 * time.Millisecond)
+		s.push(proto.FrameNotice, proto.Notice{Kind: "queued", Message: "waiting: needs 6 GiB, devmac has 3.0 GiB free"})
+		time.Sleep(50 * time.Millisecond)
+		s.push(proto.FrameNotice, proto.Notice{Kind: "queued", Message: "waiting: devmac is draining"})
+		time.Sleep(50 * time.Millisecond)
+		s.push(proto.FrameExit, proto.Exit{JobID: "j1", Code: 0, State: proto.JobSucceeded})
+	}()
+	if code := h.run(t); code != 0 {
+		t.Fatal(code)
+	}
+	se := h.stderr.String()
+	if n := strings.Count(se, "needs 6 GiB"); n != 1 || !strings.Contains(se, "kran: waiting: devmac is draining") {
+		t.Fatalf("stderr:\n%s", se)
+	}
+}
+
 func TestQuickQueueStaysSilent(t *testing.T) {
 	s := newFakeSession()
 	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s}}, "x")
@@ -363,8 +402,19 @@ func TestNoDaemonNoFallback(t *testing.T) {
 	if code := h.run(t); code != 125 {
 		t.Fatal(code)
 	}
-	if !strings.Contains(h.stderr.String(), "no-fallback") {
-		t.Fatalf("%q", h.stderr.String())
+	if want := "kran: daemon not running; --no-fallback forbids running here (start it: kran service start)\n"; h.stderr.String() != want {
+		t.Fatalf("%q, want %q", h.stderr.String(), want)
+	}
+}
+
+func TestNoDaemonJSONEventsSaysItOnce(t *testing.T) {
+	h := newHarness(t, nil, "true")
+	h.r.flags.JSONEvents = true
+	if code := h.run(t); code != 0 {
+		t.Fatal(code)
+	}
+	if n := strings.Count(h.stderr.String(), "daemon not running"); n != 1 {
+		t.Fatalf("the fallback reason appears %d times:\n%s", n, h.stderr.String())
 	}
 }
 
@@ -495,13 +545,8 @@ func TestStdinForwarding(t *testing.T) {
 	h.r.stdin = pr
 	go func() {
 		s.push(proto.FrameDecision, proto.Decision{JobID: "j", Mode: "remote", Node: "n"})
+		s.push(proto.FramePhase, proto.Phase{State: proto.JobRunning}) // input is read once the command runs
 		pw.Write([]byte("hello"))
-		s.push(proto.FramePhase, proto.Phase{State: proto.JobSyncing})
-		time.Sleep(100 * time.Millisecond)
-		if n := s.count(proto.FrameStdin); n != 0 {
-			t.Errorf("stdin forwarded before the command runs: %d frames", n)
-		}
-		s.push(proto.FramePhase, proto.Phase{State: proto.JobRunning})
 		waitFor(t, func() bool { return s.count(proto.FrameStdin) >= 1 })
 		pw.Close()
 		waitFor(t, func() bool { return s.count(proto.FrameStdinEOF) == 1 })
@@ -634,29 +679,9 @@ func TestReconnectGivesUpWith125(t *testing.T) {
 	}
 }
 
-// TestDropDuringRemoteSetupReattaches: the daemon goes away while the job
-// is set up on its target. The job may still start there, so the CLI
-// reattaches instead of running it a second time here.
-func TestDropDuringRemoteSetupReattaches(t *testing.T) {
-	s1, s2 := newFakeSession(), newFakeSession()
-	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s1, s2}}, "sh", "-c", "exit 6")
-	go func() {
-		s1.push(proto.FrameDecision, proto.Decision{JobID: "js", Mode: "remote", Node: "n"})
-		s1.push(proto.FramePhase, proto.Phase{State: proto.JobSetup})
-		time.Sleep(50 * time.Millisecond)
-		s1.drop()
-		waitFor(t, func() bool { return s2.count(proto.FrameReattach) == 1 })
-		s2.push(proto.FramePhase, proto.Phase{State: proto.JobRunning})
-		s2.push(proto.FrameStdout, []byte("remote"))
-		s2.push(proto.FrameExit, proto.Exit{JobID: "js", Code: 5, State: proto.JobFailed})
-	}()
-	if code := h.run(t); code != 5 || h.stdout.String() != "remote" {
-		t.Fatalf("code %d stdout %q", code, h.stdout.String())
-	}
-}
-
-// TestDropDuringRemoteSetupNoDaemonRunsHere: without a daemon to reattach
-// to (it does not resume a job nobody waits for), the job runs here.
+// TestDropDuringRemoteSetupNoDaemonRunsHere: the daemon goes away while the
+// job is set up on its target: the job runs here (a restarted daemon
+// cancels it there before the setup ends).
 func TestDropDuringRemoteSetupNoDaemonRunsHere(t *testing.T) {
 	s1 := newFakeSession()
 	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s1}}, "sh", "-c", "exit 6")
@@ -721,5 +746,145 @@ func TestLaunchFailureCodes(t *testing.T) {
 	}
 	if !strings.Contains(h.stderr.String(), "command not found") {
 		t.Fatal(h.stderr.String())
+	}
+}
+
+// slowWriter blocks its first write, like a pager nobody scrolls or a full
+// pipe to a slow consumer.
+type slowWriter struct {
+	mu    sync.Mutex
+	buf   bytes.Buffer
+	delay time.Duration
+	once  sync.Once
+}
+
+func (w *slowWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() { time.Sleep(w.delay) })
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+func TestSlowStdoutIsNotADeadDaemon(t *testing.T) {
+	s := newFakeSession()
+	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s}}, "x")
+	out := &slowWriter{delay: 1500 * time.Millisecond} // longer than DeadAfter
+	h.r.stdout = out
+	go func() {
+		s.push(proto.FrameDecision, proto.Decision{JobID: "j", Mode: "remote", Node: "n"})
+		s.push(proto.FramePhase, proto.Phase{State: proto.JobRunning})
+		s.push(proto.FrameStdout, []byte("first"))
+		// The daemon keeps the session alive meanwhile (its heartbeats are
+		// swallowed by the client); the job ends a little after the write.
+		time.Sleep(1700 * time.Millisecond)
+		s.tryPush(proto.FrameStdout, []byte(" second"))
+		s.tryPush(proto.FrameExit, proto.Exit{JobID: "j", Code: 0, State: proto.JobSucceeded})
+	}()
+	if code := h.run(t); code != 0 {
+		t.Fatalf("code %d: %s", code, h.stderr.String())
+	}
+	if got := out.buf.String(); got != "first second" {
+		t.Fatalf("stdout %q", got)
+	}
+	if strings.Contains(h.stderr.String(), "lost the connection") {
+		t.Fatalf("a slow stdout reader was taken for a dead daemon: %q", h.stderr.String())
+	}
+}
+
+// A remote job with a terminal reads from its pty. Without -i nothing ever
+// arrives there: the job must see end of input instead of waiting forever
+// (a prompt would hang the run).
+func TestRemoteTTYWithoutStdinGetsEOF(t *testing.T) {
+	s := newFakeSession()
+	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s}}, "x")
+	h.r.spec.TTY = &proto.TTY{Rows: 24, Cols: 80}
+	go func() {
+		s.push(proto.FrameDecision, proto.Decision{JobID: "j", Mode: "remote", Node: "n"})
+		waitFor(t, func() bool { return s.count(proto.FrameStdinEOF) == 1 })
+		s.push(proto.FrameExit, proto.Exit{JobID: "j", Code: 0, State: proto.JobSucceeded})
+	}()
+	done := make(chan int, 1)
+	go func() { done <- h.r.Run(context.Background()) }()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatal(code)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no stdin EOF for a remote terminal job without -i")
+	}
+}
+
+func TestJobTTYNeedsStdoutAndStderrTerminals(t *testing.T) {
+	size := func() *proto.TTY { return &proto.TTY{Rows: 1, Cols: 2} }
+	if jobTTY(true, true, size) == nil {
+		t.Fatal("both terminals: want a TTY")
+	}
+	// kran run make 2>err.log: a pty would merge stderr into the terminal.
+	if jobTTY(true, false, size) != nil || jobTTY(false, true, size) != nil {
+		t.Fatal("a redirected stream must keep its own pipe")
+	}
+}
+
+// Output before the running phase is setup output: the command has not
+// started, and the daemon treats the job that way after a restart (it stops
+// it). Losing the daemon then means running the command here.
+func TestSetupOutputIsNotAStart(t *testing.T) {
+	s := newFakeSession()
+	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s}}, "sh", "-c", "exit 6")
+	go func() {
+		s.push(proto.FrameDecision, proto.Decision{JobID: "j", Mode: "remote", Node: "n"})
+		s.push(proto.FramePhase, proto.Phase{State: proto.JobSetup, Message: "running setup: pnpm install"})
+		s.push(proto.FrameStdout, []byte("Packages: +12\n"))
+		time.Sleep(50 * time.Millisecond)
+		s.drop()
+	}()
+	if code := h.run(t); code != 6 {
+		t.Fatalf("code %d: %s", code, h.stderr.String())
+	}
+}
+
+// After the daemon restarted, it no longer knows the local child's process
+// group: the reattaching CLI must report it again, or a later CLI death
+// would leave the child running (SPEC §6.1 step 5).
+func TestLocalReattachReportsStartedAgain(t *testing.T) {
+	s1, s2 := newFakeSession(), newFakeSession()
+	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s1, s2}}, "sh", "-c", "sleep 0.5")
+	go func() {
+		s1.push(proto.FrameDecision, proto.Decision{JobID: "jl", Mode: "local", Envelope: &proto.LocalEnvelope{}})
+		waitFor(t, func() bool { return s1.count(proto.FrameStarted) == 1 })
+		s1.drop()
+	}()
+	if code := h.run(t); code != 0 {
+		t.Fatal(code, h.stderr.String())
+	}
+	types := s2.sentTypes()
+	if len(types) < 2 || types[0] != proto.FrameReattach || types[1] != proto.FrameStarted {
+		t.Fatalf("after reattach sent %v", types)
+	}
+	f, _ := s2.find(proto.FrameStarted)
+	var st proto.Started
+	json.Unmarshal(f.payload, &st)
+	if st.PGID == 0 || st.JobID != "jl" {
+		t.Fatalf("%+v", st)
+	}
+}
+
+// .kran.toml env.set applies wherever the job runs (same result as remote).
+func TestLocalJobGetsEnvSet(t *testing.T) {
+	r := &runner{env: []string{"CI=0", "A=1"}, envSet: map[string]string{"CI": "1", "B": "2"}}
+	got := r.localJob(nil).Env
+	want := map[string]int{"CI=1": 1, "A=1": 1, "B=2": 1}
+	seen := map[string]int{}
+	for _, kv := range got {
+		seen[kv]++
+		if strings.HasPrefix(kv, "CI=") && kv != "CI=1" {
+			t.Fatalf("stale %s in %v", kv, got)
+		}
+	}
+	for k, n := range want {
+		if seen[k] != n {
+			t.Fatalf("env %v", got)
+		}
 	}
 }

@@ -242,3 +242,17 @@ func (c *httpClient) Drain(ctx context.Context, node string) error {
 func (c *httpClient) Resume(ctx context.Context, node string) error {
 	return c.do(ctx, http.MethodPost, "/api/v1/nodes/"+url.PathEscape(node)+"/resume", nil, nil)
 }
+
+// DaemonInfo says which process serves the API (not part of the Client
+// interface; reach it with a type assertion).
+func (c *httpClient) DaemonInfo(ctx context.Context) (proto.DaemonInfo, error) {
+	var v proto.DaemonInfo
+	err := c.do(ctx, http.MethodGet, "/api/v1/daemon", nil, &v)
+	return v, err
+}
+
+// StopDaemon asks the daemon to stop "now" or once "idle" (handover to the
+// service manager; not part of the Client interface).
+func (c *httpClient) StopDaemon(ctx context.Context, when string) error {
+	return c.do(ctx, http.MethodPost, "/api/v1/daemon/stop", map[string]string{"when": when}, nil)
+}

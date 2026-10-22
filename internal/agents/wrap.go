@@ -36,7 +36,12 @@ func wrapWith(kranPath, cmd string) (string, bool) {
 }
 
 // ---------------------------------------------------------------------------
-// Policy. Whitelist approach: the command must be made only of
+// Policy. Move what benefits and leave the rest: tests, checks, type checks,
+// lints and builds that take long and whose result is the exit code and the
+// output. Anything whose point is a file or image on THIS machine (go build
+// of one package, -o, --load, coverage/junit files, --fix, snapshot updates)
+// stays local, as do servers, watchers, installs and quick commands.
+// Whitelist approach: the command must be made only of
 //   * one or more heavy commands (never reading a pipe),
 //   * `cd DIR`, `export X=y`, `true`, `echo …`,
 //   * output filters (tail, head, grep, …) that read the heavy command's pipe,
@@ -48,13 +53,17 @@ func wrapWith(kranPath, cmd string) (string, bool) {
 type shellCmd struct {
 	words []string
 	op    string // operator joining this command to the previous one ("" first)
+	raw   string // the command's text as written (for permission rules)
 }
 
 func shouldWrap(cmd string) bool {
 	if strings.TrimSpace(cmd) == "" || strings.ContainsRune(cmd, 0) {
 		return false
 	}
-	// Command substitution would need real shell parsing; backticks likewise.
+	// `make -j$(nproc)` is the one substitution agents write all the time, and
+	// the remote shell should expand it for the machine that runs the job.
+	cmd = strings.NewReplacer("$(nproc)", "8", "$(nproc --all)", "8").Replace(cmd)
+	// Other command substitution would need real shell parsing; backticks likewise.
 	if strings.Contains(cmd, "$(") || strings.Contains(cmd, "`") {
 		return false
 	}
@@ -92,6 +101,7 @@ func shouldWrap(cmd string) bool {
 	return heavy > 0
 }
 
+var durationRe = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?[smhd]?$`)
 var assignRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
 
 // stripPrefixes drops `VAR=x`, `time`, `nice [-n N]` and `env` prefixes.
@@ -106,6 +116,8 @@ func stripPrefixes(w []string) []string {
 			w = w[1:]
 		case w[0] == "time" || w[0] == "env":
 			w = w[1:]
+		case w[0] == "timeout" && len(w) >= 3 && durationRe.MatchString(w[1]):
+			w = w[2:]
 		case w[0] == "nice":
 			w = w[1:]
 			if len(w) >= 2 && w[0] == "-n" {
@@ -132,6 +144,13 @@ func isBenign(w []string) bool {
 		}
 		return true
 	case "true", ":", "echo":
+		return true
+	case "set": // set -e, set -euo pipefail
+		for _, a := range w[1:] {
+			if !strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "+") && a != "pipefail" && a != "errexit" && a != "nounset" {
+				return false
+			}
+		}
 		return true
 	}
 	return false
@@ -173,7 +192,7 @@ func isHeavy(w []string) bool {
 		case "-w", "watch", "--ui", "--headed", "--debug", "--inspect", "--inspect-brk":
 			return false
 		}
-		if strings.HasPrefix(a, "--watch") {
+		if staysLocalFlag(a) {
 			return false
 		}
 	}
@@ -198,6 +217,12 @@ func isHeavy(w []string) bool {
 		return in(firstPositional(args), "build", "test")
 	case name == "cmake":
 		return anyIn(args, "--build")
+	case name == "ctest":
+		return true
+	case name == "golangci-lint":
+		return firstPositional(args) == "run"
+	case name == "turbo" || name == "nx":
+		return turboHeavy(args)
 	case name == "pytest" || name == "py.test":
 		return !anyIn(args, "--looponfail", "-f")
 	case isPython(name):
@@ -210,6 +235,28 @@ func isHeavy(w []string) bool {
 		return jsRunnerHeavy(args)
 	case in(name, "npm", "pnpm", "yarn", "bun"):
 		return pmHeavy(name, args)
+	}
+	return false
+}
+
+// staysLocalFlag reports flags that mean "watch" or "write files here":
+// the watcher must stay interactive, and --fix/-u/coverage files are wanted in
+// this checkout, not on the machine that ran the command.
+func staysLocalFlag(a string) bool {
+	if strings.HasPrefix(a, "--watch") {
+		// --watch=false and --watchAll=false switch watching off.
+		return !strings.HasSuffix(a, "=false") && !strings.HasSuffix(a, "=0")
+	}
+	switch a {
+	case "--fix", "--write", "-u", "-update", "--snapshot-update", "--junitxml", "--junit-xml", "--outputFile", "--output-file", "--html":
+		return true
+	}
+	for _, p := range []string{"--fix=", "--write=", "--update", "--junitxml=", "--junit-xml=", "--outputFile=",
+		"--output-file=", "-coverprofile", "-cpuprofile", "-memprofile", "-blockprofile", "-mutexprofile", "-trace",
+		"-outputdir", "--cov-report=html", "--cov-report=xml", "--cov-report=json", "--cov-report=lcov", "--cov-report=annotate", "--html="} {
+		if strings.HasPrefix(a, p) {
+			return true
+		}
 	}
 	return false
 }
@@ -261,17 +308,29 @@ func goHeavy(args []string) bool {
 	if !in(sub, "test", "build", "vet") {
 		return false
 	}
+	devNull := false
 	for i, a := range args {
 		if a == "-o" || strings.HasPrefix(a, "-o=") {
 			// A build artifact would stay on the machine that built it; only
 			// `-o /dev/null` (compile check) is safe.
 			if a == "-o" && i+1 < len(args) && args[i+1] == "/dev/null" {
+				devNull = true
 				continue
 			}
 			return false
 		}
 	}
-	return true
+	if sub == "test" || devNull {
+		return true
+	}
+	// build and vet are only worth moving over many packages: `go build .`
+	// or `go build ./cmd/x` writes a binary here, `go vet ./pkg` is quick.
+	for _, a := range args {
+		if strings.Contains(a, "...") {
+			return true
+		}
+	}
+	return false
 }
 
 func makeHeavy(args []string) bool {
@@ -288,7 +347,7 @@ func makeHeavy(args []string) bool {
 		if strings.HasPrefix(a, "-") || strings.Contains(a, "=") {
 			continue
 		}
-		if a == "test" || a == "tests" || a == "build" || a == "all" || a == "check" ||
+		if in(a, "test", "tests", "build", "all", "check", "lint", "ci", "typecheck", "e2e") ||
 			strings.HasPrefix(a, "test-") || strings.HasPrefix(a, "test_") || strings.HasPrefix(a, "build-") {
 			return true
 		}
@@ -310,8 +369,9 @@ func dockerHeavy(args []string) bool {
 		return false
 	}
 	for _, a := range args {
-		if in(a, "-o", "--load") || strings.HasPrefix(a, "--output") || strings.HasPrefix(a, "--load") {
-			return false // result must land on this machine
+		if in(a, "-o", "--load", "--push") || strings.HasPrefix(a, "--output") || strings.HasPrefix(a, "--load") ||
+			strings.HasPrefix(a, "--push") {
+			return false // the result must land here, or the registry login lives here
 		}
 	}
 	return true
@@ -418,6 +478,23 @@ func pmHeavy(pm string, args []string) bool {
 	return scriptHeavy(cmd)
 }
 
+// turboHeavy covers `turbo run build test`, `turbo test`, `nx run-many -t test`,
+// `nx test web`: a task graph runner is heavy when it runs a heavy task.
+func turboHeavy(args []string) bool {
+	for _, a := range args {
+		if a == "dev" || a == "serve" || a == "start" || a == "watch" {
+			return false
+		}
+	}
+	for _, a := range args {
+		a = strings.TrimPrefix(strings.TrimPrefix(a, "--target="), "-t=")
+		if scriptHeavy(a) {
+			return true
+		}
+	}
+	return false
+}
+
 func jsToolName(s string) bool { return in(s, "vitest", "jest", "playwright", "tsc", "next") }
 
 // ---------------------------------------------------------------------------
@@ -426,6 +503,7 @@ func jsToolName(s string) bool { return in(s, "vitest", "jest", "playwright", "t
 // redirects, output redirects other than /dev/null).
 
 func lexShell(s string) ([]shellCmd, bool) {
+	rs := []rune(s)
 	var (
 		cmds      []shellCmd
 		words     []string
@@ -433,6 +511,9 @@ func lexShell(s string) ([]shellCmd, bool) {
 		inWord    bool
 		pendingOp string
 		unq       = true // current word has only unquoted characters so far
+		segStart  int    // rune index where the current command's text starts
+		opAt      int    // rune index of the operator being handled
+		newSeg    bool   // the next rune starts a new command's text
 	)
 	endWord := func() {
 		if inWord {
@@ -444,11 +525,13 @@ func lexShell(s string) ([]shellCmd, bool) {
 	sep := func(op string) bool {
 		endWord()
 		if len(words) > 0 {
-			cmds = append(cmds, shellCmd{words: words, op: pendingOp})
+			cmds = append(cmds, shellCmd{words: words, op: pendingOp, raw: strings.TrimSpace(string(rs[segStart:opAt]))})
 			words = nil
 			pendingOp = op
+			newSeg = true
 			return true
 		}
+		newSeg = true
 		if (op == "\n" || op == ";") && (len(cmds) == 0 || pendingOp == "\n" || pendingOp == ";") {
 			if len(cmds) > 0 {
 				pendingOp = op
@@ -457,8 +540,11 @@ func lexShell(s string) ([]shellCmd, bool) {
 		}
 		return false
 	}
-	rs := []rune(s)
 	for i := 0; i < len(rs); i++ {
+		if newSeg {
+			segStart, newSeg = i, false
+		}
+		opAt = i
 		r := rs[i]
 		switch r {
 		case '\'':
@@ -493,6 +579,9 @@ func lexShell(s string) ([]shellCmd, bool) {
 						continue
 					}
 				}
+				if c == '$' && !plainDollar(rs, j, true) {
+					return nil, false
+				}
 				cur.WriteRune(c)
 				j++
 			}
@@ -511,8 +600,16 @@ func lexShell(s string) ([]shellCmd, bool) {
 			}
 			cur.WriteRune(rs[i])
 			inWord, unq = true, false
-		case ' ', '\t', '\r':
+		case ' ', '\t':
 			endWord()
+		case '\r': // a word character to the shell, a separator to a reader
+			return nil, false
+		case '$':
+			if !plainDollar(rs, i, false) {
+				return nil, false
+			}
+			cur.WriteRune(r)
+			inWord = true
 		case '\n':
 			if !sep("\n") {
 				return nil, false
@@ -573,8 +670,11 @@ func lexShell(s string) ([]shellCmd, bool) {
 		}
 	}
 	endWord()
+	if newSeg {
+		segStart = len(rs)
+	}
 	if len(words) > 0 {
-		cmds = append(cmds, shellCmd{words: words, op: pendingOp})
+		cmds = append(cmds, shellCmd{words: words, op: pendingOp, raw: strings.TrimSpace(string(rs[segStart:]))})
 	} else if pendingOp == "&&" || pendingOp == "||" || pendingOp == "|" {
 		return nil, false
 	}
@@ -620,5 +720,34 @@ func redirect(rs []rune, i int) (int, bool) {
 	if string(rs[i:j]) != "/dev/null" {
 		return 0, false
 	}
+	if j < len(rs) && strings.ContainsRune("'\"\\", rs[j]) { // >/dev/null'x' names another file
+		return 0, false
+	}
 	return j - 1, true
+}
+
+var bracedName = regexp.MustCompile(`^\{[A-Za-z_][A-Za-z0-9_]*\}`)
+
+// plainDollar reports whether the '$' at rs[i] is a literal or a plain
+// parameter ($NAME, ${NAME}, $1, $?). Everything else — $'…', $"…", $[…],
+// ${x@P}, ${(e)x}, ${a[i]} — can run code or quote in ways the lexer does
+// not model, in bash or zsh.
+func plainDollar(rs []rune, i int, inDQ bool) bool {
+	if i+1 >= len(rs) {
+		return true
+	}
+	n := rs[i+1]
+	switch {
+	case n == '_' || n >= 'A' && n <= 'Z' || n >= 'a' && n <= 'z' || n >= '0' && n <= '9':
+		return true
+	case strings.ContainsRune("?$!#@*-", n):
+		return true
+	case n == ' ' || n == '\t' || n == '\n':
+		return true
+	case n == '"':
+		return inDQ
+	case n == '{':
+		return bracedName.MatchString(string(rs[i+1:]))
+	}
+	return false
 }

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -40,7 +41,8 @@ func (d *Daemon) handleRun(w http.ResponseWriter, r *http.Request) {
 	if err := brw.Flush(); err != nil {
 		return
 	}
-	d.serveRun(conn, brw.Reader)
+	pid, _ := strconv.Atoi(r.Header.Get("X-Kran-Client-Pid"))
+	d.serveRun(conn, brw.Reader, pid)
 }
 
 // runConn serializes writes to the CLI.
@@ -70,7 +72,7 @@ func (c *runConn) fail(msg, hint string) {
 // serveRun drives one run session: the first frame is submit or reattach;
 // afterwards the job's spool streams to the CLI while the CLI's frames
 // (stdin, resize, signals, local started/exit) flow to the job.
-func (d *Daemon) serveRun(conn net.Conn, br *bufio.Reader) {
+func (d *Daemon) serveRun(conn net.Conn, br *bufio.Reader, clientPID int) {
 	rc := &runConn{conn: conn}
 	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 	t, p, err := proto.ReadFrame(br, nil)
@@ -112,7 +114,7 @@ func (d *Daemon) serveRun(conn net.Conn, br *bufio.Reader) {
 		rc.fail("expected submit or reattach, got "+t.String(), "")
 		return
 	}
-	defer e.detach()
+	defer e.detach(clientPID)
 
 	ctx, cancel := context.WithCancel(d.lifetime())
 	defer cancel()
@@ -125,7 +127,13 @@ func (d *Daemon) serveRun(conn net.Conn, br *bufio.Reader) {
 			rc.fail("read job output: "+err.Error(), "")
 			return
 		}
+		rd.hideLocalOutput = true
 		defer rd.Close()
+		if reattach {
+			// Input sent on the lost session may be gone: ask for it again
+			// (written after the reader's start, so this session sees it).
+			e.cliReattached()
+		}
 		for {
 			ft, fp, err := rd.Next(ctx)
 			if err != nil {
@@ -185,17 +193,23 @@ func (d *Daemon) serveRun(conn net.Conn, br *bufio.Reader) {
 func (d *Daemon) onCLIFrame(ctx context.Context, e *jobEntry, t proto.FrameType, p []byte) bool {
 	switch t {
 	case proto.FrameHeartbeat:
-	case proto.FrameStdin:
-		// Back-pressure: wait while the target is slow to take stdin.
-		for !e.outbox.put(proto.FrameStdin, p) {
+	case proto.FrameStdin, proto.FrameStdinEOF:
+		// kran run keeps to its credit, so this waits only for a target
+		// without flow control.
+		for !e.cliInput(t, p) {
 			select {
 			case <-ctx.Done():
 				return false
 			case <-time.After(50 * time.Millisecond):
 			}
 		}
-	case proto.FrameStdinEOF:
-		e.outbox.put(proto.FrameStdinEOF, nil)
+	case proto.FrameStdinResume:
+		var r proto.StdinResume
+		if json.Unmarshal(p, &r) == nil {
+			e.cliResume(r)
+		}
+	case proto.FrameStdout, proto.FrameStderr:
+		e.appendLocalOutput(t, p)
 	case proto.FrameResize:
 		var tty proto.TTY
 		if json.Unmarshal(p, &tty) == nil {
@@ -233,6 +247,41 @@ func (d *Daemon) onCLIFrame(ctx context.Context, e *jobEntry, t proto.FrameType,
 	}
 	return true
 }
+
+// localHistoryMax caps what the history keeps of one local job's output,
+// like the spool's in-memory tail for remote jobs (spoolMemMax).
+var localHistoryMax int64 = spoolMemMax
+
+// appendLocalOutput records output the CLI of a local job sends (SPEC
+// §8.2: stdout/stderr frames client→daemon). Anything else sending them
+// (a remote job's CLI, a job that already reported its exit) is ignored.
+func (e *jobEntry) appendLocalOutput(t proto.FrameType, p []byte) {
+	e.mu.Lock()
+	ok := e.job.Local && !e.exitReported && !e.finished && !e.localCut
+	room := localHistoryMax - e.localOut
+	if ok {
+		if int64(len(p)) > room {
+			p = p[:max(room, 0)]
+			e.localCut = true
+		}
+		e.localOut += int64(len(p))
+	}
+	cut := e.localCut
+	e.mu.Unlock()
+	if !ok {
+		return
+	}
+	if err := e.spool.appendData(t, p); err != nil {
+		e.d.logf("job %s: %v", e.id, err)
+	}
+	if cut {
+		e.spool.appendData(t, []byte("\n"+historyTruncatedMark+"\n"))
+	}
+}
+
+// historyTruncatedMark is what the history shows where output was dropped
+// (the CLI uses the same words when it could not keep up).
+const historyTruncatedMark = "[kran: output truncated in history]"
 
 // forwardSignal routes a signal from the CLI: to the target once the job
 // stream exists, as a cancel while the job has not started, and not at all
@@ -273,6 +322,7 @@ func (d *Daemon) serveFinished(rc *runConn, ra proto.Reattach) {
 			sp.finish()
 			rd, err := sp.reader(ra.Offset, true)
 			if err == nil {
+				rd.hideLocalOutput = true
 				ctx, cancel := context.WithTimeout(d.lifetime(), time.Minute)
 				for {
 					ft, fp, err := rd.Next(ctx)

@@ -24,6 +24,11 @@ type targetSide struct {
 
 	mu   sync.Mutex
 	jobs map[string]*tjob
+	// persistSeq numbers record snapshots (under mu); writes run outside
+	// mu and skip a snapshot older than the one already written.
+	persistSeq uint64
+	writeMu    sync.Mutex
+	written    uint64
 }
 
 type tjob struct {
@@ -35,13 +40,18 @@ type tjob struct {
 	Argv       []string
 	Slot       *proto.SlotRef
 	manifest   *proto.Manifest
+	blobs      map[string]int64  // manifest file hash → size: what blob.put takes
 	sess       transport.Session // session that admitted it
 	reservedAt time.Time
 	busy       int // in-flight prestart operations (holds the reservation)
-	started    bool
-	ended      bool
-	endedAt    time.Time
-	watching   bool
+	slotOps    int // those of them working in the slot
+	// canceled: the origin gave the job up while an operation was in
+	// flight; the last one to finish releases (or stops) it.
+	canceled bool
+	started  bool
+	ended    bool
+	endedAt  time.Time
+	watching bool
 
 	attachMu sync.Mutex // serializes attaching through execenv
 	procMu   sync.Mutex // guards proc and phase
@@ -49,7 +59,11 @@ type tjob struct {
 
 	phase   proto.Phase
 	phaseCh chan struct{}
-	live    *proto.Resources // sampled every MetricsEvery
+	// in holds the job's input across streams (created by the first one);
+	// startedHere: this daemon started the job, so it saw all its input.
+	in          *stdinPump
+	startedHere bool
+	live        *proto.Resources // sampled every MetricsEvery
 }
 
 type tjobRecord struct {
@@ -83,7 +97,17 @@ func (t *targetSide) persistLocked() {
 		}
 	}
 	b, _ := json.Marshal(recs)
-	go t.d.kvSet(targetJobsKey, string(b))
+	t.persistSeq++
+	seq := t.persistSeq
+	go func() {
+		t.writeMu.Lock()
+		defer t.writeMu.Unlock()
+		if seq < t.written {
+			return // a newer snapshot is already stored
+		}
+		t.d.kvSet(targetJobsKey, string(b))
+		t.written = seq
+	}()
 }
 
 // restore rebuilds the job table after a restart: supervisors kept running
@@ -99,28 +123,20 @@ func (t *targetSide) restore() {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	active := map[string]bool{}
-	held := map[proto.SlotRef]bool{}
-	slotsKnown := true
-	for _, id := range ex.Active() {
-		active[id] = true
-		if r, ok := recs[id]; ok && r.Slot != nil {
-			held[*r.Slot] = true
-		} else {
-			slotsKnown = false
-		}
+	active := ex.Active()
+	live := map[string]bool{}
+	for _, id := range active {
+		live[id] = true
 	}
-	// A job can end between the executor's re-index (which marks its slot
-	// busy again) and this restore: it is not active any more and nobody
-	// would release its slot. Only when every active job's slot is known,
-	// so a stale record can never free a slot in use.
 	for id, r := range recs {
-		if slotsKnown && !active[id] && r.Slot != nil && !held[*r.Slot] {
+		// Ended while the daemon was down: execenv keeps its slot busy
+		// until it is released with the recorded SlotRef.
+		if !live[id] && r.Slot != nil {
 			ex.ReleaseSlot(*r.Slot)
-			t.d.logf("target: released the slot of job %s, which ended during the restart", id)
+			t.d.logf("target: job %s from %s ended while the daemon was down; released its slot", id, r.Origin)
 		}
 	}
-	for _, id := range ex.Active() {
+	for _, id := range active {
 		r := recs[id]
 		j := &tjob{ID: id, Origin: r.Origin, Alloc: r.Alloc, Runtime: r.Runtime, Slot: r.Slot, Owner: r.Owner, Argv: r.Argv,
 			started: true, phaseCh: make(chan struct{}), reservedAt: t.d.now()}
@@ -195,6 +211,9 @@ func (t *targetSide) admit(id, origin string, b admitBody, sess transport.Sessio
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if j := t.jobs[id]; j != nil && !j.ended {
+		if j.Origin != origin { // IDs are not secret; never follow another origin's job
+			return &admitError{codeBusy, fmt.Sprintf("job id %s is already in use on %s by another node; run the job again", id, d.self)}
+		}
 		if j.started {
 			return &admitError{codeJobStarted, fmt.Sprintf("job %s already started on %s", id, d.self)}
 		}
@@ -227,6 +246,21 @@ func runtimeInfo(info proto.NodeInfo, rt proto.RuntimeKind) *proto.Runtime {
 		}
 	}
 	return nil
+}
+
+// cancelLocked drops a reservation the origin gave up. With an operation
+// in flight (slot.acquire, commit, job.start …) the slot is still in use:
+// the operation releases it when it ends (end), or stops the job it
+// started (handleJobStart).
+func (t *targetSide) cancelLocked(j *tjob, why string) {
+	if j.started {
+		return
+	}
+	if j.slotOps > 0 {
+		j.canceled = true
+		return
+	}
+	t.releaseLocked(j, why)
 }
 
 // releaseLocked drops a reservation that never started.
@@ -441,6 +475,9 @@ func (t *targetSide) watch(ctx context.Context, j *tjob) {
 	t.mu.Lock()
 	j.ended = true
 	j.endedAt = t.d.now()
+	if j.in != nil {
+		j.in.close()
+	}
 	slot := j.Slot
 	t.persistLocked()
 	t.mu.Unlock()
@@ -482,4 +519,42 @@ func humanBytes(n int64) string {
 		}
 	}
 	return fmt.Sprintf("%.0f PiB", f/unit)
+}
+
+// inputPump returns the job's input queue, starting its writer on first use.
+func (t *targetSide) inputPump(j *tjob, proc execenv.Process) *stdinPump {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if j.in != nil {
+		return j.in
+	}
+	q := newStdinPump(t.d.t.StdinQueue, j.startedHere)
+	j.in = q
+	if j.ended {
+		q.close()
+		return q
+	}
+	t.d.goLoop(func(ctx context.Context) {
+		w := proc.Stdin()
+		if w == nil {
+			q.close()
+			return
+		}
+		q.run(ctx, w)
+	})
+	return q
+}
+
+// reservations counts admitted jobs that have not started yet (they would
+// not survive a daemon restart).
+func (t *targetSide) reservations() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	n := 0
+	for _, j := range t.jobs {
+		if !j.started && !j.ended {
+			n++
+		}
+	}
+	return n
 }

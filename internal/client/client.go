@@ -32,7 +32,8 @@ type Client interface {
 type RunSession interface {
 	Send(t proto.FrameType, payload []byte) error
 	SendJSON(t proto.FrameType, v any) error
-	// Recv returns the next frame; the payload is valid until the next Recv.
+	// Recv returns the next frame, heartbeats included (they prove the
+	// daemon is alive); the payload is valid until the next Recv.
 	Recv() (proto.FrameType, []byte, error)
 	Close() error
 }

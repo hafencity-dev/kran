@@ -413,6 +413,7 @@ func planToolchains(e *hostEnv, pins map[string]string, node string) (toolPlan, 
 func hostSpecificEnv(k string) bool {
 	switch k {
 	case "PATH", "HOME", "USER", "LOGNAME", "SHELL", "PWD", "OLDPWD", "TMPDIR", "TMP", "TEMP", "DISPLAY",
+		"BASH_ENV", "ENV", // shell startup files: paths on the origin
 		"GOROOT", "GOPATH", "GOCACHE", "GOMODCACHE", "GOTOOLCHAIN", "PNPM_HOME", "npm_config_cache", "npm_config_store_dir":
 		return true
 	}

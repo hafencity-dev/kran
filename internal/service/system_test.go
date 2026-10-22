@@ -227,3 +227,22 @@ func TestNewAutoSelectsInstalledSystemDaemon(t *testing.T) {
 		t.Fatal("an installed system daemon must be managed by default")
 	}
 }
+
+// SPEC §9: jobs never run as root. `sudo kran service install` would bake
+// root into the unit (or run a user agent as root), so it is refused.
+func TestInstallRefusesRoot(t *testing.T) {
+	m, _ := newSystemMgr(t, &fakeRunner{}, 0, func(o *Options) { o.User = "root" })
+	if _, err := m.Install(context.Background()); err == nil || !strings.Contains(err.Error(), "without sudo") {
+		t.Fatalf("system daemon as root: %v", err)
+	}
+	a, _ := newMgr(t, "darwin", &fakeRunner{}, nil, func(o *Options) { o.UID = 0 })
+	if _, err := a.Install(context.Background()); err == nil || !strings.Contains(err.Error(), "without sudo") {
+		t.Fatalf("launch agent as root: %v", err)
+	}
+	if err := refuseRoot(Options{GOOS: "linux", UID: 0}); err == nil {
+		t.Fatal("systemd user unit as root")
+	}
+	if err := refuseRoot(Options{GOOS: "linux", UID: 1000}); err != nil {
+		t.Fatal(err)
+	}
+}

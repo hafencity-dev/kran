@@ -21,6 +21,9 @@ const noGUIMessage = "There is no GUI login session on this Mac, so a per-user l
 	"To keep it running permanently, run `kran service install --system` (asks for your password once)."
 
 func (a *App) serviceManagerFor(system bool) (service.Manager, error) {
+	if a.ServiceManager != nil {
+		return a.ServiceManager(system)
+	}
 	self, err := a.Self()
 	if err != nil {
 		return nil, &ExitError{Code: 1, Msg: "cannot find the kran binary: " + err.Error()}
@@ -82,13 +85,7 @@ func (a *App) serviceCommand() *cobra.Command {
 			fmt.Fprintln(a.Out, "service removed")
 			return nil
 		}),
-		simple("start", "Start the service", func(ctx context.Context, m service.Manager) error {
-			if err := m.Start(ctx); err != nil {
-				return err
-			}
-			fmt.Fprintln(a.Out, "service started")
-			return nil
-		}),
+		a.serviceStartCommand(),
 		simple("stop", "Stop the service", func(ctx context.Context, m service.Manager) error {
 			if err := m.Stop(ctx); err != nil {
 				return err
@@ -107,9 +104,15 @@ func (a *App) serviceCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			release, err := a.handOver(cmd.Context(), m, force)
+			if err != nil {
+				return &ExitError{Code: 1, Msg: err.Error()}
+			}
+			defer release()
 			if err := m.Restart(cmd.Context(), service.RestartOptions{Force: force, Idle: a.idleCheck}); err != nil {
 				return &ExitError{Code: 1, Msg: err.Error()}
 			}
+			a.waitDaemon(cmd.Context(), 15*time.Second)
 			fmt.Fprintln(a.Out, "service restarted")
 			return nil
 		},
@@ -119,7 +122,7 @@ func (a *App) serviceCommand() *cobra.Command {
 
 	var asJSON bool
 	status := &cobra.Command{
-		Use: "status", Short: "Show whether the service is installed and running", Args: cobra.NoArgs,
+		Use: "status", Short: "Show whether the service is installed and running (exit 3 if not running)", Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			m, err := a.serviceManager()
 			if err != nil {
@@ -136,11 +139,11 @@ func (a *App) serviceCommand() *cobra.Command {
 			case !st.Installed && st.NoGUI:
 				fmt.Fprintln(a.Out, "no background service installed: the daemon starts on demand.")
 			case !st.Installed:
-				fmt.Fprintf(a.Out, "not installed (%s). Install it with `kran service install`.\n", st.Manager)
+				fmt.Fprintf(a.Out, "not installed (%s).\n", st.Manager)
 			case st.Running:
 				fmt.Fprintf(a.Out, "running as %s (pid %d), unit %s\n", modeLabel(st.Mode, st.Manager), st.PID, st.UnitPath)
 			default:
-				fmt.Fprintf(a.Out, "installed under %s but not running. Start it with `kran service start`.\n", st.Manager)
+				fmt.Fprintf(a.Out, "installed under %s but not running.\n", st.Manager)
 			}
 			for _, adv := range st.Advice {
 				fmt.Fprintln(a.Out, adv)
@@ -197,9 +200,9 @@ func (a *App) waitDaemon(ctx context.Context, d time.Duration) (*proto.VersionIn
 var _ client.Client
 
 func (a *App) serviceInstallCommand() *cobra.Command {
-	var system, dry bool
+	var system, dry, force bool
 	cmd := &cobra.Command{
-		Use:   "install [--system] [--dry-run]",
+		Use:   "install [--system] [--dry-run] [--force]",
 		Short: "Install and start the service (safe to repeat)",
 		Long: `Install the kran daemon as a background service: a systemd user unit on Linux,
 a launchd agent on macOS.
@@ -234,10 +237,16 @@ where launch agents cannot load. It needs sudo once. On Linux,
 				!service.HasGUISession(ctx, service.Options{}) {
 				return &ExitError{Code: 1, Msg: noGUIMessage}
 			}
+			release, err := a.handOver(ctx, m, force)
+			if err != nil {
+				return &ExitError{Code: 1, Msg: err.Error()}
+			}
+			defer release()
 			changed, err := m.Install(ctx)
 			if err != nil {
 				return &ExitError{Code: 1, Msg: err.Error()}
 			}
+			a.waitDaemon(ctx, 15*time.Second)
 			if changed {
 				fmt.Fprintln(a.Out, "service installed and started")
 			} else {
@@ -249,6 +258,32 @@ where launch agents cannot load. It needs sudo once. On Linux,
 	}
 	cmd.Flags().BoolVar(&system, "system", false, "macOS: install a system launch daemon (for Macs without a GUI login; needs sudo)")
 	cmd.Flags().BoolVar(&dry, "dry-run", false, "print what would be installed and run, change nothing")
+	cmd.Flags().BoolVar(&force, "force", false, "stop a daemon the service does not run right away instead of when its jobs are done")
+	return cmd
+}
+
+func (a *App) serviceStartCommand() *cobra.Command {
+	var force bool
+	cmd := &cobra.Command{Use: "start [--force]", Short: "Start the service", Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			m, err := a.serviceManager()
+			if err != nil {
+				return err
+			}
+			release, err := a.handOver(ctx, m, force)
+			if err != nil {
+				return &ExitError{Code: 1, Msg: err.Error()}
+			}
+			defer release()
+			if err := m.Start(ctx); err != nil {
+				return &ExitError{Code: 1, Msg: err.Error()}
+			}
+			a.waitDaemon(ctx, 15*time.Second)
+			fmt.Fprintln(a.Out, "service started")
+			return nil
+		}}
+	cmd.Flags().BoolVar(&force, "force", false, "stop a daemon the service does not run right away instead of when its jobs are done")
 	return cmd
 }
 

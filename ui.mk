@@ -1,10 +1,7 @@
 # UI targets (owner D). Included from the root Makefile: include ui.mk
-# Standalone: make -f ui.mk ui
-.PHONY: ui ui-dev ui-mock ui-shots
+.PHONY: ui-dev ui-mock ui-shots
 
-# Build the dashboard into internal/ui/dist (committed, embedded by go build).
-ui:
-	cd web && npm ci --no-audit --no-fund && npm run build
+# `make ui` (build the dashboard into internal/ui/dist) lives in the root Makefile.
 
 # Mock daemon on :7271 (serves the API and the built UI), then Vite on :5173.
 ui-mock:

@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path"
-	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -19,6 +18,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/hafencity-dev/kran/internal/dockercli"
 	"github.com/hafencity-dev/kran/internal/proto"
 	"github.com/hafencity-dev/kran/internal/version"
 )
@@ -62,23 +62,7 @@ func (m *manager) containerSetting() string {
 
 // findDockerCLI looks on the login PATH, then where Docker Desktop, Colima,
 // OrbStack, Rancher Desktop and Homebrew put it.
-func findDockerCLI(path, home string) string {
-	if p, err := lookPathEnv("docker", path, "/"); err == nil {
-		return p
-	}
-	cands := []string{"/usr/local/bin/docker", "/opt/homebrew/bin/docker", "/usr/bin/docker",
-		"/Applications/Docker.app/Contents/Resources/bin/docker"}
-	if home != "" {
-		cands = append(cands, filepath.Join(home, ".orbstack", "bin", "docker"), filepath.Join(home, ".rd", "bin", "docker"),
-			filepath.Join(home, ".docker", "bin", "docker"))
-	}
-	for _, c := range cands {
-		if checkExecutable(c) == nil {
-			return c
-		}
-	}
-	return ""
-}
+func findDockerCLI(path, home string) string { return dockercli.Find(path, home) }
 
 func (m *manager) probeDocker(ctx context.Context) (*dockerEnv, string) {
 	if m.containerSetting() == "off" {
@@ -97,19 +81,11 @@ func (m *manager) probeDocker(ctx context.Context) (*dockerEnv, string) {
 		base = append(base, "DOCKER_CONFIG="+v)
 	}
 	host := os.Getenv("DOCKER_HOST")
+	ctxHost := ""
 	if host == "" {
-		cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		cmd := exec.CommandContext(cctx, cli, "context", "inspect", "--format", "{{.Endpoints.docker.Host}}")
-		cmd.Env = base
-		out, err := cmd.Output()
-		cancel()
-		if err == nil {
-			host = strings.TrimSpace(string(out))
-		}
+		ctxHost = dockercli.ContextHost(ctx, cli, base)
 	}
-	if host == "" {
-		host = "unix:///var/run/docker.sock"
-	}
+	host = dockercli.Endpoint(host, ctxHost, he.home, os.Getenv("XDG_RUNTIME_DIR"), nil)
 	dk := &dockerEnv{cli: cli, host: host, cliEnv: append(base, "DOCKER_HOST="+host)}
 	sock, ok := strings.CutPrefix(host, "unix://")
 	if !ok {
@@ -250,41 +226,6 @@ func (m *manager) ensureContainerReady(ctx context.Context, onPhase func(proto.P
 	return nil
 }
 
-func (m *manager) ensureImage(ctx context.Context, dk *dockerEnv, onPhase func(proto.Phase)) error {
-	tag := m.imageTag()
-	want := hashString(m.dockerfile())[:16]
-	have := func() bool {
-		out, err := dk.run(ctx, nil, "image", "inspect", "--format", `{{index .Config.Labels "kran.dockerfile"}}`, tag)
-		return err == nil && strings.TrimSpace(string(out)) == want
-	}
-	if have() {
-		return nil
-	}
-	// One build at a time per node, also across daemon restarts and tests.
-	lock, err := os.OpenFile(filepath.Join(m.l.state, "runner-image.lock"), os.O_RDWR|os.O_CREATE, 0o600)
-	if err != nil {
-		return fmt.Errorf("image lock: %w", err)
-	}
-	defer lock.Close()
-	if err := flockCtx(ctx, lock); err != nil {
-		return err
-	}
-	defer unix.Flock(int(lock.Fd()), unix.LOCK_UN)
-	if have() {
-		return nil
-	}
-	if onPhase != nil {
-		onPhase(proto.Phase{State: proto.JobSetup, Message: fmt.Sprintf("building the %s image on %s (first use only, takes a few minutes)", tag, m.opts.NodeName)})
-	}
-	m.logf("building %s", tag)
-	_, err = dk.run(ctx, []byte(m.dockerfile()), "build", "--quiet", "--tag", tag,
-		"--label", "kran.dockerfile="+want, "--label", "kran.ns="+m.ns, "-")
-	if err != nil {
-		return fmt.Errorf("%w: building the runner image failed: %v", ErrRuntimeUnavailable, err)
-	}
-	return nil
-}
-
 func flockCtx(ctx context.Context, f *os.File) error {
 	for {
 		err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
@@ -336,14 +277,18 @@ func (m *manager) prepareVolumes(ctx context.Context, dk *dockerEnv) error {
 }
 
 // ensureSync keeps the long-lived helper container that writes slots into
-// the kran-slots volume (macOS: the volume lives inside the Docker VM).
+// the kran-slots volume (macOS: the volume lives inside the Docker VM). The
+// helper binary lives in that container's own root-owned file system, not
+// in a volume: job containers mount the volumes, and a job that replaced the
+// helper would write every repo's slots. (A job given the Docker socket can
+// still reach it; SPEC §9.)
 func (m *manager) ensureSync(ctx context.Context, dk *dockerEnv) error {
 	name := m.syncName()
 	sum, err := fileHash(m.opts.LinuxBinary)
 	if err != nil {
 		return fmt.Errorf("%w: Linux kran binary: %v", ErrRuntimeUnavailable, err)
 	}
-	bin := fmt.Sprintf("%s/bin/kran-%s", ctrTools, sum[:16])
+	bin := "/usr/local/bin/kran-sync-" + sum[:16]
 	out, err := dk.run(ctx, nil, "inspect", "--format", `{{.State.Running}} {{.Config.Image}}`, name)
 	running := err == nil && strings.HasPrefix(string(out), "true ") && strings.TrimSpace(strings.TrimPrefix(string(out), "true ")) == m.imageTag()
 	if !running {
@@ -352,7 +297,6 @@ func (m *manager) ensureSync(ctx context.Context, dk *dockerEnv) error {
 			"--restart", "unless-stopped", "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
 			"--network", "none",
 			"--mount", "type=volume,src="+m.volume("slots")+",dst="+ctrSlots,
-			"--mount", "type=volume,src="+m.volume("tools")+",dst="+ctrTools,
 			"--entrypoint", "/bin/sh", m.imageTag(), "-c", "trap 'exit 0' TERM INT; while :; do sleep 3600 & wait $!; done")
 		if err != nil {
 			return fmt.Errorf("%w: starting the sync helper: %v", ErrRuntimeUnavailable, err)
@@ -365,6 +309,9 @@ func (m *manager) ensureSync(ctx context.Context, dk *dockerEnv) error {
 	if _, err := dk.run(ctx, nil, "exec", name, "test", "-x", bin); err != nil {
 		if _, err := dk.run(ctx, nil, "cp", m.opts.LinuxBinary, name+":"+bin); err != nil {
 			return fmt.Errorf("%w: copying the Linux kran binary: %v", ErrRuntimeUnavailable, err)
+		}
+		if _, err := dk.run(ctx, nil, "exec", "--user", "0", name, "chown", "0:0", bin); err != nil {
+			return fmt.Errorf("%w: installing the Linux kran binary: %v", ErrRuntimeUnavailable, err)
 		}
 		dk.run(ctx, nil, "exec", "--user", "0", name, "chmod", "0755", bin)
 	}
@@ -421,7 +368,8 @@ func (m *manager) volumeApply(ctx context.Context, req applyReq, open blobOpener
 
 // reservedMount reports container paths a workspace must not shadow.
 func reservedMount(root string) bool {
-	if root == "/" || !path.IsAbs(root) {
+	// docker reads --mount as CSV, later keys winning: ",src=/" would add one.
+	if root == "/" || !path.IsAbs(root) || strings.ContainsAny(root, ",\"\n\r\x00") {
 		return true
 	}
 	for _, p := range []string{"/bin", "/boot", "/dev", "/etc", "/lib", "/lib64", "/proc", "/sbin", "/sys", "/usr", "/kran", "/var/run", "/run"} {
@@ -528,13 +476,18 @@ func (m *manager) containerSpec(ctx context.Context, spec *superSpec, req *Start
 		a := []string{"run", "--name", name, "--label", "kran.job=" + req.Spec.ID, "--label", "kran.ns=" + m.ns,
 			"--init", "--network", "host",
 			"--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
-			"-v", "/var/run/docker.sock:/var/run/docker.sock",
 			"--mount", slotMount,
 			"--mount", "type=volume,src=" + m.volume("cache") + ",dst=" + ctrCache,
 			"--mount", "type=volume,src=" + m.volume("tools") + ",dst=" + ctrTools,
 		}
-		if dk.sockGID > 0 {
-			a = append(a, "--group-add", strconv.Itoa(dk.sockGID))
+		// The Docker socket lets testcontainers and docker compose work in
+		// jobs; it is root-equivalent on rootful Docker (SPEC §9), so a
+		// project can opt out.
+		if !req.Spec.Req.NoDocker {
+			a = append(a, "-v", "/var/run/docker.sock:/var/run/docker.sock")
+			if dk.sockGID > 0 {
+				a = append(a, "--group-add", strconv.Itoa(dk.sockGID))
+			}
 		}
 		if spec.MemMax > 0 {
 			a = append(a, "--memory", strconv.FormatInt(spec.MemMax, 10), "--memory-swap", strconv.FormatInt(spec.MemMax, 10))

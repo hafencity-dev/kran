@@ -3,6 +3,7 @@ package daemon
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -28,7 +29,16 @@ type spool struct {
 	finished bool
 	notify   chan struct{}
 	err      error // first write error (disk full…)
+	// After a write error the spool continues in memory: the file holds
+	// the first memBase bytes, mem the frames after it. The run session
+	// must keep working on a full disk (never worse than local).
+	memBase int64
+	mem     []byte
 }
+
+// spoolMemMax bounds the in-memory tail; beyond it output frames are
+// dropped (control frames, e.g. the exit, are always kept).
+const spoolMemMax = 64 << 20
 
 func isOutput(t proto.FrameType) bool { return t == proto.FrameStdout || t == proto.FrameStderr }
 
@@ -84,22 +94,28 @@ func (s *spool) append(t proto.FrameType, payload []byte) error {
 	if s.finished {
 		return errors.New("spool finished")
 	}
-	if s.err != nil {
-		return s.err
-	}
 	var hdr [5]byte
 	hdr[0] = byte(t)
 	hdr[1] = byte(len(payload) >> 24)
 	hdr[2] = byte(len(payload) >> 16)
 	hdr[3] = byte(len(payload) >> 8)
 	hdr[4] = byte(len(payload))
-	if _, err := s.f.Write(append(hdr[:], payload...)); err != nil {
-		// A torn frame would corrupt the stream; cut back to the last
-		// complete one and remember the failure.
-		s.f.Truncate(s.size)
-		s.f.Seek(s.size, io.SeekStart)
-		s.err = fmt.Errorf("write output spool: %w", err)
-		return s.err
+	frame := append(hdr[:], payload...)
+	if s.err == nil {
+		if _, err := s.f.Write(frame); err != nil {
+			// A torn frame would corrupt the stream; cut back to the last
+			// complete one and continue in memory.
+			s.f.Truncate(s.size)
+			s.f.Seek(s.size, io.SeekStart)
+			s.err = fmt.Errorf("write output spool: %w", err)
+			s.memBase = s.size
+		}
+	}
+	if s.err != nil {
+		if isOutput(t) && len(s.mem)+len(frame) > spoolMemMax {
+			return s.err
+		}
+		s.mem = append(s.mem, frame...)
 	}
 	s.size += 5 + int64(len(payload))
 	if isOutput(t) {
@@ -151,6 +167,22 @@ func (s *spool) state() (size int64, finished bool, notify <-chan struct{}) {
 	return s.size, s.finished, s.notify
 }
 
+// memFrame returns the in-memory frame at position pos, if pos is past the
+// file part.
+func (s *spool) memFrame(pos int64) (proto.FrameType, []byte, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err == nil || pos < s.memBase {
+		return 0, nil, false
+	}
+	i := pos - s.memBase
+	if i+5 > int64(len(s.mem)) {
+		return 0, nil, false
+	}
+	n := int64(s.mem[i+1])<<24 | int64(s.mem[i+2])<<16 | int64(s.mem[i+3])<<8 | int64(s.mem[i+4])
+	return proto.FrameType(s.mem[i]), append([]byte(nil), s.mem[i+5:i+5+n]...), true
+}
+
 func (s *spool) close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -169,6 +201,11 @@ type spoolReader struct {
 	// seen by a reattaching client and are skipped (exit is never skipped).
 	skipCtlBefore int64
 	buf           []byte
+	// hideLocalOutput: run sessions do not get a local job's output back
+	// (its CLI sent it for the history; the terminal already has it).
+	// Output after a decision{mode:"local"} is skipped but still counted.
+	hideLocalOutput bool
+	localMode       bool
 }
 
 // reader returns a reader delivering output from offset. With reattach,
@@ -213,17 +250,27 @@ func (r *spoolReader) next(ctx context.Context, wait bool) (proto.FrameType, []b
 				return 0, nil, ctx.Err()
 			}
 		}
-		t, p, err := proto.ReadFrame(r.br, r.buf)
-		if err != nil {
-			return 0, nil, fmt.Errorf("read spool: %w", err)
+		t, p, inMem := r.s.memFrame(r.pos)
+		if !inMem {
+			var err error
+			t, p, err = proto.ReadFrame(r.br, r.buf)
+			if err != nil {
+				return 0, nil, fmt.Errorf("read spool: %w", err)
+			}
+			r.buf = p[:0]
 		}
-		r.buf = p[:0]
 		framePos := r.pos
 		r.pos += 5 + int64(len(p))
+		if t == proto.FrameDecision && r.hideLocalOutput {
+			var dc proto.Decision
+			if json.Unmarshal(p, &dc) == nil {
+				r.localMode = dc.Mode == "local"
+			}
+		}
 		if isOutput(t) {
 			start := r.outPos
 			r.outPos += int64(len(p))
-			if r.outPos <= r.offset {
+			if r.outPos <= r.offset || r.localMode {
 				continue
 			}
 			if start < r.offset {

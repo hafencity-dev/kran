@@ -253,11 +253,21 @@ func Link(ctx context.Context, o Options) (*Result, error) {
 		return nil, err
 	}
 	changed = changed || ch
+	// A new binary on a machine that already runs kran: its daemon still
+	// runs the old one until the service restarts (after running jobs end).
+	if ch && info.ID != "" && info.PubKey != "" {
+		o.progress("restart", "Restarting kran on "+o.Host)
+		if _, err := c.kran(ctx, kranPath, nil, "service", "restart"); err != nil {
+			res.Notes = append(res.Notes, fmt.Sprintf("updated kran on %s, but its daemon still runs the old version: %v (run `kran service restart` there)", o.Host, err))
+		}
+	}
 
 	// --- first-time setup of the remote (node id, key, service)
 	if info.ID == "" || info.PubKey == "" {
 		o.progress("setup", "Setting up kran on "+o.Host)
-		args := []string{"setup", "--yes", "--quiet"}
+		// The remote's coding agents are its owner's business: link never
+		// changes them (they can run `kran agents install` there).
+		args := []string{"setup", "--yes", "--quiet", "--no-agents", "--no-link"}
 		if o.Name != "" {
 			args = append(args, "--name", o.Name)
 		}
@@ -300,6 +310,9 @@ func Link(ctx context.Context, o Options) (*Result, error) {
 	}
 	remoteAddrs := dedupe(append([]string{net.JoinHostPort(g.Hostname, strconv.Itoa(g.Port))}, info.Addresses...))
 	hostKey := pickHostKey(ctx, c, g, info)
+	if hostKey == "" {
+		return nil, fmt.Errorf("could not learn %s's ssh host key in a verified way (no readable /etc/ssh/ssh_host_*_key.pub there and no known_hosts entry for %s). Run `ssh %s` once to record the key, then run kran link again", o.Host, g.Hostname, o.Host)
+	}
 	selfAddrs := o.SelfAddresses
 	if len(selfAddrs) == 0 {
 		selfAddrs = localAddresses()
@@ -311,7 +324,7 @@ func Link(ctx context.Context, o Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if ch, err := EnsureAuthorizedKey(ak, AuthorizedKeysLineEnv(o.SelfPath, info.PubKey, o.Tag, InstallEnv())); err != nil {
+	if ch, err := EnsureAuthorizedKey(ak, PeerKeyLineEnv(o.SelfPath, peerName, info.PubKey, o.Tag, InstallEnv())); err != nil {
 		return nil, err
 	} else if ch {
 		changed = true
@@ -345,15 +358,6 @@ func Link(ctx context.Context, o Options) (*Result, error) {
 	default:
 		return nil, noConnectionError(peerName, outRes, probe, pErr)
 	}
-	if hostKey == "" { // trust-on-first-use of what the server presented, only after auth succeeded
-		for _, r := range outRes {
-			if r.OK && r.HostKey != "" {
-				hostKey = r.HostKey
-				break
-			}
-		}
-	}
-
 	// --- record
 	preferred := ""
 	if best, ok := fastestOK(outRes); ok {
@@ -504,8 +508,9 @@ func noConnectionError(peer string, out []ProbeResult, probe ProbeResponse, pErr
 }
 
 // pickHostKey chooses the key to pin: what the remote's own sshd reports
-// (learned over the authenticated ssh channel), then known_hosts, then
-// ssh-keyscan. Empty means "pin the key presented on first verified use".
+// (learned over the ssh channel known_hosts verified), then known_hosts.
+// Empty means none was found; ssh-keyscan or the key a kran handshake
+// presents are never trusted, since a man in the middle answers those.
 func pickHostKey(ctx context.Context, c *sshClient, g sshResolved, info *Info) string {
 	if info.HostKey != "" {
 		return info.HostKey
@@ -516,14 +521,6 @@ func pickHostKey(ctx context.Context, c *sshClient, g sshResolved, info *Info) s
 	}
 	if k, err := HostKeyFromKnownHosts(name, g.Port); err == nil {
 		return k
-	}
-	out, err := c.r.Run(ctx, Cmd{Name: "ssh-keyscan", Args: []string{"-t", "ed25519", "-p", strconv.Itoa(g.Port), g.Hostname}})
-	if err == nil {
-		for _, ln := range strings.Split(string(out.Stdout), "\n") {
-			if f := strings.Fields(ln); len(f) >= 3 && !strings.HasPrefix(f[0], "#") && isKeyType(f[1]) {
-				return f[1] + " " + f[2]
-			}
-		}
 	}
 	return ""
 }

@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -31,7 +30,7 @@ func realCluster(t *testing.T) (*cluster, *testNode, *testNode) {
 func TestRealSchedulerPinnedRemoteAndLocal(t *testing.T) {
 	_, a, b := realCluster(t)
 	ws := workspaceDir(t, map[string]string{"f": "real\n"})
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := testContext(30 * time.Second)
 	defer cancel()
 
 	spec := shSpec(ws, "cat f; exit 5")
@@ -63,7 +62,7 @@ func TestRealSchedulerRemoteFailures(t *testing.T) {
 	b.exec.startErr = errors.New("runtime broken")
 	b.exec.mu.Unlock()
 	ws := workspaceDir(t, map[string]string{"f": "x"})
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := testContext(30 * time.Second)
 	defer cancel()
 
 	// --remote: no fallback, exit 125 with the scheduler's reason.

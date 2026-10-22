@@ -48,6 +48,9 @@ type peer struct {
 	degradedUntil time.Time
 	changed       chan struct{} // closed when sessions change
 	lastSig       string        // last published status signature
+	clock         clockSample   // last offset measurement (zero: none)
+	clockAt       time.Time
+	clockBusy     bool
 }
 
 var errIncompatible = errors.New("incompatible kran version")
@@ -66,6 +69,7 @@ func (m *peerManager) run(ctx context.Context) {
 	}
 	t := time.NewTicker(m.d.t.PeerPoll)
 	defer t.Stop()
+	seen := ""
 	for {
 		select {
 		case <-ctx.Done():
@@ -73,11 +77,18 @@ func (m *peerManager) run(ctx context.Context) {
 			return
 		case <-t.C:
 		}
+		// Apply a change once the file stood still for a poll: a writer
+		// that truncates and then writes (an editor, a non-atomic tool)
+		// must not unlink every peer for a moment.
 		if st := m.d.deps.Peers.Stamp(); st != m.stamp {
-			m.reload()
+			if st == seen {
+				m.reload()
+			}
+			seen = st
 		}
 		for _, p := range m.list() {
 			p.push(false)
+			p.maybeMeasureClock()
 		}
 	}
 }
@@ -179,6 +190,22 @@ func (m *peerManager) get(name string) *peer {
 	return m.peers[name]
 }
 
+// linkedName maps a hello's node name or ID to the name the peer is linked
+// under in peers.toml ("" when it is not linked).
+func (m *peerManager) linkedName(name, id string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if p := m.peers[name]; p != nil {
+		return p.cfg.Name
+	}
+	for _, p := range m.peers {
+		if id != "" && p.cfg.ID == id {
+			return p.cfg.Name
+		}
+	}
+	return ""
+}
+
 func (m *peerManager) list() []*peer {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -264,7 +291,9 @@ func (m *peerManager) attachInbound(name string, s transport.Session) {
 			p.notifyLocked()
 		}
 		p.mu.Unlock()
-		p.push(true)
+		if p.ctx.Err() == nil { // an unlinked peer must not reappear
+			p.push(true)
+		}
 	}()
 }
 
@@ -638,6 +667,10 @@ func (p *peer) nodeState() proto.NodeState {
 		}
 	}
 	ns.Link = proto.LinkInfo{Direction: p.cfg.Direction, BandwidthBps: p.bandwidth, Connected: s != nil}
+	if s != nil && p.clock.rtt > 0 {
+		ns.Link.ClockOffsetMillis = float64(p.clock.offset.Microseconds()) / 1000
+		ns.Link.ClockRTTMillis = float64(p.clock.rtt.Microseconds()) / 1000
+	}
 	if s != nil {
 		ns.Link.Address = s.RemoteAddr()
 		ns.Link.RTTMillis = float64(s.RTT().Microseconds()) / 1000
@@ -718,11 +751,15 @@ func (d *Daemon) applyRemoteLive(node string, allocs []allocInfo) {
 			continue
 		}
 		live := *a.Live
-		d.deps.Sched.UpdateJobUsage(a.JobID, live)
 		e.mu.Lock()
 		same := e.job.Live != nil && *e.job.Live == live
-		running := e.job.State == proto.JobRunning && e.job.Node == node
+		onNode := e.job.Node == node
+		running := e.job.State == proto.JobRunning && onNode
 		e.mu.Unlock()
+		if !onNode { // only the job's own node reports its usage
+			continue
+		}
+		d.deps.Sched.UpdateJobUsage(a.JobID, live)
 		if running && !same {
 			e.update(func(j *proto.Job) { j.Live = &live })
 		}

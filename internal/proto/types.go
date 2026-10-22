@@ -59,10 +59,10 @@ type NodeInfo struct {
 }
 
 type GPU struct {
-	Vendor  string `json:"vendor"` // nvidia | apple | amd
-	Model   string `json:"model"`
-	MemTotal int64 `json:"mem_total,omitempty"` // 0 when unified with system memory
-	Unified bool   `json:"unified"`             // shares system memory (GB10, Apple)
+	Vendor   string `json:"vendor"` // nvidia | apple | amd
+	Model    string `json:"model"`
+	MemTotal int64  `json:"mem_total,omitempty"` // 0 when unified with system memory
+	Unified  bool   `json:"unified"`             // shares system memory (GB10, Apple)
 }
 
 // Runtime is one way a node can execute jobs.
@@ -79,25 +79,28 @@ type Runtime struct {
 	// Toolchains found on this runtime, e.g. {"go":"1.25.10","node":"24.8.0","mise":"2026.10.1"}.
 	Toolchains map[string]string `json:"toolchains,omitempty"`
 	Docker     bool              `json:"docker"` // jobs can reach a Docker daemon
+	// added by P1: the container runtime's image is not built yet; the
+	// first container job builds it (about 30 s) before it can start.
+	FirstUse bool `json:"first_use,omitempty"`
 }
 
 // NodeMetrics are live measurements (sampled every 2 s, published every 2 s).
 type NodeMetrics struct {
-	Time        time.Time `json:"time"`
-	Load1       float64   `json:"load1"`
-	CPUBusy     float64   `json:"cpu_busy"`               // 0..1 over the sample window, all CPUs
-	CPUPressure float64   `json:"cpu_pressure,omitempty"` // PSI some avg10 (Linux), 0..100
-	MemUsed     int64     `json:"mem_used"`
-	MemAvailable int64    `json:"mem_available"`
-	MemPressure float64   `json:"mem_pressure,omitempty"` // PSI some avg10 (Linux) / memorystatus level mapped to 0..100 (macOS)
-	SwapUsed    int64     `json:"swap_used"`
-	SwapTotal   int64     `json:"swap_total"`
-	IOPressure  float64   `json:"io_pressure,omitempty"` // PSI some avg10 (Linux)
-	DiskFree    int64     `json:"disk_free"`
-	GPUUtil     float64   `json:"gpu_util,omitempty"` // 0..1
-	GPUMemUsed  int64     `json:"gpu_mem_used,omitempty"`
-	NetRxBps    float64   `json:"net_rx_bps"`
-	NetTxBps    float64   `json:"net_tx_bps"`
+	Time         time.Time `json:"time"`
+	Load1        float64   `json:"load1"`
+	CPUBusy      float64   `json:"cpu_busy"`               // 0..1 over the sample window, all CPUs
+	CPUPressure  float64   `json:"cpu_pressure,omitempty"` // PSI some avg10 (Linux), 0..100
+	MemUsed      int64     `json:"mem_used"`
+	MemAvailable int64     `json:"mem_available"`
+	MemPressure  float64   `json:"mem_pressure,omitempty"` // PSI some avg10 (Linux) / memorystatus level mapped to 0..100 (macOS)
+	SwapUsed     int64     `json:"swap_used"`
+	SwapTotal    int64     `json:"swap_total"`
+	IOPressure   float64   `json:"io_pressure,omitempty"` // PSI some avg10 (Linux)
+	DiskFree     int64     `json:"disk_free"`
+	GPUUtil      float64   `json:"gpu_util,omitempty"` // 0..1
+	GPUMemUsed   int64     `json:"gpu_mem_used,omitempty"`
+	NetRxBps     float64   `json:"net_rx_bps"`
+	NetTxBps     float64   `json:"net_tx_bps"`
 	// Per-runtime live availability (container runtime on macOS reflects the VM).
 	Runtimes map[RuntimeKind]RuntimeMetrics `json:"runtimes,omitempty"`
 }
@@ -115,19 +118,19 @@ type Resources struct {
 
 // NodeState is everything the UI and scheduler know about a node.
 type NodeState struct {
-	Info     NodeInfo    `json:"info"`
-	Metrics  NodeMetrics `json:"metrics"`
-	Status   NodeStatus  `json:"status"`
-	Reason   string      `json:"reason,omitempty"`
-	Self     bool        `json:"self"`               // this daemon's own node
-	Link     LinkInfo    `json:"link"`               // zero for Self
-	Capacity Resources   `json:"capacity"`           // schedulable after reserve
-	Reserve  Resources   `json:"reserve"`            // owner headroom
-	Allocated Resources  `json:"allocated"`          // Σ admitted kran jobs
-	Free     Resources   `json:"free"`               // what the scheduler would admit now
-	Running  int         `json:"running"`            // kran jobs running here
-	Accepts  bool        `json:"accepts"`            // accept.enabled
-	LastSeen time.Time   `json:"last_seen,omitempty"`
+	Info      NodeInfo    `json:"info"`
+	Metrics   NodeMetrics `json:"metrics"`
+	Status    NodeStatus  `json:"status"`
+	Reason    string      `json:"reason,omitempty"`
+	Self      bool        `json:"self"`      // this daemon's own node
+	Link      LinkInfo    `json:"link"`      // zero for Self
+	Capacity  Resources   `json:"capacity"`  // schedulable after reserve
+	Reserve   Resources   `json:"reserve"`   // owner headroom
+	Allocated Resources   `json:"allocated"` // Σ admitted kran jobs
+	Free      Resources   `json:"free"`      // what the scheduler would admit now
+	Running   int         `json:"running"`   // kran jobs running here
+	Accepts   bool        `json:"accepts"`   // accept.enabled
+	LastSeen  time.Time   `json:"last_seen,omitempty"`
 	// added by C: config accept.max_jobs (0 = unlimited) so origins
 	// respect a peer's job limit when placing.
 	MaxJobs int `json:"max_jobs,omitempty"`
@@ -146,6 +149,11 @@ type LinkInfo struct {
 	// BandwidthBps is the EWMA of measured upload throughput to this node.
 	BandwidthBps float64 `json:"bandwidth_bps,omitempty"`
 	Connected    bool    `json:"connected"`
+	// added by A: the node's clock minus this node's, measured over the
+	// link (midpoint of a request, fastest of several samples); the error is
+	// at most ClockRTTMillis/2. ClockRTTMillis is 0 when not measured.
+	ClockOffsetMillis float64 `json:"clock_offset_ms,omitempty"`
+	ClockRTTMillis    float64 `json:"clock_rtt_ms,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -216,18 +224,22 @@ const (
 )
 
 type Requirements struct {
-	CPUs     float64  `json:"cpus,omitempty"` // explicit --cpus (0 = estimate)
-	Mem      int64    `json:"mem,omitempty"`  // explicit --mem (0 = estimate)
-	GPU      bool     `json:"gpu,omitempty"`
-	OS       OSPolicy `json:"os"`
-	Node     string   `json:"node,omitempty"` // --node pin
-	Prefer   Prefer   `json:"prefer"`
+	CPUs   float64  `json:"cpus,omitempty"` // explicit --cpus (0 = estimate)
+	Mem    int64    `json:"mem,omitempty"`  // explicit --mem (0 = estimate)
+	GPU    bool     `json:"gpu,omitempty"`
+	OS     OSPolicy `json:"os"`
+	Node   string   `json:"node,omitempty"` // --node pin
+	Prefer Prefer   `json:"prefer"`
 	// OriginOnly is set by the CLI when the job cannot leave the origin
 	// (cwd outside workspace, localhost references, rule); Reason explains.
 	OriginOnly       bool   `json:"origin_only,omitempty"`
 	OriginOnlyReason string `json:"origin_only_reason,omitempty"`
 	// Toolchains required by the workspace, e.g. {"go":"1.25.10","node":"24"}.
 	Toolchains map[string]string `json:"toolchains,omitempty"`
+	// NoDocker keeps the Docker socket out of a container job (.kran.toml
+	// docker = false, --no-docker). // added by R2 (security review): the
+	// socket is root-equivalent on rootful Docker.
+	NoDocker bool `json:"no_docker,omitempty"`
 }
 
 type Workspace struct {
@@ -246,19 +258,19 @@ type TTY struct {
 
 // JobSpec is what the CLI submits.
 type JobSpec struct {
-	ID       string            `json:"id"` // assigned by the daemon if empty
-	Argv     []string          `json:"argv"`
-	Shell    string            `json:"shell,omitempty"` // --sh string; Argv then is [$SHELL,"-c",Shell]
-	Cwd      string            `json:"cwd"`             // absolute on origin
-	Workspace Workspace        `json:"workspace"`
-	Env      map[string]string `json:"env"` // already filtered (SPEC §6.5)
-	Req      Requirements      `json:"req"`
-	TTY      *TTY              `json:"tty,omitempty"` // nil = not a terminal
-	Stdin    bool              `json:"stdin"`         // forward stdin
-	Owner    Owner             `json:"owner"`
-	Priority Priority          `json:"priority"`
-	Labels   map[string]string `json:"labels,omitempty"`
-	NoFallback bool            `json:"no_fallback,omitempty"`
+	ID         string            `json:"id"` // assigned by the daemon if empty
+	Argv       []string          `json:"argv"`
+	Shell      string            `json:"shell,omitempty"` // --sh string; Argv then is [$SHELL,"-c",Shell]
+	Cwd        string            `json:"cwd"`             // absolute on origin
+	Workspace  Workspace         `json:"workspace"`
+	Env        map[string]string `json:"env"` // already filtered (SPEC §6.5)
+	Req        Requirements      `json:"req"`
+	TTY        *TTY              `json:"tty,omitempty"` // nil = not a terminal
+	Stdin      bool              `json:"stdin"`         // forward stdin
+	Owner      Owner             `json:"owner"`
+	Priority   Priority          `json:"priority"`
+	Labels     map[string]string `json:"labels,omitempty"`
+	NoFallback bool              `json:"no_fallback,omitempty"`
 	// Setup overrides auto-detected setup (from .kran.toml).
 	Setup *SetupSpec `json:"setup,omitempty"`
 	// Sync include/exclude from .kran.toml.
@@ -283,35 +295,35 @@ type Estimate struct {
 }
 
 type Usage struct {
-	CPUSeconds float64 `json:"cpu_seconds"`
-	PeakMem    int64   `json:"peak_mem"`
-	WallSeconds float64 `json:"wall_seconds"`
-	SyncBytes  int64   `json:"sync_bytes,omitempty"`
-	SyncSeconds float64 `json:"sync_seconds,omitempty"`
+	CPUSeconds   float64 `json:"cpu_seconds"`
+	PeakMem      int64   `json:"peak_mem"`
+	WallSeconds  float64 `json:"wall_seconds"`
+	SyncBytes    int64   `json:"sync_bytes,omitempty"`
+	SyncSeconds  float64 `json:"sync_seconds,omitempty"`
 	SetupSeconds float64 `json:"setup_seconds,omitempty"`
 }
 
 // Job is the daemon's view of a job (live and history).
 type Job struct {
-	Spec      JobSpec     `json:"spec"`
-	State     JobState    `json:"state"`
-	Node      string      `json:"node,omitempty"` // target node name once placed
-	Runtime   RuntimeKind `json:"runtime,omitempty"`
-	Local     bool        `json:"local"`          // ran on origin
-	Fallback  bool        `json:"fallback"`       // ran locally after a remote failure
-	Reason    string      `json:"reason,omitempty"` // why queued / why it failed / placement rationale
-	Estimate  Estimate    `json:"estimate"`
-	Alloc     Resources   `json:"alloc"`
-	Usage     Usage       `json:"usage"`
-	Live      *Resources  `json:"live,omitempty"` // current cpu/mem while running
-	ExitCode  *int        `json:"exit_code,omitempty"`
-	Signal    string      `json:"signal,omitempty"`
-	Fingerprint string    `json:"fingerprint"`
-	QueuedAt  time.Time   `json:"queued_at"`
-	StartedAt time.Time   `json:"started_at,omitempty"`
-	EndedAt   time.Time   `json:"ended_at,omitempty"`
-	Origin    string      `json:"origin"` // origin node name
-	QueuePos  int         `json:"queue_pos,omitempty"`
+	Spec        JobSpec     `json:"spec"`
+	State       JobState    `json:"state"`
+	Node        string      `json:"node,omitempty"` // target node name once placed
+	Runtime     RuntimeKind `json:"runtime,omitempty"`
+	Local       bool        `json:"local"`            // ran on origin
+	Fallback    bool        `json:"fallback"`         // ran locally after a remote failure
+	Reason      string      `json:"reason,omitempty"` // why queued / why it failed / placement rationale
+	Estimate    Estimate    `json:"estimate"`
+	Alloc       Resources   `json:"alloc"`
+	Usage       Usage       `json:"usage"`
+	Live        *Resources  `json:"live,omitempty"` // current cpu/mem while running
+	ExitCode    *int        `json:"exit_code,omitempty"`
+	Signal      string      `json:"signal,omitempty"`
+	Fingerprint string      `json:"fingerprint"`
+	QueuedAt    time.Time   `json:"queued_at"`
+	StartedAt   time.Time   `json:"started_at,omitempty"`
+	EndedAt     time.Time   `json:"ended_at,omitempty"`
+	Origin      string      `json:"origin"` // origin node name
+	QueuePos    int         `json:"queue_pos,omitempty"`
 	// added by A (UI request): when the job was placed, when the user's
 	// command started (same as StartedAt), and the last phase report
 	// (sync/setup progress) while it is not running yet.
@@ -324,12 +336,12 @@ type Job struct {
 // State and events (local API, SSE)
 
 type Stats struct {
-	JobsToday        int     `json:"jobs_today"`
-	OffloadedToday   int     `json:"offloaded_today"`
-	FallbacksToday   int     `json:"fallbacks_today"`
-	FailedInfraToday int     `json:"failed_infra_today"`
+	JobsToday        int `json:"jobs_today"`
+	OffloadedToday   int `json:"offloaded_today"`
+	FallbacksToday   int `json:"fallbacks_today"`
+	FailedInfraToday int `json:"failed_infra_today"`
 	// SavedSeconds estimates origin wall time avoided by offloading today.
-	SavedSecondsToday float64 `json:"saved_seconds_today"`
+	SavedSecondsToday float64            `json:"saved_seconds_today"`
 	CPUSecondsByNode  map[string]float64 `json:"cpu_seconds_by_node"`
 	// added by A (UI request): start of "today" (local midnight on the daemon).
 	Since time.Time `json:"since"`
@@ -354,13 +366,13 @@ type OwnerStat struct {
 type EventType string
 
 const (
-	EventState      EventType = "state"       // full State (first event, and after resync)
-	EventNode       EventType = "node"        // NodeState
+	EventState       EventType = "state"        // full State (first event, and after resync)
+	EventNode        EventType = "node"         // NodeState
 	EventNodeMetrics EventType = "node.metrics" // {name, metrics}
-	EventJob        EventType = "job"         // Job
-	EventQueue      EventType = "queue"       // {queue:[ids]}
-	EventStats      EventType = "stats"       // Stats
-	EventLog        EventType = "log"         // daemon notable log line {level,msg,time}
+	EventJob         EventType = "job"          // Job
+	EventQueue       EventType = "queue"        // {queue:[ids]}
+	EventStats       EventType = "stats"        // Stats
+	EventLog         EventType = "log"          // daemon notable log line {level,msg,time}
 )
 
 type Event struct {
@@ -381,6 +393,17 @@ type VersionInfo struct {
 	BuildDate string `json:"build_date"`
 	API       string `json:"api"`
 	Protocol  string `json:"protocol"` // "1.0"
+}
+
+// DaemonInfo (added by A) says which process serves the local API, so
+// `kran service` can tell a daemon its service manager runs from one started
+// on demand that must hand over (GET /api/v1/daemon).
+type DaemonInfo struct {
+	PID int `json:"pid"`
+	// Supervisor is the service manager that started it ("systemd",
+	// "launchd"), "" when started on demand or by hand.
+	Supervisor string    `json:"supervisor,omitempty"`
+	StartedAt  time.Time `json:"started_at"`
 }
 
 // APIError is the JSON body of every non-2xx API response.

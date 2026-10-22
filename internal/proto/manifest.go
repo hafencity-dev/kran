@@ -19,9 +19,9 @@ const (
 )
 
 type ManifestEntry struct {
-	Path   string    `json:"p"`           // slash-separated, relative to root
+	Path   string    `json:"p"` // slash-separated, relative to root
 	Kind   EntryKind `json:"k,omitempty"`
-	Mode   uint32    `json:"m"`           // permission bits (0755/0644…)
+	Mode   uint32    `json:"m"` // permission bits (0755/0644…)
 	Size   int64     `json:"s,omitempty"`
 	MTime  int64     `json:"t"`           // unix nanoseconds
 	Hash   string    `json:"h,omitempty"` // sha256 hex (files)
@@ -39,8 +39,8 @@ type SlotRef struct {
 // SyncPlan is the target's answer to a manifest diff.
 type SyncPlan struct {
 	Slot    SlotRef  `json:"slot"`
-	Missing []string `json:"missing"`           // blob hashes the target needs
-	Changed int      `json:"changed"`           // files that will be written
-	Deleted int      `json:"deleted"`           // files that will be removed
-	Bytes   int64    `json:"bytes"`             // bytes of Missing
+	Missing []string `json:"missing"` // blob hashes the target needs
+	Changed int      `json:"changed"` // files that will be written
+	Deleted int      `json:"deleted"` // files that will be removed
+	Bytes   int64    `json:"bytes"`   // bytes of Missing
 }

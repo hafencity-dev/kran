@@ -2,18 +2,17 @@ package tui
 
 import (
 	"fmt"
-	"io"
 	"math"
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/hafencity-dev/kran/internal/proto"
-	"github.com/muesli/termenv"
 )
 
-// styles are built on a renderer bound to the output, so NO_COLOR and
-// non-tty output strip every escape without touching global state.
+// styles are pure values (Lip Gloss v2 does no terminal I/O). With NO_COLOR
+// every style is the zero style, so the view carries no escape sequences
+// at all; otherwise Bubble Tea downsamples colors to what the terminal has.
 type styles struct {
 	noColor bool
 	title   lipgloss.Style
@@ -33,35 +32,39 @@ type styles struct {
 	reserve lipgloss.Style
 }
 
-func newStyles(w io.Writer, noColor bool) styles {
-	r := lipgloss.NewRenderer(w)
+func newStyles(noColor bool) styles {
 	if noColor {
-		r.SetColorProfile(termenv.Ascii)
+		plain := lipgloss.NewStyle()
+		return styles{
+			noColor: true, title: plain, active: plain, muted: plain, bold: plain, sel: plain,
+			good: plain, warn: plain, bad: plain, crane: plain, reason: plain,
+			owner: map[proto.OwnerKind]lipgloss.Style{}, others: plain, outside: plain, free: plain, reserve: plain,
+		}
 	}
-	c := func(s string) lipgloss.Color { return lipgloss.Color(s) }
+	c := lipgloss.Color
 	st := styles{
 		noColor: noColor,
-		title:   r.NewStyle().Bold(true),
-		active:  r.NewStyle().Bold(true).Foreground(c("220")),
-		muted:   r.NewStyle().Foreground(c("245")),
-		bold:    r.NewStyle().Bold(true),
-		sel:     r.NewStyle().Reverse(true),
-		good:    r.NewStyle().Foreground(c("35")),
-		warn:    r.NewStyle().Foreground(c("214")),
-		bad:     r.NewStyle().Foreground(c("203")),
-		crane:   r.NewStyle().Foreground(c("220")).Bold(true),
-		reason:  r.NewStyle().Foreground(c("223")),
+		title:   lipgloss.NewStyle().Bold(true),
+		active:  lipgloss.NewStyle().Bold(true).Foreground(c("220")),
+		muted:   lipgloss.NewStyle().Foreground(c("245")),
+		bold:    lipgloss.NewStyle().Bold(true),
+		sel:     lipgloss.NewStyle().Reverse(true),
+		good:    lipgloss.NewStyle().Foreground(c("35")),
+		warn:    lipgloss.NewStyle().Foreground(c("214")),
+		bad:     lipgloss.NewStyle().Foreground(c("203")),
+		crane:   lipgloss.NewStyle().Foreground(c("220")).Bold(true),
+		reason:  lipgloss.NewStyle().Foreground(c("223")),
 		owner: map[proto.OwnerKind]lipgloss.Style{
-			proto.OwnerHuman:  r.NewStyle().Foreground(c("33")),
-			proto.OwnerClaude: r.NewStyle().Foreground(c("208")),
-			proto.OwnerCodex:  r.NewStyle().Foreground(c("36")),
-			proto.OwnerAgent:  r.NewStyle().Foreground(c("99")),
-			proto.OwnerCI:     r.NewStyle().Foreground(c("205")),
+			proto.OwnerHuman:  lipgloss.NewStyle().Foreground(c("33")),
+			proto.OwnerClaude: lipgloss.NewStyle().Foreground(c("208")),
+			proto.OwnerCodex:  lipgloss.NewStyle().Foreground(c("36")),
+			proto.OwnerAgent:  lipgloss.NewStyle().Foreground(c("99")),
+			proto.OwnerCI:     lipgloss.NewStyle().Foreground(c("205")),
 		},
-		others:  r.NewStyle().Foreground(c("246")),
-		outside: r.NewStyle().Foreground(c("240")),
-		free:    r.NewStyle().Foreground(c("238")),
-		reserve: r.NewStyle().Foreground(c("240")),
+		others:  lipgloss.NewStyle().Foreground(c("246")),
+		outside: lipgloss.NewStyle().Foreground(c("240")),
+		free:    lipgloss.NewStyle().Foreground(c("238")),
+		reserve: lipgloss.NewStyle().Foreground(c("240")),
 	}
 	return st
 }

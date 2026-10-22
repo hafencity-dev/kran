@@ -70,7 +70,7 @@ func (d *Daemon) handleMetricsHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	out, ok := d.history.since(name, since)
 	if !ok && name != d.self && d.peers.get(name) == nil {
-		writeAPIError(w, http.StatusNotFound, "no node "+name, "see linked nodes: kran status")
+		writeAPIError(w, http.StatusNotFound, "no machine named "+name, "machine names are in `kran status`")
 		return
 	}
 	writeJSON(w, http.StatusOK, out)

@@ -79,7 +79,7 @@ func TestInternalAcceptForget(t *testing.T) {
 	home, _ := os.UserHomeDir()
 	ak := filepath.Join(home, ".ssh", "authorized_keys")
 	exe, _ := selfExe()
-	want := AuthorizedKeysLineEnv(exe, keyA, "kran-dev", InstallEnv()) + "\n"
+	want := PeerKeyLineEnv(exe, "devmac", keyA, "kran-dev", InstallEnv()) + "\n"
 	if b, _ := os.ReadFile(ak); string(b) != want {
 		t.Fatalf("%q want %q", b, want)
 	}
@@ -124,8 +124,9 @@ func TestProbeAndHandshake(t *testing.T) {
 	if !r.OK || r.RTTMs <= 0 {
 		t.Fatalf("%+v", r)
 	}
-	// unpinned: accepts and reports the key
-	if r := Handshake(context.Background(), srv.Addr, "u", signer, "", 3*time.Second); !r.OK || r.HostKey != srv.HostKey {
+	// unpinned: refused (a reverse probe without our host key must not
+	// report a working direction it could not verify)
+	if r := Handshake(context.Background(), srv.Addr, "u", signer, "", 3*time.Second); r.OK || !strings.Contains(r.Error, "host key") {
 		t.Fatalf("%+v", r)
 	}
 	// wrong pinned key is rejected
@@ -170,10 +171,15 @@ func TestAcceptPinsInstallEnv(t *testing.T) {
 	cmd = strings.NewReplacer(`\"`, `"`, `\\`, `\`).Replace(cmd)
 	exe, _ := selfExe()
 	// Run what sshd would run, with the kran binary swapped for a probe.
-	if !strings.Contains(cmd, shellQuote(exe)+" serve --stdio") {
-		t.Fatalf("forced command %q does not run %s", cmd, exe)
+	run := exe
+	if !plainPath.MatchString(run) {
+		run = shq(run)
 	}
-	probe := strings.Replace(cmd, shellQuote(exe)+" serve --stdio", `sh -c 'echo "$KRAN_CONFIG_DIR|$KRAN_STATE_DIR|$KRAN_RUNTIME_DIR|$KRAN_CACHE_DIR|$KRAN_NAMESPACE"'`, 1)
+	run += " serve --stdio --peer devmac"
+	if !strings.Contains(cmd, run) {
+		t.Fatalf("forced command %q does not run %s", cmd, run)
+	}
+	probe := strings.Replace(cmd, run, `sh -c 'echo "$KRAN_CONFIG_DIR|$KRAN_STATE_DIR|$KRAN_RUNTIME_DIR|$KRAN_CACHE_DIR|$KRAN_NAMESPACE"'`, 1)
 	sh := exec.Command("sh", "-c", probe)
 	sh.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home} // what sshd gives the forced command
 	out, err := sh.Output()

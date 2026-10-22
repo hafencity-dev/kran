@@ -32,12 +32,17 @@ type jobState struct {
 	done chan struct{}
 	exit proto.Exit
 
-	mu        sync.Mutex
-	onPhase   func(proto.Phase)
-	evOff     int64
-	ready     bool
-	running   bool
-	ctl       net.Conn
+	evMu    sync.Mutex // serializes readEvents and its callbacks
+	mu      sync.Mutex
+	onPhase func(proto.Phase)
+	evOff   int64
+	ready   bool
+	running bool
+	// Two connections to the supervisor: stdin may block for as long as
+	// the job does not read it, signals and resizes must never wait
+	// behind it.
+	ctl       ctlConn
+	in        ctlConn
 	slot      *slot
 	finishing bool
 	endedAt   time.Time
@@ -97,7 +102,12 @@ func (js *jobState) readStatus() (proto.Exit, bool) {
 	return exit, true
 }
 
+// readEvents delivers new events; evMu serializes callers including the
+// phase callbacks, so when readEvents returns every event already in the
+// file has been reported.
 func (js *jobState) readEvents() {
+	js.evMu.Lock()
+	defer js.evMu.Unlock()
 	f, err := os.Open(filepath.Join(js.dir, fileEvents))
 	if err != nil {
 		return
@@ -153,10 +163,8 @@ func (js *jobState) finish(exit proto.Exit) {
 	js.finishing = true
 	js.exit = exit
 	js.endedAt = time.Now()
-	if js.ctl != nil {
-		js.ctl.Close()
-		js.ctl = nil
-	}
+	js.ctl.close()
+	js.in.close() // unblocks a stdin write the job never read
 	sl := js.slot
 	js.mu.Unlock()
 	// Free the slot for the next commit before announcing the end: a
@@ -185,33 +193,100 @@ func supervisorAlive(dir string) bool {
 }
 
 // sendCtl delivers one control frame to the supervisor, reconnecting once.
+// ctlConn is one connection to the supervisor's control socket.
+type ctlConn struct {
+	wmu sync.Mutex // one writer at a time (held during a write)
+	mu  sync.Mutex // guards c; never held while writing
+	c   net.Conn
+}
+
+func (cc *ctlConn) get() net.Conn {
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	return cc.c
+}
+
+func (cc *ctlConn) set(c net.Conn) {
+	cc.mu.Lock()
+	cc.c = c
+	cc.mu.Unlock()
+}
+
+func (cc *ctlConn) close() {
+	cc.mu.Lock()
+	if cc.c != nil {
+		cc.c.Close()
+		cc.c = nil
+	}
+	cc.mu.Unlock()
+}
+
+func (js *jobState) dialCtl() (net.Conn, error) {
+	c, err := net.DialTimeout("unix", js.spec.CtlPath, 2*time.Second)
+	if err != nil {
+		if js.isDone() {
+			return nil, fmt.Errorf("job %s has ended", js.id)
+		}
+		return nil, fmt.Errorf("job %s control: %w", js.id, err)
+	}
+	return c, nil
+}
+
+// sendCtl delivers a signal or resize. A write that fails (even half way)
+// discards the connection, so the next frame starts clean on a new one.
 func (js *jobState) sendCtl(t proto.FrameType, payload []byte) error {
 	if js.isDone() {
 		return fmt.Errorf("job %s has ended", js.id)
 	}
-	js.mu.Lock()
-	defer js.mu.Unlock()
+	cc := &js.ctl
+	cc.wmu.Lock()
+	defer cc.wmu.Unlock()
 	for attempt := 0; attempt < 2; attempt++ {
-		if js.ctl == nil {
-			c, err := net.DialTimeout("unix", js.spec.CtlPath, 2*time.Second)
-			if err != nil {
-				if js.isDone() {
-					return fmt.Errorf("job %s has ended", js.id)
-				}
-				return fmt.Errorf("job %s control: %w", js.id, err)
+		c := cc.get()
+		if c == nil {
+			var err error
+			if c, err = js.dialCtl(); err != nil {
+				return err
 			}
-			js.ctl = c
+			cc.set(c)
 		}
-		js.ctl.SetWriteDeadline(time.Now().Add(30 * time.Second))
-		err := proto.WriteFrame(js.ctl, t, payload)
+		c.SetWriteDeadline(time.Now().Add(30 * time.Second))
+		err := proto.WriteFrame(c, t, payload)
 		if err == nil {
 			return nil
 		}
-		js.ctl.Close()
-		js.ctl = nil
-		if attempt == 1 {
+		cc.close()
+		if attempt == 1 || js.isDone() {
 			return fmt.Errorf("job %s control: %w", js.id, err)
 		}
+	}
+	return nil
+}
+
+// sendStdin delivers input on its own connection. It blocks while the job
+// does not read (backpressure, no deadline) and never retries: frames on a
+// second connection could overtake ones still queued on the first.
+func (js *jobState) sendStdin(t proto.FrameType, payload []byte) error {
+	if js.isDone() {
+		return fmt.Errorf("job %s has ended", js.id)
+	}
+	cc := &js.in
+	cc.wmu.Lock()
+	defer cc.wmu.Unlock()
+	c := cc.get()
+	if c == nil {
+		if js.isDone() {
+			return fmt.Errorf("job %s has ended", js.id)
+		}
+		var err error
+		if c, err = js.dialCtl(); err != nil {
+			return err
+		}
+		cc.set(c)
+	}
+	if err := proto.WriteFrame(c, t, payload); err != nil {
+		cc.close()
+		return fmt.Errorf("job %s stdin: %w", js.id, err)
 	}
 	return nil
 }
@@ -227,6 +302,17 @@ func (p *process) Output(offset int64) io.ReadCloser {
 		_, err := os.Stat(status)
 		return err == nil
 	})
+	// The supervisor writes the running event before any command output,
+	// so catching up on events before handing out a frame guarantees
+	// OnPhase(running) precedes the command's first byte.
+	r.beforeFrame = func() {
+		p.js.mu.Lock()
+		running := p.js.running
+		p.js.mu.Unlock()
+		if !running {
+			p.js.readEvents()
+		}
+	}
 	return r
 }
 
@@ -298,7 +384,7 @@ func (w *stdinWriter) Write(b []byte) (int, error) {
 	n := 0
 	for len(b) > 0 {
 		c := min(len(b), 32<<10)
-		if err := w.js.sendCtl(proto.FrameStdin, b[:c]); err != nil {
+		if err := w.js.sendStdin(proto.FrameStdin, b[:c]); err != nil {
 			return n, err
 		}
 		n += c
@@ -312,7 +398,7 @@ func (w *stdinWriter) Close() error {
 		return nil
 	}
 	w.closed = true
-	return w.js.sendCtl(proto.FrameStdinEOF, nil)
+	return w.js.sendStdin(proto.FrameStdinEOF, nil)
 }
 
 // ---------------------------------------------------------------------------

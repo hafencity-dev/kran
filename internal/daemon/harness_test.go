@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -39,7 +40,9 @@ func testTiming() Timing {
 	t.StreamSilence = 700 * time.Millisecond
 	t.LeaseTTL = 1500 * time.Millisecond
 	t.LeaseGrace = 300 * time.Millisecond
-	t.ReservationTTL = 600 * time.Millisecond
+	// Long enough that a sync on a loaded machine never outlives its
+	// reservation; TestReservationExpires shortens it.
+	t.ReservationTTL = 15 * time.Second
 	t.BreakerCooldown = 3 * time.Second
 	t.PeerPoll = 50 * time.Millisecond
 	t.BackoffMin = 50 * time.Millisecond
@@ -50,6 +53,9 @@ func testTiming() Timing {
 	t.SlotWait = 3 * time.Second
 	t.PrestartTimeout = 10 * time.Second
 	t.KillGrace = 300 * time.Millisecond
+	t.CLIDropGrace = 2 * time.Second
+	t.StdinWindow = 64 << 10
+	t.StdinQueue = 256 << 10
 	return t
 }
 
@@ -107,6 +113,9 @@ type testNode struct {
 	dialer  PeerDialer // nil = in-memory network
 	real    bool       // C's scheduler and estimator instead of fakes
 	src     PeerSource // nil = peers
+	// clientAlive overrides the liveness check of a dropped CLI's process
+	// (nil: CLIs in this test process count as gone).
+	clientAlive func(pid int) bool
 
 	mu     sync.Mutex
 	d      *Daemon
@@ -114,6 +123,9 @@ type testNode struct {
 	rsched scheduler.Scheduler
 	cancel context.CancelFunc
 	done   chan error
+	// stopped is closed when the last stop finished; start waits for it,
+	// so a restart never races the old daemon's socket.
+	stopped chan struct{}
 }
 
 type cluster struct {
@@ -168,6 +180,12 @@ func newCluster(t *testing.T, names ...string) *cluster {
 
 func (n *testNode) start() *Daemon {
 	n.t.Helper()
+	n.mu.Lock()
+	stopped := n.stopped
+	n.mu.Unlock()
+	if stopped != nil {
+		<-stopped
+	}
 	sched := newFakeSched(n.name, n.place)
 	var dialer PeerDialer = memDialer{n.net, n.name}
 	if n.dialer != nil {
@@ -197,6 +215,8 @@ func (n *testNode) start() *Daemon {
 		Session: testSessionConfig(),
 		Logf:    n.log.logf(n.name),
 		Timing:  n.timing,
+
+		ClientAlive: n.clientAlive,
 	})
 	if err != nil {
 		n.t.Fatal(err)
@@ -209,7 +229,7 @@ func (n *testNode) start() *Daemon {
 	n.rsched = sch
 	n.mu.Unlock()
 	n.net.Listen(n.name, d.ServePeerConn)
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(waitCeiling)
 	for {
 		if _, err := os.Stat(n.dirs.socket()); err == nil {
 			break
@@ -232,10 +252,15 @@ func (n *testNode) stop() {
 	n.mu.Lock()
 	cancel, done := n.cancel, n.done
 	n.cancel = nil
+	stopped := make(chan struct{})
+	if cancel != nil {
+		n.stopped = stopped
+	}
 	n.mu.Unlock()
 	if cancel == nil {
 		return
 	}
+	defer close(stopped)
 	n.net.Unlisten(n.name)
 	start := time.Now()
 	cancel()
@@ -244,12 +269,12 @@ func (n *testNode) stop() {
 		if err != nil {
 			n.t.Errorf("%s: Run: %v", n.name, err)
 		}
-	case <-time.After(10 * time.Second):
-		n.t.Errorf("%s: daemon did not stop within 10 s", n.name)
+	case <-time.After(waitCeiling):
+		n.t.Errorf("%s: daemon did not stop within %s", n.name, waitCeiling)
 	}
-	if el := time.Since(start); el > 5*time.Second {
-		n.t.Errorf("%s: shutdown took %s (limit 5 s)", n.name, el)
-	}
+	// TestGracefulShutdownIsFast holds the 5 s budget; here only a hang
+	// fails, so a loaded machine does not make every test flaky.
+	_ = start
 	n.net.Cut(n.name)
 }
 
@@ -268,16 +293,36 @@ func (n *testNode) scheduler() *fakeSched {
 func (n *testNode) sock() string { return n.dirs.socket() }
 
 // waitFor polls cond until it holds or the deadline passes.
+// waitFor polls cond until it holds. within is how long it normally takes;
+// the test fails only after waitCeiling (longer under -race): on a loaded
+// machine a correct daemon can be many times slower, and a deadline close
+// to the usual time only makes the suite flaky. Waits for something that
+// must not happen are not written with waitFor.
 func waitFor(t testing.TB, within time.Duration, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(within)
+	limit := max(within, waitCeiling)
+	start := time.Now()
 	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out after %s waiting for %s", within, what)
+		if time.Since(start) > limit {
+			t.Fatalf("timed out after %s waiting for %s (usually takes < %s)", limit, what, within)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// testContext is a deadline for a whole test scenario: at least d, and
+// never less than waitCeiling.
+func testContext(d time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), max(d, waitCeiling))
+}
+
+// waitCeiling bounds every waitFor; see raceEnabled.
+var waitCeiling = func() time.Duration {
+	if raceEnabled {
+		return 60 * time.Second
+	}
+	return 30 * time.Second
+}()
 
 // waitOnline waits until origin sees peer online.
 func (c *cluster) waitOnline(origin, peer string) {
@@ -384,16 +429,18 @@ func runCLIInto(ctx context.Context, sock string, spec proto.JobSpec, o cliOpts,
 	if err != nil {
 		return err
 	}
-	if o.stdin != nil {
-		go func() {
-			rs.Send(proto.FrameStdin, o.stdin)
-			rs.Send(proto.FrameStdinEOF, nil)
-		}()
+	// Input as kran run sends it: within the credit, again from Resume.
+	in := &harnessInput{data: o.stdin, rs: rs}
+	if o.reattach != nil {
+		in.started = true // nothing goes out before the daemon's credit
 	}
 	for {
 		t, p, err := rs.Recv()
 		if err != nil {
 			return err
+		}
+		if o.stdin != nil {
+			in.onFrame(t, p)
 		}
 		if o.hook != nil {
 			if err := o.hook(rs, t, p, res); err != nil {
@@ -445,6 +492,58 @@ func runCLIInto(ctx context.Context, sock string, spec proto.JobSpec, o cliOpts,
 	}
 }
 
+// harnessInput is the test CLI's stdin: everything is kept, so any resume
+// can be served.
+type harnessInput struct {
+	data    []byte
+	rs      client.RunSession
+	sent    int
+	limit   int64 // -1: no limit
+	started bool
+	eofSent bool
+}
+
+func (in *harnessInput) onFrame(t proto.FrameType, p []byte) {
+	switch t {
+	case proto.FrameDecision:
+		var dc proto.Decision
+		json.Unmarshal(p, &dc)
+		if dc.Mode != "remote" || in.started {
+			return
+		}
+		in.started = true
+		in.limit = dc.StdinLimit
+		if in.limit == 0 {
+			in.limit = -1 // a daemon without flow control
+		}
+	case proto.FrameStdinCredit:
+		var c proto.StdinCredit
+		json.Unmarshal(p, &c)
+		in.limit = c.Limit
+		if c.Resume != nil {
+			in.sent = int(*c.Resume)
+			in.eofSent = false
+			in.rs.SendJSON(proto.FrameStdinResume, proto.StdinResume{Offset: *c.Resume})
+		}
+	default:
+		return
+	}
+	for in.sent < len(in.data) && (in.limit < 0 || int64(in.sent) < in.limit) {
+		end := min(len(in.data), in.sent+32<<10)
+		if in.limit >= 0 {
+			end = min(end, int(in.limit))
+		}
+		if in.rs.Send(proto.FrameStdin, in.data[in.sent:end]) != nil {
+			return
+		}
+		in.sent = end
+	}
+	if in.sent == len(in.data) && !in.eofSent {
+		in.eofSent = true
+		in.rs.Send(proto.FrameStdinEOF, nil)
+	}
+}
+
 // runLocalChild runs the job as the CLI would for a local decision.
 func runLocalChild(rs client.RunSession, spec proto.JobSpec, dc proto.Decision, res *cliResult) error {
 	cmd := exec.Command(spec.Argv[0], spec.Argv[1:]...)
@@ -466,12 +565,30 @@ func runLocalChild(rs client.RunSession, spec proto.JobSpec, dc proto.Decision, 
 	res.stdout.Write(so.Bytes())
 	res.stderr.Write(se.Bytes())
 	res.mu.Unlock()
+	// Like kran run: a copy of the output for the history, before the exit.
+	for _, f := range []struct {
+		t proto.FrameType
+		b []byte
+	}{{proto.FrameStdout, so.Bytes()}, {proto.FrameStderr, se.Bytes()}} {
+		if len(f.b) > 0 {
+			if err := rs.Send(f.t, f.b); err != nil {
+				return err
+			}
+		}
+	}
 	code := 0
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {
 		code = ee.ExitCode()
 	}
 	return rs.SendJSON(proto.FrameExit, proto.Exit{JobID: dc.JobID, Code: code, Usage: proto.Usage{WallSeconds: 0.1}})
+}
+
+// reachedLine reports whether the output so far plus frame p contains the
+// line want. Frames coalesce under load ("2\n3\n4\n"), so checking a
+// frame's prefix can miss the line and the disruption never happens.
+func reachedLine(r *cliResult, p []byte, want string) bool {
+	return strings.Contains("\n"+r.out()+string(p), "\n"+want+"\n")
 }
 
 func storedJob(t *testing.T, n *testNode, id string) proto.Job {

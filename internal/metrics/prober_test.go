@@ -149,7 +149,7 @@ func TestDockerUnreachable(t *testing.T) {
 	if fr.count("stats") != 0 {
 		t.Fatal("stats must not run when docker is unreachable")
 	}
-	if info := probeDocker(context.Background(), fr.run, ""); info.Reachable || info.Reason != "docker is not installed" {
+	if info := probeDocker(context.Background(), fr.run, "", ""); info.Reachable || info.Reason != "docker is not installed" {
 		t.Fatalf("info = %+v", info)
 	}
 }

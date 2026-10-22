@@ -65,7 +65,10 @@ targets linux/darwin × arm64/amd64.
 * **daemon ↔ daemon:** one SSH connection per peer (Go `x/crypto/ssh` client),
   authenticated with kran's own key `~/.config/kran/id_ed25519`. On the peer,
   `authorized_keys` pins that key to a forced command:
-  `command="<abs path>/kran serve --stdio",restrict ssh-ed25519 … kran@<node>`.
+  `command="<abs path>/kran serve --stdio --peer <name>",restrict ssh-ed25519 … kran@<node>`.
+  `--peer` is the name the key was linked as; the bridge passes it to the
+  daemon ahead of the yamux bytes and the session is bound to it (the
+  peer's own hello cannot claim another linked node's name).
   `kran serve --stdio` connects stdin/stdout to the peer daemon's peer socket
   (`kran-peer.sock`), so all traffic is multiplexed by **yamux** over that one
   stdio stream. The kran key can do nothing except speak kran protocol.
@@ -152,6 +155,7 @@ linked_at = 2026-10-22T12:00:00Z
 ### `.kran.toml` in a repo (optional; auto-detection covers the common case)
 ```toml
 os = "same"                   # same | any — "any" lets Linux jobs run natively on macOS
+docker = true                 # false: container jobs get no Docker socket (SPEC §9)
 [sync]
 include = ["vendor-bin/"]      # extra untracked/ignored paths to send
 exclude = ["testdata/huge/"]
@@ -188,10 +192,11 @@ Flags: `-l/--local`, `-r/--remote`, `-n/--node NAME`, `--gpu`, `--cpus N`,
    sends `notice` frames with the wait reason (CLI prints at most one line per
    reason change, only when the wait exceeds 2 s, unless `--quiet`).
 5. **Local placement:** daemon replies `decision{mode:"local", envelope}`.
-   The CLI executes the command itself as a child (inheriting the tty, so
-   colors/progress work), inside a transient systemd scope in `kran.slice`
+   The CLI executes the command itself as a child (on a pty that mirrors
+   the terminal, so colors/progress and interactive programs work), inside a transient systemd scope in `kran.slice`
    on Linux (memory cap from envelope) or its own process group on macOS,
-   reports `started{pid, scope}` and later `exit{code, usage}`. If the CLI
+   reports `started{pid, scope}` and later `exit{code, usage}`, and copies
+   the output to the daemon for the history (§8.2). If the CLI
    dies, the socket closes, the daemon kills the scope/process group and
    frees the slot.
 6. **Remote placement:** daemon replies `decision{mode:"remote", node,
@@ -243,7 +248,10 @@ Flags: `-l/--local`, `-r/--remote`, `-n/--node NAME`, `--gpu`, `--cpus N`,
 
 Eligibility filters, each failing filter gives a reason string:
 * node online, not draining, accept.enabled;
-* `--local` → origin only; `--node` → that node only;
+* `--local` → origin only; `--node` → that node only (a name that is
+  neither this machine nor in `peers.toml` is a usage error, exit 2; a
+  linked node that is offline makes the job wait for it, and the CLI says
+  so right away);
 * OS: `same` → target runtime OS == origin OS (a darwin node offers
   `container` runtime = linux when Docker is reachable); `any` → any;
 * GPU: `--gpu` → node has an NVIDIA GPU (or Apple GPU if origin is darwin);
@@ -291,10 +299,12 @@ Forward all env vars **except**: host-specific (`PATH`, `HOME`, `USER`,
 `GOPATH`, `GOCACHE`, `GOMODCACHE`, `GOTOOLCHAIN`, `NVM_*`, `PNPM_HOME`,
 `npm_config_cache`, `*_SOCK`, `*_SOCKET`, `LD_*`, `DYLD_*`, `KRAN_*` except
 `KRAN_OWNER`) and secrets (name matches `/(TOKEN|SECRET|PASSWORD|PASSWD|
-PRIVATE|CREDENTIAL|API_KEY|APIKEY|ACCESS_KEY)/i` or `AWS_*`, `GH_*`,
-`GITHUB_*`, `ANTHROPIC_*`, `OPENAI_*`) unless listed in `.kran.toml
+PASSPHRASE|PRIVATE|CREDENTIAL|API_KEY|APIKEY|ACCESS_KEY|(^|_)AUTH(_|$))/i`
+or `AWS_*`, `GH_*`, `GITHUB_*`, `ANTHROPIC_*`, `OPENAI_*`, or the value is a
+URL with a password, `scheme://user:pass@…`) unless listed in `.kran.toml
 env.forward` or `--env NAME`. `TERM`, `COLORTERM`, `NO_COLOR`,
-`FORCE_COLOR`, `CI`, `LANG`, `LC_*`, `TZ` are forwarded. The target sets
+`FORCE_COLOR`, `CI`, `LANG`, `LC_*` (unless the name looks like a secret),
+`TZ` are forwarded. The target sets
 `PATH` (runtime default + toolchains), `HOME` (real), `TMPDIR` (per job),
 `GOCACHE`/`GOMODCACHE`/`npm_config_store_dir` (node-shared caches),
 `KRAN_JOB_ID`, `KRAN_NODE`, `KRAN_ORIGIN`, `KRAN_ORIGIN_ROOT`.
@@ -359,14 +369,21 @@ process tree RSS + CPU time).
   else ineligible with reason.
 * `container`: image `kran-runner:<kran version>` built on the node from an
   embedded Dockerfile (debian stable-slim, git, build-essential,
-  ca-certificates, curl, unzip, xz, pkg-config, mise). Toolchains via mise
+  ca-certificates, curl, unzip, xz, pkg-config, mise). Built lazily by the
+  first container job (phase `setup`, "preparing the Linux runtime (first
+  use, ~30 s)"), one build at a time; until then the runtime reports
+  `first_use` but counts as available whenever Docker is reachable. A job
+  that gives up waiting falls back as any prestart failure; the build goes
+  on. The reaper removes `kran-runner` images of other kran versions. Toolchains via mise
   into volume `kran-tools`; caches in volume `kran-cache`
   (GOCACHE, GOMODCACHE, pnpm store, npm cache, uv cache, mise). Job =
   `docker run --rm --init --network host --name kran-job-<id> --label
   kran.job=<id> --memory <cap> --cpus <n> -v /var/run/docker.sock:… -e …
   -w <origin cwd> --user <uid>:<gid>`. The Docker socket is available so
-  testcontainers / `docker compose` in tests work; host networking makes
-  `localhost:<published port>` work as on Linux.
+  testcontainers / `docker compose` in tests work (not with `.kran.toml
+  docker = false` or `kran run --no-docker`); host networking makes
+  `localhost:<published port>` work as on Linux. The slot sync helper lives
+  in its own container's file system, never in a volume jobs mount.
 * Resource caps: memory cap = admitted estimate × 2, at least 2 GiB, at most
   free memory at start; on cap breach the job is OOM-killed and the exit
   reason says so (`kran: job hit its 6 GiB memory cap on devmac — rerun with
@@ -404,7 +421,25 @@ lowercase base32 (job IDs: 10 chars, sortable by time).
 Control frame payloads are JSON (`proto.RunFrame*` types); data frames are
 raw bytes. Types: `submit`, `notice`, `decision`, `started`, `stdin`,
 `stdin_eof`, `stdout`, `stderr`, `resize`, `signal`, `exit`, `heartbeat`,
-`reattach`, `error`. See `internal/proto/frames.go`.
+`reattach`, `error`, `stdin_credit`, `stdin_resume`. See
+`internal/proto/frames.go`. Input to a remote job (`-i`) is flow-controlled
+end to end: `kran run` forwards stdin only below the credit's limit (the
+job's consumed offset + 8 MiB), keeps what was not consumed, and sends it
+again from `resume` after a lost connection; signals never wait behind
+input. Input is never dropped silently: when it cannot be recovered, the
+job's stdin is closed with a warning.
+
+`stdout`/`stderr` also flow client→daemon for a job the CLI runs locally:
+a copy of the child's output for the job history (`kran logs`, the UI).
+The CLI sits between child and terminal (a pty with the terminal's
+settings when the output is a terminal, pipes otherwise) and writes every
+read to the real destination first, unbuffered; the copy goes through a
+bounded queue (8 MiB) that never blocks the child: when the daemon falls
+behind, data is dropped and `[kran: output truncated in history]` is
+recorded instead. Frames are sent only after `started` (after `reattach` +
+`started` on a new session) and before `exit`. The daemon appends them to
+the job's spool (at most 64 MiB per job, then the same mark) and never
+echoes them back to run sessions; older daemons ignore them.
 
 ### 8.3 Peer protocol
 
@@ -418,15 +453,27 @@ target side delegates to `execenv.Manager` (§10). Methods: `hello`,
 
 ## 9. Security
 
-* No listening TCP except the UI on loopback (default). If bound to a
-  non-loopback address, the UI requires a token (`kran ui --print-url` shows
-  `http://host:7270/#token=…`); mutating endpoints always require the
-  `X-Kran-Token` header (token stored in state dir, 0600) or the unix socket.
+* No listening TCP except the UI on loopback (default). The API on that
+  listener always requires the token (loopback TCP is open to every account
+  on the machine): `kran ui` opens and `kran ui --print-url` shows
+  `http://host:7270/#token=…` (token stored in state dir, 0600); GETs accept
+  `?token=` (EventSource), mutating endpoints only the `X-Kran-Token` header.
+  The unix socket needs no token. Static UI assets are public.
 * Unix sockets 0600 in a 0700 dir. All state files 0600/0700.
 * Peer auth = SSH with dedicated key + forced command + pinned host key.
   `restrict` disables forwarding/pty/agent.
 * Secrets never synced (§6.7) nor forwarded (§6.5) by default.
-* Jobs run as the node's user, never root.
+* Jobs run as the node's user, never root; the daemon refuses to run as
+  root (`kran daemon --allow-root` overrides) and `kran service install`
+  never installs one that would.
+* **Container jobs get the Docker socket by default**, so testcontainers and
+  `docker compose` work. With rootful Docker (Linux without rootless mode)
+  that is root-equivalent on the node: a job can start a privileged
+  container and own the host or the Docker VM, including other repos'
+  slots. Only run code you would run as root there, or opt out per repo
+  (`.kran.toml docker = false`) or per run (`kran run --no-docker`). Native
+  jobs run as the node user, who can reach Docker anyway if they are in the
+  `docker` group.
 
 ## 10. Internal Go interfaces
 
@@ -449,7 +496,7 @@ kran run [flags] -- cmd    run a job where it fits (alias: kran r)
 kran status [--json]       mesh at a glance
 kran top                   live terminal view
 kran ui [--print-url]      open the web dashboard
-kran jobs [--json] [-a]    recent jobs; kran logs <id> [-f]; kran cancel <id>
+kran jobs [--json] [-a] [--why]   recent jobs (--why: the scheduler's reason); kran logs <id> [-f]; kran cancel <id>
 kran drain <node> / kran resume <node>
 kran doctor [--fix] [node]
 kran agents install|uninstall|status

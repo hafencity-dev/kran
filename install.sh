@@ -9,13 +9,15 @@
 #   gh api repos/hafencity-dev/kran/contents/install.sh -H 'Accept: application/vnd.github.raw' | sh -s -- --version 0.3.0
 #
 # Options (or environment): --version X (VERSION), --no-setup (KRAN_NO_SETUP=1),
-# KRAN_INSTALL_DIR (default ~/.local/bin).
+# --yes (accept setup's defaults without asking; also the default when there is
+# no terminal), KRAN_INSTALL_DIR (default ~/.local/bin).
 set -eu
 
 REPO="hafencity-dev/kran"
 VERSION="${VERSION:-}"
 INSTALL_DIR="${KRAN_INSTALL_DIR:-$HOME/.local/bin}"
 NO_SETUP="${KRAN_NO_SETUP:-0}"
+YES=0
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'install: %s\n' "$*" >&2; exit 1; }
@@ -25,8 +27,9 @@ while [ $# -gt 0 ]; do
 	--version) [ $# -ge 2 ] || die "--version needs a value, e.g. --version 0.3.0"; VERSION="$2"; shift 2 ;;
 	--version=*) VERSION="${1#--version=}"; shift ;;
 	--no-setup) NO_SETUP=1; shift ;;
+	-y | --yes) YES=1; shift ;;
 	-h | --help)
-		say "usage: install.sh [--version X] [--no-setup]   (env: VERSION, KRAN_INSTALL_DIR, KRAN_NO_SETUP, GITHUB_TOKEN)"
+		say "usage: install.sh [--version X] [--no-setup] [--yes]   (env: VERSION, KRAN_INSTALL_DIR, KRAN_NO_SETUP, GITHUB_TOKEN)"
 		exit 0 ;;
 	*) die "unknown option $1 (try --help)" ;;
 	esac
@@ -55,11 +58,17 @@ download_gh() {
 		-p "kran_*_${OS}_${ARCH}.tar.gz" -p checksums.txt >/dev/null
 }
 
+# gh_curl passes the token in a curl config on stdin (printf is a builtin),
+# never in argv, where other users on the machine could read it in ps.
+gh_curl() {
+	printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" | curl -K - "$@"
+}
+
 download_token() {
 	have curl || die "curl is required to download with a token"
 	api="https://api.github.com/repos/$REPO/releases"
 	if [ -n "$VERSION" ]; then api="$api/tags/v$VERSION"; else api="$api/latest"; fi
-	curl -fsSL -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" "$api" -o "$TMP/release.json" ||
+	gh_curl -fsSL -H "Accept: application/vnd.github+json" "$api" -o "$TMP/release.json" ||
 		die "could not read the release ($api); check the version and that your token can read $REPO"
 	for pattern in "kran_[^\"]*_${OS}_${ARCH}.tar.gz" "checksums.txt"; do
 		# In the API JSON an asset's "url" precedes its "name".
@@ -68,7 +77,7 @@ download_token() {
 			/^[ \t]*"name": "/ { n = $2; gsub(/[",]/, "", n); if (u != "" && n ~ pat) { print n " " u; exit } }
 		' "$TMP/release.json")"
 		[ -n "$asset" ] || die "release has no asset matching $pattern for $OS/$ARCH"
-		curl -fsSL -H "Authorization: Bearer $TOKEN" -H "Accept: application/octet-stream" \
+		gh_curl -fsSL -H "Accept: application/octet-stream" \
 			"${asset#* }" -o "$TMP/${asset%% *}" || die "download of ${asset%% *} failed"
 	done
 }
@@ -130,8 +139,14 @@ if [ "$NO_SETUP" = 1 ]; then
 	say "Skipping setup. Run 'kran setup' when you are ready."
 	exit 0
 fi
-if [ -t 0 ]; then
+if [ "$YES" = 1 ]; then
+	"$INSTALL_DIR/kran" setup --yes
+elif [ -t 0 ]; then
 	"$INSTALL_DIR/kran" setup
+elif ( : </dev/tty ) 2>/dev/null; then
+	# Piped into sh: stdin is the script, but the person at the keyboard can
+	# still answer setup's questions.
+	"$INSTALL_DIR/kran" setup </dev/tty
 else
 	"$INSTALL_DIR/kran" setup --yes
 fi

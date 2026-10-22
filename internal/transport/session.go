@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/yamux"
@@ -96,7 +95,7 @@ type session struct {
 	cfg  SessionConfig
 	addr string
 
-	rtt  atomic.Int64
+	rtt  rttEstimate
 	done chan struct{}
 
 	mu      sync.Mutex
@@ -170,7 +169,7 @@ func (s *session) keepalive() {
 			go func() {
 				d, err := s.ys.Ping()
 				if err == nil {
-					s.rtt.Store(int64(d))
+					s.rtt.sample(d)
 				}
 				ch <- err
 			}()
@@ -216,7 +215,7 @@ func (s *session) Ping(timeout time.Duration) (time.Duration, error) {
 		if err != nil {
 			return 0, err
 		}
-		s.rtt.Store(int64(d))
+		s.rtt.handshake(d)
 		return d, nil
 	case <-t.C:
 		return 0, fmt.Errorf("no answer within %s", timeout)
@@ -296,7 +295,40 @@ func (s *session) Err() error {
 	return s.err
 }
 
-func (s *session) RTT() time.Duration { return time.Duration(s.rtt.Load()) }
+func (s *session) RTT() time.Duration { return s.rtt.value() }
+
+// rttEstimate smooths the keepalive pings (EWMA). A one-off ping (the
+// handshake right after dialing, often slowed by load or by the far daemon
+// starting) only stands in until the first keepalive sample.
+type rttEstimate struct {
+	mu       sync.Mutex
+	v        time.Duration
+	smoothed bool // v comes from keepalive samples
+}
+
+func (r *rttEstimate) handshake(d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.smoothed {
+		r.v = d
+	}
+}
+
+func (r *rttEstimate) sample(d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.smoothed {
+		r.v, r.smoothed = d, true
+		return
+	}
+	r.v = (3*d + 7*r.v) / 10
+}
+
+func (r *rttEstimate) value() time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.v
+}
 func (s *session) RemoteAddr() string { return s.addr }
 
 // Pinger is implemented by sessions created in this package.

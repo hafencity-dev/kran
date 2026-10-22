@@ -4,6 +4,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"strings"
@@ -73,4 +74,11 @@ func stopScope(scope string, grace time.Duration) bool {
 	systemctl(ctx, "kill", "--signal=SIGKILL", scope)
 	systemctl(ctx, "stop", scope)
 	return true
+}
+
+// processAlive reports whether pid exists (a zombie counts as alive until
+// reaped; a CLI is never our child).
+func processAlive(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
 }

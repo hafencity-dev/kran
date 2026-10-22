@@ -66,6 +66,7 @@ const (
 	codeInternal     = "internal"
 	codeNoSlot       = "slot"
 	codeDisk         = "disk_floor"
+	codeNotLinked    = "not_linked"
 )
 
 type peerError struct {
@@ -184,13 +185,23 @@ type peerConn struct {
 	r   *bufio.Reader
 	wmu sync.Mutex
 	buf []byte
+	// stdinWindow is what the target announced for a job stream (0: no
+	// input flow control).
+	stdinWindow int64
 }
 
 func newPeerConn(c net.Conn) *peerConn {
 	return &peerConn{Conn: c, r: bufio.NewReaderSize(c, 64<<10)}
 }
 
-const maxLine = 64 << 20
+const maxLine = 64 << 20 // responses: a sync plan lists every missing hash
+
+// maxRequestLine bounds a request envelope (job.start carries argv and env,
+// which the OS caps at a few MiB anyway).
+const maxRequestLine = 16 << 20
+
+// maxPeerStreams bounds the streams one peer session has in service.
+const maxPeerStreams = 512
 
 func (c *peerConn) writeJSON(v any) error {
 	b, err := json.Marshal(v)
@@ -203,7 +214,10 @@ func (c *peerConn) writeJSON(v any) error {
 	return err
 }
 
-func (c *peerConn) readJSON(v any) error {
+func (c *peerConn) readJSON(v any) error { return c.readJSONLimit(v, maxLine) }
+
+// readJSONLimit reads one JSON line of at most max bytes.
+func (c *peerConn) readJSONLimit(v any, max int) error {
 	var line []byte
 	for {
 		chunk, err := c.r.ReadSlice('\n')
@@ -214,7 +228,7 @@ func (c *peerConn) readJSON(v any) error {
 		if !errors.Is(err, bufio.ErrBufferFull) {
 			return err
 		}
-		if len(line) > maxLine {
+		if len(line) > max {
 			return errors.New("peer line too long")
 		}
 	}

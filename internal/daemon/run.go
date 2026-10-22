@@ -152,6 +152,8 @@ func run(ctx context.Context, opts Options) error {
 		Session: transport.SessionConfig{Logf: logf},
 		Logf:    logf,
 		Debug:   os.Getenv("KRAN_DEBUG") == "1",
+
+		Supervisor: supervisor(),
 	})
 	if err != nil {
 		return err
@@ -213,4 +215,16 @@ func linuxBinary() string {
 		}
 	}
 	return p
+}
+
+// supervisor names the service manager that started this process, from
+// the environment it sets for its services ("" = on demand or by hand).
+func supervisor() string {
+	switch {
+	case os.Getenv("INVOCATION_ID") != "":
+		return "systemd"
+	case strings.Contains(os.Getenv("XPC_SERVICE_NAME"), "kran"):
+		return "launchd"
+	}
+	return ""
 }

@@ -57,6 +57,20 @@ func TestHardExcluded(t *testing.T) {
 		"src/main.go":             false,
 		"environment.go":          false,
 		"keyboard/keys.go":        false,
+		// key file variants and case (macOS file systems ignore case)
+		"id_rsa_deploy":            true,
+		"deploy/id_ed25519_github": true,
+		"id_rsa.bak":               true,
+		"id_ecdsa-old":             true,
+		"id_ed25519_github.pub":    false,
+		"id_token.go":              false,
+		".ENV":                     true,
+		"app/.Env.Local":           true,
+		".ENV.example":             false,
+		"a/B.PEM":                  true,
+		"Cert.KEY":                 true,
+		"ID_RSA":                   true,
+		".GIT/config":              true,
 	}
 	for p, want := range cases {
 		if got := HardExcluded(p, false); got != want {
@@ -75,9 +89,16 @@ func TestLinkStaysInside(t *testing.T) {
 		{"a/link", "../../b", false},
 		{"link", "..", false},
 		{"link", "/etc/passwd", false},
-		{"a/b/link", "../../c/../d", true},
+		// ".." after a name: that name may itself be a link (d/up -> ..),
+		// so x -> d/up/.. would reach the slot's parent.
+		{"a/b/link", "../../c/../d", false},
+		{"x", "d/up/..", false},
+		{"x", "a/b/c/up/../../..", false},
+		{"a/b/link", "../../c/d", true},
+		{"d/up", "..", true},
 		{"a/b/link", "../../../x", false},
-		{"a/link", "./x/../y", true},
+		{"a/link", "./x/../y", false},
+		{"a/link", "./x/y", true},
 		{"a/link", "", false},
 	}
 	for _, c := range cases {
