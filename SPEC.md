@@ -418,10 +418,12 @@ target side delegates to `execenv.Manager` (§10). Methods: `hello`,
 
 ## 9. Security
 
-* No listening TCP except the UI on loopback (default). If bound to a
-  non-loopback address, the UI requires a token (`kran ui --print-url` shows
-  `http://host:7270/#token=…`); mutating endpoints always require the
-  `X-Kran-Token` header (token stored in state dir, 0600) or the unix socket.
+* No listening TCP except the UI on loopback (default). The API on that
+  listener always requires the token (loopback TCP is open to every account
+  on the machine): `kran ui` opens and `kran ui --print-url` shows
+  `http://host:7270/#token=…` (token stored in state dir, 0600); GETs accept
+  `?token=` (EventSource), mutating endpoints only the `X-Kran-Token` header.
+  The unix socket needs no token. Static UI assets are public.
 * Unix sockets 0600 in a 0700 dir. All state files 0600/0700.
 * Peer auth = SSH with dedicated key + forced command + pinned host key.
   `restrict` disables forwarding/pty/agent.

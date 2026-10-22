@@ -162,8 +162,8 @@ func TestUIURL(t *testing.T) {
 	tok := func() string { return "sekret" }
 	ts := func() string { return "100.64.0.1" }
 	for listen, want := range map[string]string{
-		"127.0.0.1:7270": "http://127.0.0.1:7270/",
-		"localhost:9000": "http://localhost:9000/",
+		"127.0.0.1:7270": "http://127.0.0.1:7270/#token=sekret",
+		"localhost:9000": "http://localhost:9000/#token=sekret",
 		"tailscale":      "http://100.64.0.1:7270/#token=sekret",
 		"0.0.0.0:7270":   "http://0.0.0.0:7270/#token=sekret",
 	} {

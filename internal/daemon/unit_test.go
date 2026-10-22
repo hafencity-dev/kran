@@ -81,7 +81,11 @@ func TestTCPAuth(t *testing.T) {
 		token    string
 		want     int
 	}{
-		{"loopback read", true, "GET", "/api/v1/state", "127.0.0.1:7270", "", 200},
+		// Loopback TCP is open to every local account, not just the owner:
+		// job output and argv must not be readable without the token.
+		{"loopback read needs token", true, "GET", "/api/v1/jobs/x/log", "127.0.0.1:7270", "", 401},
+		{"loopback read", true, "GET", "/api/v1/state", "127.0.0.1:7270", "hdr", 200},
+		{"loopback sse query token", true, "GET", "/api/v1/events?token=" + d.token, "[::1]:7270", "", 200},
 		{"loopback ui", true, "GET", "/", "localhost:7270", "", 200},
 		{"loopback post needs token", true, "POST", "/api/v1/jobs/x/cancel", "127.0.0.1:7270", "", 401},
 		{"loopback post with token", true, "POST", "/api/v1/jobs/x/cancel", "127.0.0.1:7270", "hdr", 200},
@@ -107,6 +111,10 @@ func TestTCPAuth(t *testing.T) {
 			d.tcpAuth(ok, c.loopback, "100.1.2.3").ServeHTTP(w, r)
 			if w.Code != c.want {
 				t.Fatalf("status %d, want %d (%s)", w.Code, c.want, w.Body.String())
+			}
+			// A cross-origin <script src> must not be able to read API output.
+			if w.Header().Get("X-Content-Type-Options") != "nosniff" || w.Header().Get("Cross-Origin-Resource-Policy") != "same-origin" {
+				t.Fatalf("missing nosniff/CORP headers: %v", w.Header())
 			}
 		})
 	}
