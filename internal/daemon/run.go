@@ -151,6 +151,7 @@ func run(ctx context.Context, opts Options) error {
 		Slice:   newSliceController(cfg.Accept.ReserveMem, logf),
 		Session: transport.SessionConfig{Logf: logf},
 		Logf:    logf,
+		Debug:   os.Getenv("KRAN_DEBUG") == "1",
 	})
 	if err != nil {
 		return err

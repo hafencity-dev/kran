@@ -39,6 +39,10 @@ func (d *Daemon) routes(unix bool) http.Handler {
 	mux.HandleFunc("GET /api/v1/nodes/{name}/metrics", d.handleMetricsHistory)
 	mux.HandleFunc("POST /api/v1/nodes/{name}/drain", d.handleDrain(true))
 	mux.HandleFunc("POST /api/v1/nodes/{name}/resume", d.handleDrain(false))
+	if unix && d.deps.Debug {
+		mux.HandleFunc("GET /api/v1/debug/goroutines", handleGoroutines)
+		mux.HandleFunc("GET /api/v1/debug/slots", d.handleSlots)
+	}
 	if unix {
 		mux.HandleFunc("POST /api/v1/run", d.handleRun)
 	} else {

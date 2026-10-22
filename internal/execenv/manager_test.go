@@ -920,3 +920,18 @@ func jsonUnmarshal(t *testing.T, s string, v any) {
 		t.Fatal(err)
 	}
 }
+
+func TestBusySlots(t *testing.T) {
+	te := newTestEnv(t)
+	if b := te.m.BusySlots(); len(b) != 0 {
+		t.Fatalf("busy before any job: %v", b)
+	}
+	ref := te.slot(testRepo, nil, proto.RuntimeNative)
+	if b := te.m.BusySlots(); len(b) != 1 || !strings.HasPrefix(b[0], testRepo[:12]+"/") {
+		t.Fatalf("busy %v", b)
+	}
+	te.m.ReleaseSlot(ref)
+	if b := te.m.BusySlots(); len(b) != 0 {
+		t.Fatalf("busy after release: %v", b)
+	}
+}
