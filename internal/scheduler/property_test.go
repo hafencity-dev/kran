@@ -339,8 +339,9 @@ func (h *harness) check() {
 		if v.vm != nil && v.vm.allocMem > v.vm.capMem {
 			h.t.Fatalf("%s VM: allocated %s > capacity %s", name, fmtBytes(v.vm.allocMem), fmtBytes(v.vm.capMem))
 		}
-		if v.host.allocCPU > v.host.capCPU*cpuOvercommit+1e-6 {
-			h.t.Fatalf("%s: allocated %.1f CPUs > %.1f×%.2f", name, v.host.allocCPU, v.host.capCPU, cpuOvercommit)
+		// CPU: ×1.25 for regular admission, up to ×2 with short local jobs.
+		if v.host.allocCPU > v.host.capCPU*shortCPUOvercommit+1e-6 {
+			h.t.Fatalf("%s: allocated %.1f CPUs > %.1f×%.2f", name, v.host.allocCPU, v.host.capCPU, shortCPUOvercommit)
 		}
 	}
 	for id, pl := range h.placed {

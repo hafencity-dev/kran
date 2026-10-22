@@ -151,18 +151,18 @@ type simResult struct {
 }
 
 type simulator struct {
-	t       testing.TB
-	r       *rand.Rand
-	clk     *fakeClock
-	s       *sched
-	nodes   map[string]*simNode
-	ev      evHeap
-	seq     int
-	jobs    map[string]*simJob // submitted, not finished
-	queued  map[string]*simJob // waiting for placement
-	synced  map[string]bool    // repo\x00node
-	res     *simResult
-	until   time.Time // no new bursts after this
+	t          testing.TB
+	r          *rand.Rand
+	clk        *fakeClock
+	s          *sched
+	nodes      map[string]*simNode
+	ev         evHeap
+	seq        int
+	jobs       map[string]*simJob // submitted, not finished
+	queued     map[string]*simJob // waiting for placement
+	synced     map[string]bool    // repo\x00node
+	res        *simResult
+	until      time.Time // no new bursts after this
 	nextID     int
 	lastAcc    time.Time
 	thinkScale float64
