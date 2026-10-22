@@ -32,6 +32,9 @@ func newMgr(t *testing.T, goos string, r Runner, env map[string]string, mod func
 	o := Options{
 		KranPath: "/home/u/.local/bin/kran", Home: t.TempDir(), GOOS: goos, UID: 501, Runner: r,
 		Getenv: envOf(env),
+		// Never the real /Library/LaunchDaemons: on a Mac with kran
+		// installed system-wide its plist would leak into every test.
+		SystemDir: t.TempDir(),
 	}
 	o.LogPath = filepath.Join(o.Home, "state", "daemon.out.log")
 	if mod != nil {
