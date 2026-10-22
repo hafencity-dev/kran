@@ -3,12 +3,11 @@ package tui
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"strings"
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/hafencity-dev/kran/internal/proto"
 	"github.com/hafencity-dev/kran/internal/ui/mock"
@@ -21,7 +20,7 @@ func newTest(t *testing.T, w, h int) (*Model, *mock.Sim) {
 	sim := mock.New(mock.Options{Seed: 3, Now: func() time.Time { return t0 }})
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	m := New(ctx, mock.Client{S: sim}, Options{Out: io.Discard, NoColor: true, Now: func() time.Time { return t0.Add(30 * time.Second) }})
+	m := New(ctx, mock.Client{S: sim}, Options{NoColor: true, Now: func() time.Time { return t0.Add(30 * time.Second) }})
 	m.Update(tea.WindowSizeMsg{Width: w, Height: h})
 	// Subscribe the way Init does and apply the first (state) event.
 	msg := m.subscribe()().(eventsMsg)
@@ -36,22 +35,22 @@ func newTest(t *testing.T, w, h int) (*Model, *mock.Sim) {
 	return m, sim
 }
 
-func key(s string) tea.KeyMsg {
+func key(s string) tea.KeyPressMsg {
 	switch s {
 	case "tab":
-		return tea.KeyMsg{Type: tea.KeyTab}
+		return tea.KeyPressMsg{Code: tea.KeyTab}
 	case "down":
-		return tea.KeyMsg{Type: tea.KeyDown}
+		return tea.KeyPressMsg{Code: tea.KeyDown}
 	case "esc":
-		return tea.KeyMsg{Type: tea.KeyEsc}
+		return tea.KeyPressMsg{Code: tea.KeyEscape}
 	}
-	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
+	return tea.KeyPressMsg{Code: []rune(s)[0], Text: s}
 }
 
 func TestViewFitsTerminal(t *testing.T) {
 	for _, sz := range []struct{ w, h int }{{80, 24}, {100, 30}, {160, 50}} {
 		m, _ := newTest(t, sz.w, sz.h)
-		v := m.View()
+		v := m.render()
 		lines := strings.Split(v, "\n")
 		if len(lines) > sz.h {
 			t.Errorf("%dx%d: %d lines", sz.w, sz.h, len(lines))
@@ -75,7 +74,7 @@ func TestWaitReasonShown(t *testing.T) {
 	if len(wait) == 0 {
 		t.Skip("simulation has no queue with this seed")
 	}
-	v := m.View()
+	v := m.render()
 	if !strings.Contains(v, "waiting: needs") {
 		t.Errorf("queue reasons missing:\n%s", v)
 	}
@@ -83,7 +82,7 @@ func TestWaitReasonShown(t *testing.T) {
 
 func TestNoColorHasNoEscapes(t *testing.T) {
 	m, _ := newTest(t, 120, 40)
-	if v := m.View(); strings.Contains(v, "\x1b") {
+	if v := m.render(); strings.Contains(v, "\x1b") {
 		t.Errorf("NO_COLOR view contains escape sequences")
 	}
 }
@@ -100,7 +99,7 @@ func TestCancelAsksFirst(t *testing.T) {
 	if m.ask == nil || !strings.Contains(m.ask.prompt, command(run[0].Spec)) {
 		t.Fatalf("expected a confirmation naming the job, got %+v", m.ask)
 	}
-	if !strings.Contains(m.View(), "y yes") {
+	if !strings.Contains(m.render(), "y yes") {
 		t.Error("confirmation not shown in the footer")
 	}
 	// Anything but y keeps the job.
@@ -198,7 +197,7 @@ func TestFollowLog(t *testing.T) {
 			t.Fatal("no log output")
 		}
 	}
-	if v := m.View(); !strings.Contains(v, "Output") || strings.Contains(v, "\x1b") {
+	if v := m.render(); !strings.Contains(v, "Output") || strings.Contains(v, "\x1b") {
 		t.Errorf("log view: %q", v)
 	}
 	m.Update(key("esc"))
@@ -246,5 +245,15 @@ func TestLogLineCleanup(t *testing.T) {
 	}
 	if l.partial != "part" {
 		t.Fatalf("partial = %q", l.partial)
+	}
+}
+
+func TestColorStylesEmitColor(t *testing.T) {
+	// Guards the NO_COLOR test against passing because styles never color.
+	if s := newStyles(false).good.Render("ok"); !strings.Contains(s, "\x1b[") {
+		t.Fatalf("colored style rendered %q", s)
+	}
+	if s := newStyles(true).good.Render("ok"); s != "ok" {
+		t.Fatalf("NO_COLOR style rendered %q", s)
 	}
 }

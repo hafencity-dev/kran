@@ -2,12 +2,11 @@ package tui
 
 import (
 	"context"
-	"io"
 	"strconv"
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/hafencity-dev/kran/internal/client"
 	"github.com/hafencity-dev/kran/internal/proto"
@@ -39,7 +38,7 @@ type (
 		ev proto.Event
 		ch <-chan proto.Event
 	}
-	eventsEndMsg struct{ ch <-chan proto.Event }
+	eventsEndMsg  struct{ ch <-chan proto.Event }
 	reconnectMsg  struct{}
 	tickMsg       time.Time
 	actionDoneMsg struct {
@@ -96,7 +95,6 @@ type Model struct {
 
 // Options configure New.
 type Options struct {
-	Out     io.Writer
 	NoColor bool
 	Now     func() time.Time
 }
@@ -106,10 +104,7 @@ func New(ctx context.Context, c client.Client, o Options) *Model {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
-	if o.Out == nil {
-		o.Out = io.Discard
-	}
-	return &Model{ctx: ctx, c: c, st: newStyles(o.Out, o.NoColor), now: o.Now, d: newData(), width: 80, height: 24, pane: paneRunning}
+	return &Model{ctx: ctx, c: c, st: newStyles(o.NoColor), now: o.Now, d: newData(), width: 80, height: 24, pane: paneRunning}
 }
 
 func (m *Model) Init() tea.Cmd {
@@ -197,7 +192,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case logMsg:
 		return m, m.onLog(msg)
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		return m.onKey(msg)
 	}
 	return m, nil
@@ -258,7 +253,7 @@ func (m *Model) selectedNode() (proto.NodeState, bool) {
 	return proto.NodeState{}, false
 }
 
-func (m *Model) onKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m *Model) onKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := k.String()
 	if key == "ctrl+c" {
 		return m, m.quit()
@@ -505,7 +500,7 @@ func (m *Model) onLogKey(key string) (tea.Model, tea.Cmd) {
 		l.scroll--
 	case "pgup", "b":
 		l.scroll += page
-	case "pgdown", " ", "f":
+	case "pgdown", "space", "f":
 		l.scroll -= page
 	case "end", "G":
 		l.scroll = 0
@@ -515,4 +510,3 @@ func (m *Model) onLogKey(key string) (tea.Model, tea.Cmd) {
 	l.scroll = max(0, min(l.scroll, len(l.lines)-1))
 	return m, nil
 }
-
