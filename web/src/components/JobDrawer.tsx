@@ -73,7 +73,9 @@ function Detail({ job: j }: { job: Job }) {
   const source =
     est.source === 'learned'
       ? `learned from ${est.samples} ${est.samples === 1 ? 'run' : 'runs'}`
-      : est.source?.startsWith('family:')
+      : est.source?.startsWith('repo:')
+        ? `learned from ${est.repo_samples ?? 0} ${est.source.slice(5).replace('-', ' ')} ${est.repo_samples === 1 ? 'run' : 'runs'} in this repo`
+        : est.source?.startsWith('family:')
         ? `default for ${est.source.slice(7).replace('-', ' ')}`
         : est.source === 'flag'
           ? 'from the command flags'

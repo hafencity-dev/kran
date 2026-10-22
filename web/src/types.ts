@@ -160,6 +160,8 @@ export interface Estimate {
   duration_s: number
   samples: number
   source: string
+  duration_source?: string
+  repo_samples?: number
 }
 
 export interface Usage {
