@@ -65,6 +65,11 @@ type jobEntry struct {
 	in           inFlow  // remote: input flow control
 	lastPhasePub time.Time
 	tty          *proto.TTY
+
+	// Output of a local job, sent by its CLI for the history (spooled,
+	// never echoed back).
+	localOut int64
+	localCut bool
 }
 
 type localEvent struct {
@@ -473,17 +478,19 @@ func (e *jobEntry) finish(x proto.Exit) {
 	d.bus.publish(proto.EventJob, publicJob(final))
 	e.mu.Unlock()
 
-	e.sendFrame(proto.FrameExit, x)
-	e.spool.finish()
-	e.spool.close() // readers keep their own handles
+	// Free the allocation before the CLI learns the exit: `kran run a &&
+	// kran run b` must not see a's resources still taken.
 	if placed {
 		u := x.Usage
 		d.deps.Sched.Release(e.id, &u)
 	}
+	d.stats.record(final) // `kran status` right after kran run sees this job
+	e.sendFrame(proto.FrameExit, x)
+	e.spool.finish()
+	e.spool.close() // readers keep their own handles
 	if final.State == proto.JobSucceeded || final.State == proto.JobFailed {
 		d.deps.Est.Observe(&final)
 	}
-	d.stats.record(final)
 	d.bus.publish(proto.EventStats, d.stats.snapshot())
 	d.jobs.retire(e, final)
 	close(e.done)

@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -28,7 +27,7 @@ func bigInput(n int) []byte {
 func TestRemoteStdinFlowControl(t *testing.T) {
 	_, a, _ := twoNodes(t)
 	ws := workspaceDir(t, map[string]string{"f": "x"})
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := testContext(30 * time.Second)
 	defer cancel()
 	input := bigInput(1 << 20) // 4× the target's queue in tests
 	spec := shSpec(ws, "sleep 1; cat")
@@ -59,7 +58,7 @@ func firstDiff(a, b string) int {
 func TestRemoteStdinSurvivesCut(t *testing.T) {
 	c, a, _ := twoNodes(t)
 	ws := workspaceDir(t, map[string]string{"f": "x"})
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := testContext(60 * time.Second)
 	defer cancel()
 	input := bigInput(512 << 10)
 	spec := shSpec(ws, "while IFS= read -r l; do echo \"$l\"; done")
@@ -87,7 +86,7 @@ func TestRemoteStdinSurvivesCut(t *testing.T) {
 func TestRemoteSignalNotBehindStdin(t *testing.T) {
 	_, a, _ := twoNodes(t)
 	ws := workspaceDir(t, map[string]string{"f": "x"})
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := testContext(30 * time.Second)
 	defer cancel()
 	spec := shSpec(ws, "echo up; sleep 30")
 	spec.Stdin = true
@@ -117,7 +116,7 @@ func TestRemoteSignalNotBehindStdin(t *testing.T) {
 func TestRemoteStdinSurvivesOriginRestart(t *testing.T) {
 	_, a, _ := twoNodes(t)
 	ws := workspaceDir(t, map[string]string{"f": "x"})
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := testContext(60 * time.Second)
 	defer cancel()
 	input := bigInput(512 << 10)
 	spec := shSpec(ws, "while IFS= read -r l; do echo \"$l\"; done")
@@ -158,7 +157,7 @@ func TestRemoteStdinSurvivesOriginRestart(t *testing.T) {
 func TestRemoteStdinTargetRestartClosesInputLoudly(t *testing.T) {
 	_, a, b := twoNodes(t)
 	ws := workspaceDir(t, map[string]string{"f": "x"})
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := testContext(60 * time.Second)
 	defer cancel()
 	input := bigInput(512 << 10)
 	spec := shSpec(ws, "while IFS= read -r l; do echo \"$l\"; done; echo END")

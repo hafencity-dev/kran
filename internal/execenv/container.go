@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path"
-	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -19,6 +18,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/hafencity-dev/kran/internal/dockercli"
 	"github.com/hafencity-dev/kran/internal/proto"
 	"github.com/hafencity-dev/kran/internal/version"
 )
@@ -62,23 +62,7 @@ func (m *manager) containerSetting() string {
 
 // findDockerCLI looks on the login PATH, then where Docker Desktop, Colima,
 // OrbStack, Rancher Desktop and Homebrew put it.
-func findDockerCLI(path, home string) string {
-	if p, err := lookPathEnv("docker", path, "/"); err == nil {
-		return p
-	}
-	cands := []string{"/usr/local/bin/docker", "/opt/homebrew/bin/docker", "/usr/bin/docker",
-		"/Applications/Docker.app/Contents/Resources/bin/docker"}
-	if home != "" {
-		cands = append(cands, filepath.Join(home, ".orbstack", "bin", "docker"), filepath.Join(home, ".rd", "bin", "docker"),
-			filepath.Join(home, ".docker", "bin", "docker"))
-	}
-	for _, c := range cands {
-		if checkExecutable(c) == nil {
-			return c
-		}
-	}
-	return ""
-}
+func findDockerCLI(path, home string) string { return dockercli.Find(path, home) }
 
 func (m *manager) probeDocker(ctx context.Context) (*dockerEnv, string) {
 	if m.containerSetting() == "off" {
@@ -97,19 +81,11 @@ func (m *manager) probeDocker(ctx context.Context) (*dockerEnv, string) {
 		base = append(base, "DOCKER_CONFIG="+v)
 	}
 	host := os.Getenv("DOCKER_HOST")
+	ctxHost := ""
 	if host == "" {
-		cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		cmd := exec.CommandContext(cctx, cli, "context", "inspect", "--format", "{{.Endpoints.docker.Host}}")
-		cmd.Env = base
-		out, err := cmd.Output()
-		cancel()
-		if err == nil {
-			host = strings.TrimSpace(string(out))
-		}
+		ctxHost = dockercli.ContextHost(ctx, cli, base)
 	}
-	if host == "" {
-		host = "unix:///var/run/docker.sock"
-	}
+	host = dockercli.Endpoint(host, ctxHost, he.home, os.Getenv("XDG_RUNTIME_DIR"), nil)
 	dk := &dockerEnv{cli: cli, host: host, cliEnv: append(base, "DOCKER_HOST="+host)}
 	sock, ok := strings.CutPrefix(host, "unix://")
 	if !ok {
@@ -246,41 +222,6 @@ func (m *manager) ensureContainerReady(ctx context.Context, onPhase func(proto.P
 		if err := m.ensureSync(ctx, dk); err != nil {
 			return err
 		}
-	}
-	return nil
-}
-
-func (m *manager) ensureImage(ctx context.Context, dk *dockerEnv, onPhase func(proto.Phase)) error {
-	tag := m.imageTag()
-	want := hashString(m.dockerfile())[:16]
-	have := func() bool {
-		out, err := dk.run(ctx, nil, "image", "inspect", "--format", `{{index .Config.Labels "kran.dockerfile"}}`, tag)
-		return err == nil && strings.TrimSpace(string(out)) == want
-	}
-	if have() {
-		return nil
-	}
-	// One build at a time per node, also across daemon restarts and tests.
-	lock, err := os.OpenFile(filepath.Join(m.l.state, "runner-image.lock"), os.O_RDWR|os.O_CREATE, 0o600)
-	if err != nil {
-		return fmt.Errorf("image lock: %w", err)
-	}
-	defer lock.Close()
-	if err := flockCtx(ctx, lock); err != nil {
-		return err
-	}
-	defer unix.Flock(int(lock.Fd()), unix.LOCK_UN)
-	if have() {
-		return nil
-	}
-	if onPhase != nil {
-		onPhase(proto.Phase{State: proto.JobSetup, Message: fmt.Sprintf("building the %s image on %s (first use only, takes a few minutes)", tag, m.opts.NodeName)})
-	}
-	m.logf("building %s", tag)
-	_, err = dk.run(ctx, []byte(m.dockerfile()), "build", "--quiet", "--tag", tag,
-		"--label", "kran.dockerfile="+want, "--label", "kran.ns="+m.ns, "-")
-	if err != nil {
-		return fmt.Errorf("%w: building the runner image failed: %v", ErrRuntimeUnavailable, err)
 	}
 	return nil
 }

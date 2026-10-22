@@ -96,6 +96,9 @@ func (d *Daemon) runRemote(ctx context.Context, e *jobEntry, p scheduler.Placeme
 		repoID = spec.Workspace.RepoID
 	}
 
+	// On macOS the first container job prepares the runtime while it
+	// acquires a slot, on Linux when it starts: say why it takes a while.
+	d.noteFirstUse(e, node, p.Runtime)
 	var slot proto.SlotRef
 	sctx, cancel := rpc(d.t.SlotWait + 10*time.Second)
 	err = peerOneShot(sctx, sess, proto.PeerSlotAcquire, e.id,
@@ -131,6 +134,7 @@ func (d *Daemon) runRemote(ctx context.Context, e *jobEntry, p scheduler.Placeme
 	})
 
 	spec.ID = e.id
+	d.noteFirstUse(e, node, p.Runtime)
 	stctx, cancel := rpc(d.t.PrestartTimeout)
 	var info jobStreamInfo
 	pc, err := peerCall(stctx, sess, proto.PeerJobStart, e.id, jobStartBody{
@@ -150,6 +154,21 @@ func (d *Daemon) runRemote(ctx context.Context, e *jobEntry, p scheduler.Placeme
 	}
 	e.setState(proto.JobSetup, "")
 	return d.followRemote(ctx, e, p, pc)
+}
+
+// noteFirstUse reports the setup phase while a node builds its container
+// runtime for the first time (proto.Runtime.FirstUse).
+func (d *Daemon) noteFirstUse(e *jobEntry, node string, rt proto.RuntimeKind) {
+	if rt != proto.RuntimeContainer {
+		return
+	}
+	p := d.peers.get(node)
+	if p == nil {
+		return
+	}
+	if r := runtimeInfo(p.nodeState().Info, rt); r != nil && r.FirstUse {
+		e.phase(proto.Phase{State: proto.JobSetup, Message: "preparing the Linux runtime on " + node + " (first use, ~30 s)"})
+	}
 }
 
 func mustJSON(v any) []byte {

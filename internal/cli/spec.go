@@ -38,6 +38,9 @@ type SpecInput struct {
 	// Detect / project config are indirections so tests do not need git.
 	Detect  func(ctx context.Context, cwd string) (proto.Workspace, error)
 	Project func(root string) (*workspace.ProjectConfig, error)
+	// GoVersion reports the local Go toolchain for dir ("1.26.2"); nil
+	// uses `go env GOVERSION`.
+	GoVersion func(ctx context.Context, dir string, env []string) string
 	// Notice receives one-line messages for stderr (nil = dropped).
 	Notice func(string)
 }
@@ -143,6 +146,20 @@ func BuildSpec(ctx context.Context, in SpecInput) (proto.JobSpec, error) {
 		req.Node = f.Node
 	}
 	req.Toolchains = workspace.Toolchains(ws.Root)
+	if isGoCommand(spec.Argv, spec.Shell) {
+		// Pin the exact toolchain this machine uses (go.mod only names a
+		// minimum), so a remote run compiles with the identical Go.
+		gv := in.GoVersion
+		if gv == nil {
+			gv = localGoVersion
+		}
+		if v := gv(ctx, in.Cwd, in.Env); v != "" {
+			if req.Toolchains == nil {
+				req.Toolchains = map[string]string{}
+			}
+			req.Toolchains["go"] = v
+		}
+	}
 	req.NoDocker = f.NoDocker || pc.Docker != nil && !*pc.Docker
 	if reason := originOnlyReason(spec, ws, wsErr, in.Home); reason != "" && !req.OriginOnly {
 		req.OriginOnly, req.OriginOnlyReason = true, reason

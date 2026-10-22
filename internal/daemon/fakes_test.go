@@ -425,6 +425,7 @@ type fakeExec struct {
 	putBlobs int
 	acquires int
 	releases int
+	runtimes []proto.Runtime // nil: one native runtime
 }
 
 func newFakeExec(node, dir string, lease time.Duration) *fakeExec {
@@ -432,6 +433,11 @@ func newFakeExec(node, dir string, lease time.Duration) *fakeExec {
 }
 
 func (x *fakeExec) Runtimes(ctx context.Context) []proto.Runtime {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	if x.runtimes != nil {
+		return append([]proto.Runtime(nil), x.runtimes...)
+	}
 	return []proto.Runtime{{Kind: proto.RuntimeNative, OS: runtime.GOOS, Arch: runtime.GOARCH, CPUs: 16, Mem: 0, Available: true}}
 }
 func (x *fakeExec) Refresh(ctx context.Context) error { return nil }

@@ -26,10 +26,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: gofmt
-        shell: bash
-        run: |
-          out=$(gofmt -l .)
-          if [ -n "$out" ]; then echo "gofmt needed for:"; echo "$out"; exit 1; fi
+        run: make fmt-check
       - name: vet
         run: go vet ./...
       - name: vet cross-platform

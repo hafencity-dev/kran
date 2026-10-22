@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -39,7 +40,9 @@ func testTiming() Timing {
 	t.StreamSilence = 700 * time.Millisecond
 	t.LeaseTTL = 1500 * time.Millisecond
 	t.LeaseGrace = 300 * time.Millisecond
-	t.ReservationTTL = 600 * time.Millisecond
+	// Long enough that a sync on a loaded machine never outlives its
+	// reservation; TestReservationExpires shortens it.
+	t.ReservationTTL = 15 * time.Second
 	t.BreakerCooldown = 3 * time.Second
 	t.PeerPoll = 50 * time.Millisecond
 	t.BackoffMin = 50 * time.Millisecond
@@ -226,7 +229,7 @@ func (n *testNode) start() *Daemon {
 	n.rsched = sch
 	n.mu.Unlock()
 	n.net.Listen(n.name, d.ServePeerConn)
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(waitCeiling)
 	for {
 		if _, err := os.Stat(n.dirs.socket()); err == nil {
 			break
@@ -266,12 +269,12 @@ func (n *testNode) stop() {
 		if err != nil {
 			n.t.Errorf("%s: Run: %v", n.name, err)
 		}
-	case <-time.After(10 * time.Second):
-		n.t.Errorf("%s: daemon did not stop within 10 s", n.name)
+	case <-time.After(waitCeiling):
+		n.t.Errorf("%s: daemon did not stop within %s", n.name, waitCeiling)
 	}
-	if el := time.Since(start); el > 5*time.Second {
-		n.t.Errorf("%s: shutdown took %s (limit 5 s)", n.name, el)
-	}
+	// TestGracefulShutdownIsFast holds the 5 s budget; here only a hang
+	// fails, so a loaded machine does not make every test flaky.
+	_ = start
 	n.net.Cut(n.name)
 }
 
@@ -290,16 +293,36 @@ func (n *testNode) scheduler() *fakeSched {
 func (n *testNode) sock() string { return n.dirs.socket() }
 
 // waitFor polls cond until it holds or the deadline passes.
+// waitFor polls cond until it holds. within is how long it normally takes;
+// the test fails only after waitCeiling (longer under -race): on a loaded
+// machine a correct daemon can be many times slower, and a deadline close
+// to the usual time only makes the suite flaky. Waits for something that
+// must not happen are not written with waitFor.
 func waitFor(t testing.TB, within time.Duration, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(within)
+	limit := max(within, waitCeiling)
+	start := time.Now()
 	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out after %s waiting for %s", within, what)
+		if time.Since(start) > limit {
+			t.Fatalf("timed out after %s waiting for %s (usually takes < %s)", limit, what, within)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// testContext is a deadline for a whole test scenario: at least d, and
+// never less than waitCeiling.
+func testContext(d time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), max(d, waitCeiling))
+}
+
+// waitCeiling bounds every waitFor; see raceEnabled.
+var waitCeiling = func() time.Duration {
+	if raceEnabled {
+		return 60 * time.Second
+	}
+	return 30 * time.Second
+}()
 
 // waitOnline waits until origin sees peer online.
 func (c *cluster) waitOnline(origin, peer string) {
@@ -542,12 +565,30 @@ func runLocalChild(rs client.RunSession, spec proto.JobSpec, dc proto.Decision, 
 	res.stdout.Write(so.Bytes())
 	res.stderr.Write(se.Bytes())
 	res.mu.Unlock()
+	// Like kran run: a copy of the output for the history, before the exit.
+	for _, f := range []struct {
+		t proto.FrameType
+		b []byte
+	}{{proto.FrameStdout, so.Bytes()}, {proto.FrameStderr, se.Bytes()}} {
+		if len(f.b) > 0 {
+			if err := rs.Send(f.t, f.b); err != nil {
+				return err
+			}
+		}
+	}
 	code := 0
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {
 		code = ee.ExitCode()
 	}
 	return rs.SendJSON(proto.FrameExit, proto.Exit{JobID: dc.JobID, Code: code, Usage: proto.Usage{WallSeconds: 0.1}})
+}
+
+// reachedLine reports whether the output so far plus frame p contains the
+// line want. Frames coalesce under load ("2\n3\n4\n"), so checking a
+// frame's prefix can miss the line and the disruption never happens.
+func reachedLine(r *cliResult, p []byte, want string) bool {
+	return strings.Contains("\n"+r.out()+string(p), "\n"+want+"\n")
 }
 
 func storedJob(t *testing.T, n *testNode, id string) proto.Job {

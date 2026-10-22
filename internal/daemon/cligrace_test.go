@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -23,18 +22,20 @@ func TestLiveCLIDropIsNotACancel(t *testing.T) {
 	var alive atomic.Bool
 	alive.Store(true)
 	a.clientAlive = func(int) bool { return alive.Load() }
+	// The reattach below must never race the grace on a loaded machine.
+	a.timing.CLIDropGrace = time.Minute
 	b.start()
 	a.start()
 	c.waitOnline("a", "b")
 	ws := workspaceDir(t, map[string]string{"f": "x"})
 	script, want := counterScript(30, "0.05")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := testContext(30 * time.Second)
 	defer cancel()
 	res := &cliResult{}
 	var once sync.Once
 	err := runCLIInto(ctx, a.sock(), shSpec(ws, script), cliOpts{
 		hook: func(rs client.RunSession, ft proto.FrameType, p []byte, r *cliResult) error {
-			if ft == proto.FrameStdout && strings.HasPrefix(string(p), "3") {
+			if ft == proto.FrameStdout && reachedLine(r, p, "3") {
 				var err error
 				once.Do(func() { err = errCLIDies })
 				return err
@@ -83,7 +84,7 @@ func TestLiveCLIDropBeforeStartCancels(t *testing.T) {
 	a.start()
 	c.waitOnline("a", "b")
 	ws := workspaceDir(t, map[string]string{"f": "x"})
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := testContext(20 * time.Second)
 	defer cancel()
 	var id string
 	runCLI(ctx, a.sock(), shSpec(ws, "echo ran"), cliOpts{

@@ -233,6 +233,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.peers.reload()
 	}
 
+	// The scheduler knows this node's capacity before the first admit or
+	// submit arrives (otherwise it would see "0 B free" until selfLoop's
+	// first pass).
+	d.publishSelf()
+
 	var listeners []func()
 	if !d.deps.NoListen {
 		stop, err := d.listen()
@@ -405,8 +410,14 @@ func (d *Daemon) refreshInfo(force bool) proto.NodeInfo {
 
 func (d *Daemon) nodeInfo() proto.NodeInfo {
 	d.infoMu.Lock()
-	defer d.infoMu.Unlock()
-	return d.info
+	info := d.info
+	d.infoMu.Unlock()
+	if d.deps.Exec != nil && info.Runtimes != nil {
+		// Cheap (execenv caches them) and changes between refreshes, e.g.
+		// when the first container job has built the runtime image.
+		info.Runtimes = d.deps.Exec.Runtimes(d.lifetime())
+	}
+	return info
 }
 
 // lifetime is the daemon context: canceled at shutdown.

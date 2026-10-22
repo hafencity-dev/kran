@@ -89,7 +89,7 @@ func TestFinishedJobStoredWithoutEnv(t *testing.T) {
 	ws := workspaceDir(t, map[string]string{"f": "x"})
 	spec := shSpec(ws, "true")
 	spec.Env = map[string]string{"DATABASE_URL": "postgres://u:pw@db/x"}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := testContext(20 * time.Second)
 	defer cancel()
 	res, err := runCLI(ctx, a.sock(), spec, cliOpts{})
 	if err != nil || res.exit == nil {

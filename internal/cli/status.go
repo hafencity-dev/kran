@@ -289,8 +289,8 @@ func (c *countWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// explainEmptyLog says why there is nothing to show: a job that ran on this
-// machine wrote straight to the terminal that started it, so kran has no copy.
+// explainEmptyLog says why there is nothing to show for a local job (whose
+// output kran records since its CLI copies it to the daemon).
 func (a *App) explainEmptyLog(cmd *cobra.Command, cl client.Client, id string) {
 	jobs, err := cl.Jobs(cmd.Context(), 1000)
 	if err != nil {
@@ -301,7 +301,7 @@ func (a *App) explainEmptyLog(cmd *cobra.Command, cl client.Client, id string) {
 			continue
 		}
 		if j.Local {
-			a.errorf("%s ran on this machine, so its output went to the terminal that ran it; kran keeps output only for jobs that ran elsewhere", id)
+			a.errorf("%s ran on this machine and printed nothing kran recorded (a job started by an older kran, or while the daemon was down, has no recorded output)", id)
 		}
 		return
 	}

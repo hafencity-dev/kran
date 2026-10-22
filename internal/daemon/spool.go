@@ -3,6 +3,7 @@ package daemon
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -200,6 +201,11 @@ type spoolReader struct {
 	// seen by a reattaching client and are skipped (exit is never skipped).
 	skipCtlBefore int64
 	buf           []byte
+	// hideLocalOutput: run sessions do not get a local job's output back
+	// (its CLI sent it for the history; the terminal already has it).
+	// Output after a decision{mode:"local"} is skipped but still counted.
+	hideLocalOutput bool
+	localMode       bool
 }
 
 // reader returns a reader delivering output from offset. With reattach,
@@ -255,10 +261,16 @@ func (r *spoolReader) next(ctx context.Context, wait bool) (proto.FrameType, []b
 		}
 		framePos := r.pos
 		r.pos += 5 + int64(len(p))
+		if t == proto.FrameDecision && r.hideLocalOutput {
+			var dc proto.Decision
+			if json.Unmarshal(p, &dc) == nil {
+				r.localMode = dc.Mode == "local"
+			}
+		}
 		if isOutput(t) {
 			start := r.outPos
 			r.outPos += int64(len(p))
-			if r.outPos <= r.offset {
+			if r.outPos <= r.offset || r.localMode {
 				continue
 			}
 			if start < r.offset {

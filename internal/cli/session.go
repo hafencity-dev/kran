@@ -53,6 +53,9 @@ type runner struct {
 	watcher func(pgid int) *exec.Cmd
 	probe   func(int64) bool
 	color   style
+	// unknownNode explains a --node pin naming no linked machine, from
+	// peers.toml (used when no daemon answers); nil skips the check.
+	unknownNode func(node string) string
 
 	// session state
 	cl       client.Client
@@ -67,6 +70,7 @@ type runner struct {
 	lastRecv time.Time
 	local    *localProc
 	localCh  <-chan proto.Exit
+	tee      *historyTee // local output → daemon (job history)
 	fallback bool
 	lastInt  time.Time
 
@@ -192,6 +196,11 @@ func (r *runner) clearNote() {
 func (r *runner) Run(ctx context.Context) int {
 	r.quit = make(chan struct{})
 	defer close(r.quit)
+	defer func() {
+		if r.tee != nil {
+			r.tee.stop()
+		}
+	}()
 	r.frames = make(chan frameMsg, 64)
 	r.reconnectCh = make(chan reconnectResult, 1)
 
@@ -214,6 +223,15 @@ func (r *runner) Run(ctx context.Context) int {
 	if v.API != proto.APIVersion {
 		return r.noSession(ctx, fmt.Sprintf("daemon %s speaks API %s, this kran speaks %s — running locally (update: kran upgrade)", v.Version, v.API, proto.APIVersion), nil)
 	}
+	usage, notice := pinnedNode(ctx, cl, r.spec.Req.Node)
+	if usage != "" {
+		r.sayAlways("%s", usage)
+		r.event("exit", map[string]any{"code": proto.ExitUsage, "state": proto.JobFailed})
+		return proto.ExitUsage
+	}
+	if notice != "" {
+		r.say("%s", notice)
+	}
 	sess, err := cl.Run(ctx)
 	if err != nil {
 		return r.noSession(ctx, "could not open a run session — running locally", err)
@@ -229,6 +247,13 @@ func (r *runner) Run(ctx context.Context) int {
 // noSession is the path for every failure before a run session exists: run
 // locally unless the user forbade it.
 func (r *runner) noSession(ctx context.Context, why string, cause error) int {
+	if r.unknownNode != nil && r.jobID == "" {
+		// No daemon to ask: peers.toml says whether the pin is a typo.
+		if msg := r.unknownNode(r.spec.Req.Node); msg != "" && r.spec.Req.Node != "" {
+			r.sayAlways("%s", msg)
+			return proto.ExitUsage
+		}
+	}
 	if r.spec.NoFallback {
 		msg := strings.SplitN(why, " — ", 2)[0]
 		if cause != nil && !errors.Is(cause, client.ErrNoDaemon) {
@@ -265,8 +290,12 @@ func defaultEnvelope() *proto.LocalEnvelope {
 }
 
 func (r *runner) localJob(env *proto.LocalEnvelope) localJob {
-	return localJob{JobID: r.jobID, Argv: r.spec.Argv, Dir: r.spec.Cwd, Env: withEnvSet(r.env, r.envSet), Envelope: env,
+	j := localJob{JobID: r.jobID, Argv: r.spec.Argv, Dir: r.spec.Cwd, Env: withEnvSet(r.env, r.envSet), Envelope: env,
 		Stdio: r.stdio, ScopeProbe: r.probe}
+	if r.tee != nil {
+		j.Tee = r.tee.push
+	}
+	return j
 }
 
 // standalone runs the command locally with no daemon involvement.
@@ -331,6 +360,9 @@ func (r *runner) attach(s client.RunSession) {
 }
 
 func (r *runner) closeSession() {
+	if r.tee != nil {
+		r.tee.setSession(nil)
+	}
 	if r.sess != nil {
 		_ = r.sess.Close()
 		r.sess = nil
@@ -386,6 +418,9 @@ func (r *runner) loop(ctx context.Context) int {
 				return code
 			}
 		case <-r.winch:
+			if r.local != nil {
+				r.local.resize()
+			}
 			if r.remote && r.size != nil {
 				if t := r.size(); t != nil {
 					r.sendJSON(proto.FrameResize, t)
@@ -525,6 +560,12 @@ func (r *runner) onDecision(ctx context.Context, d proto.Decision) (int, bool) {
 		r.fallback = true
 	}
 	r.remote = false
+	if r.tee == nil && r.sess != nil {
+		// The output also goes to the daemon, so kran logs and the UI
+		// show local jobs like remote ones (SPEC §8.2).
+		r.tee = newHistoryTee(teeQueueMax)
+		r.tee.setSession(r.sess)
+	}
 	p, lerr := r.start(r.localJob(d.Envelope))
 	if lerr != nil {
 		r.sendJSON(proto.FrameExit, proto.Exit{JobID: d.JobID, Code: lerr.Code, State: proto.JobFailed, Reason: lerr.Msg})
@@ -540,6 +581,14 @@ func (r *runner) onLocalDone(ex proto.Exit) int {
 	ex.JobID = r.jobID
 	ex.Fallback = r.fallback
 	r.local, r.localCh = nil, nil
+	if r.tee != nil {
+		// The history gets the output before the exit closes it; a daemon
+		// that cannot keep up delays the exit by at most teeFlushWait.
+		r.tee.flush(teeFlushWait)
+		if r.tee.stop() {
+			r.send(proto.FrameStdout, []byte("\n"+historyTruncated+"\n"))
+		}
+	}
 	r.sendJSON(proto.FrameExit, ex)
 	r.event("exit", map[string]any{"code": ex.Code, "signal": ex.Signal, "state": ex.State, "fallback": r.fallback})
 	return ex.Code
@@ -642,6 +691,9 @@ func (r *runner) onReconnect(ctx context.Context, rr reconnectResult) (int, bool
 		// A restarted daemon lost the child's process group: without it, it
 		// could not kill the child if this kran run dies later.
 		r.sendJSON(proto.FrameStarted, r.local.Started)
+	}
+	if r.tee != nil {
+		r.tee.setSession(r.sess) // output only after reattach and started
 	}
 	return 0, false
 }

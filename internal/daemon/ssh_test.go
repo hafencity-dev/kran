@@ -1,10 +1,8 @@
 package daemon
 
 import (
-	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -46,7 +44,7 @@ func TestRemoteRunOverSSH(t *testing.T) {
 	c.waitOnline("a", "b")
 
 	ws := workspaceDir(t, map[string]string{"src/main.txt": "over ssh\n"})
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := testContext(30 * time.Second)
 	defer cancel()
 	res, err := runCLI(ctx, a.sock(), shSpec(ws, "cat src/main.txt; exit 9"), cliOpts{})
 	if err != nil {
@@ -61,11 +59,15 @@ func TestRemoteRunOverSSH(t *testing.T) {
 			t.Fatalf("link %+v", n.Link)
 		}
 	}
-	// The connection drops (sshd restart): a reconnects by itself.
+	// The connection drops (sshd restart): a reconnects by itself. Wait for
+	// a new session, not for "connected": right after the drop a still
+	// reports the old one until it notices.
+	old := a.daemon().peers.get("b").active()
 	srv.DropConnections()
 	waitFor(t, 10*time.Second, "b reconnected", func() bool {
+		s := a.daemon().peers.get("b").active()
 		ns, ok := a.scheduler().node("b")
-		return ok && ns.Status == proto.NodeOnline && ns.Link.Connected
+		return s != nil && s != old && ok && ns.Status == proto.NodeOnline && ns.Link.Connected
 	})
 	res, err = runCLI(ctx, a.sock(), shSpec(ws, "echo again"), cliOpts{})
 	if err != nil || res.out() != "again\n" || res.exit.Node != "b" {
@@ -77,7 +79,7 @@ func TestRemoteRunOverSSH(t *testing.T) {
 	var once sync.Once
 	res, err = runCLI(ctx, a.sock(), shSpec(ws, script), cliOpts{
 		hook: func(rs client.RunSession, ft proto.FrameType, p []byte, r *cliResult) error {
-			if ft == proto.FrameStdout && strings.HasPrefix(string(p), "4") {
+			if ft == proto.FrameStdout && reachedLine(r, p, "4") {
 				once.Do(srv.DropConnections)
 			}
 			return nil
@@ -101,7 +103,7 @@ func TestPeersFileWatch(t *testing.T) {
 	if _, ok := a.scheduler().node("b"); ok {
 		t.Fatal("b known before it was linked")
 	}
-	os.WriteFile(peers, []byte(`[[peer]]
+	writeFileAtomic(peers, []byte(`[[peer]]
 name = "b"
 id = "b-id"
 addresses = ["mem:22"]
@@ -110,13 +112,13 @@ host_key = "ssh-ed25519 AAAA"
 direction = "both"
 `), 0o600)
 	c.waitOnline("a", "b")
-	os.WriteFile(peers, []byte("# unlinked\n"), 0o600)
+	writeFileAtomic(peers, []byte("# unlinked\n"), 0o600)
 	waitFor(t, 5*time.Second, "b removed", func() bool {
 		_, ok := a.scheduler().node("b")
 		return !ok && len(a.daemon().State().Nodes) == 1
 	})
 	// A broken file keeps the current peers.
-	os.WriteFile(peers, []byte(`[[peer]]
+	writeFileAtomic(peers, []byte(`[[peer]]
 name = "b"
 id = "b-id"
 addresses = ["mem:22"]
@@ -125,9 +127,20 @@ host_key = "k"
 direction = "both"
 `), 0o600)
 	c.waitOnline("a", "b")
-	os.WriteFile(peers, []byte("[[peer]\nbroken"), 0o600)
+	writeFileAtomic(peers, []byte("[[peer]\nbroken"), 0o600)
 	time.Sleep(300 * time.Millisecond)
 	if ns, ok := a.scheduler().node("b"); !ok || ns.Status != proto.NodeOnline {
 		t.Fatal("a broken peers.toml disconnected b")
 	}
+}
+
+// writeFileAtomic replaces a file the way kran link does (temp + rename),
+// so a watcher never sees it half-written: on a loaded machine the gap
+// between os.WriteFile's truncate and write can span several polls.
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, mode); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }

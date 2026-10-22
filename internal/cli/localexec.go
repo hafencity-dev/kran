@@ -33,6 +33,9 @@ type localJob struct {
 	// ScopeProbe reports whether a transient systemd scope with this memory cap
 	// can be created. nil uses the real probe.
 	ScopeProbe func(memMax int64) bool
+	// Tee receives a copy of the output for the job history; nil lets the
+	// child inherit the descriptors directly.
+	Tee func(proto.FrameType, []byte)
 	// Watcher, when set, guards a job no daemon looks after: the job dies
 	// with kran run, even by SIGKILL (lifeline.go; on Linux the leader
 	// also gets a parent-death signal).
@@ -46,9 +49,14 @@ type localProc struct {
 	start    time.Time
 	scope    string
 	fgTTY    *os.File // terminal we handed to the child; reclaimed after Wait
+	capture  *outputCapture
 	life     *lifeline
 	resultCh chan proto.Exit
 }
+
+// captureGrace is how long output may still arrive after the child exited
+// (a background grandchild holding the pipe must not keep kran run alive).
+const captureGrace = 500 * time.Millisecond
 
 // localError carries the exit code a shell would use for a launch failure.
 type localError struct {
@@ -165,7 +173,19 @@ func startLocal(j localJob) (*localProc, *localError) {
 		SysProcAttr: &syscall.SysProcAttr{Setpgid: true},
 	}
 	var fg *os.File
-	if j.Stdio.In != nil && isTerminal(j.Stdio.In) {
+	var capture *outputCapture
+	if j.Tee != nil {
+		// Without a capture (no pty available …) the job still runs; only
+		// its history stays empty.
+		capture, _ = newCapture(j.Stdio, j.Tee)
+	}
+	if capture != nil {
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = capture.stdin, capture.stdout, capture.stderr
+		cmd.SysProcAttr = capture.sysProcAttr()
+		if capture.foreground {
+			fg = j.Stdio.In
+		}
+	} else if j.Stdio.In != nil && isTerminal(j.Stdio.In) {
 		// Make the child the foreground group so it can read the terminal and
 		// receives Ctrl-C directly, exactly like a shell would.
 		cmd.SysProcAttr.Foreground = true
@@ -178,6 +198,9 @@ func startLocal(j localJob) (*localProc, *localError) {
 		startCmd = func() error { return startWithDeathSignal(cmd) }
 	}
 	if err := startCmd(); err != nil {
+		if capture != nil {
+			capture.abort()
+		}
 		code := 126
 		if errors.Is(err, os.ErrNotExist) {
 			code = 127
@@ -187,8 +210,11 @@ func startLocal(j localJob) (*localProc, *localError) {
 	if j.Envelope != nil && j.Envelope.Nice != 0 {
 		_ = syscall.Setpriority(syscall.PRIO_PROCESS, cmd.Process.Pid, j.Envelope.Nice)
 	}
+	if capture != nil {
+		capture.started()
+	}
 	p := &localProc{
-		cmd: cmd, start: start, scope: scope, fgTTY: fg, life: startLifeline(cmd.Process.Pid, j.Watcher),
+		cmd: cmd, start: start, scope: scope, fgTTY: fg, capture: capture, life: startLifeline(cmd.Process.Pid, j.Watcher),
 		Started:  proto.Started{JobID: j.JobID, PID: cmd.Process.Pid, PGID: cmd.Process.Pid, Scope: scope},
 		resultCh: make(chan proto.Exit, 1),
 	}
@@ -223,11 +249,21 @@ func (p *localProc) wait() {
 	} else {
 		ex.State = proto.JobFailed
 	}
+	if p.capture != nil {
+		p.capture.finish(captureGrace)
+	}
 	p.life.release()
 	if p.fgTTY != nil {
 		reclaimTerminal(p.fgTTY)
 	}
 	p.resultCh <- ex
+}
+
+// resize passes a terminal size change to the job's pty, if it has one.
+func (p *localProc) resize() {
+	if p.capture != nil {
+		p.capture.resize()
+	}
 }
 
 // Done delivers the exit once.

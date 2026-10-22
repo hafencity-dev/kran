@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"context"
 	"encoding/json"
 	"testing"
 	"time"
@@ -17,7 +16,7 @@ import (
 func TestRunningPhasePrecedesOutput(t *testing.T) {
 	_, a, _ := twoNodes(t)
 	ws := workspaceDir(t, map[string]string{"f": "x"})
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := testContext(60 * time.Second)
 	defer cancel()
 	for i := 0; i < 15; i++ {
 		running := false

@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -39,7 +38,7 @@ func TestPrestartFailureMovesToAnotherPeer(t *testing.T) {
 	c.waitOnline("a", "b")
 	c.waitOnline("a", "c")
 	ws := workspaceDir(t, map[string]string{"in": "data\n"})
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := testContext(20 * time.Second)
 	defer cancel()
 	res, err := runCLI(ctx, a.sock(), shSpec(ws, "cat in; exit 3"), cliOpts{})
 	if err != nil {
@@ -64,9 +63,7 @@ func TestPrestartFailureMovesToAnotherPeer(t *testing.T) {
 		return b.exec.heldSlots() == 0 && cn.exec.heldSlots() == 0 &&
 			len(b.daemon().target.status().Allocs) == 0 && len(cn.daemon().target.status().Allocs) == 0
 	})
-	if n := a.scheduler().allocCount(); n != 0 {
-		t.Fatalf("origin allocation leaked: %d", n)
-	}
+	waitFor(t, time.Second, "origin allocation released", func() bool { return a.scheduler().allocCount() == 0 })
 	j := storedJob(t, a, res.jobID)
 	if j.Node != "c" || j.State != proto.JobFailed || j.Fallback {
 		t.Fatalf("stored %+v", j)

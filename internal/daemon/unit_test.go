@@ -326,7 +326,7 @@ func TestAPIEventsStateFirstAndUIListener(t *testing.T) {
 	a := c.nodes["a"]
 	a.cfg.UIListen = "127.0.0.1:0"
 	d := a.start()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := testContext(10 * time.Second)
 	defer cancel()
 	cl, err := client.DialSocket(ctx, a.sock())
 	if err != nil {
