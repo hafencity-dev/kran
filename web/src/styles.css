@@ -191,8 +191,7 @@ a {
   position: sticky;
   top: 0;
   z-index: 20;
-  background: color-mix(in srgb, var(--surface) 92%, transparent);
-  backdrop-filter: blur(8px);
+  background: var(--surface);
   border-bottom: 1px solid var(--rule);
 }
 
@@ -277,10 +276,22 @@ a {
   border-radius: 50%;
   background: var(--ink-3);
 }
+.conn-dot {
+  position: relative;
+}
 .conn-live .conn-dot {
   background: var(--good);
-  box-shadow: 0 0 0 0 color-mix(in srgb, var(--good) 60%, transparent);
+}
+/* The pulse is a separate layer animating only transform and opacity, so
+   it never triggers layout or paint of the page. */
+.conn-live .conn-dot::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--good);
   animation: beat 2s ease-out infinite;
+  will-change: transform, opacity;
 }
 .conn-warn .conn-dot {
   background: var(--warn);
@@ -297,11 +308,13 @@ a {
 
 @keyframes beat {
   0% {
-    box-shadow: 0 0 0 0 color-mix(in srgb, var(--good) 55%, transparent);
+    transform: scale(1);
+    opacity: 0.6;
   }
   70%,
   100% {
-    box-shadow: 0 0 0 7px transparent;
+    transform: scale(2.6);
+    opacity: 0;
   }
 }
 
@@ -580,12 +593,14 @@ main {
 }
 
 .berths {
+  contain: layout paint;
   background: var(--surface);
   border: 1px solid var(--rule);
   border-radius: 12px;
 }
 
 .berth {
+  contain: layout;
   display: grid;
   grid-template-columns: 15.5rem minmax(0, 1fr) 15rem;
   gap: 20px 32px;
@@ -711,9 +726,6 @@ main {
   top: 0;
   bottom: 0;
   border-radius: 4px;
-  transition:
-    left 0.3s ease,
-    width 0.3s ease;
 }
 .seg-free {
   background: transparent;
@@ -773,7 +785,6 @@ main {
   background: var(--on);
   opacity: 0.45;
   transform-origin: left;
-  transition: transform 0.6s ease;
 }
 .strip-mem .blk {
   padding: 0;
@@ -970,6 +981,7 @@ main {
    Tables (running, history) */
 
 .table-wrap {
+  contain: layout paint;
   background: var(--surface);
   border: 1px solid var(--rule);
   border-radius: 12px;
@@ -1000,6 +1012,15 @@ table.jobs {
 }
 .jobs tbody tr {
   cursor: pointer;
+}
+/* Long lists: rows off screen cost nothing until scrolled to. */
+.history tbody tr {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 58px;
+}
+.qitem {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;
 }
 .jobs tbody tr:hover {
   background: color-mix(in srgb, var(--sunken) 70%, transparent);
@@ -1132,7 +1153,6 @@ table.jobs {
   height: 100%;
   background: var(--ink-2);
   transform-origin: left;
-  transition: transform 1s linear;
 }
 .bar-over span {
   background: var(--serious);
@@ -1164,6 +1184,7 @@ table.jobs {
    Queue */
 
 .queue {
+  contain: layout paint;
   list-style: none;
   margin: 0;
   padding: 0 20px;

@@ -10,6 +10,7 @@ export default defineConfig({
     target: 'es2022',
     modulePreload: { polyfill: false },
     reportCompressedSize: true,
+    minify: process.env.NOMINIFY ? false : 'esbuild',
   },
   server: {
     port: 5173,

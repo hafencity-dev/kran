@@ -569,6 +569,13 @@ func (s *Sim) spawn(now time.Time) {
 	if active > target+4 {
 		return
 	}
+	if s.opt.TargetActive > 0 && active < target {
+		// Load tests: fill up quickly so the queue really holds hundreds.
+		for i := 0; i < min(20, target-active); i++ {
+			s.submit(now)
+		}
+		return
+	}
 	if s.rng.Float64() < p {
 		s.submit(now)
 	}
