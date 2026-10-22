@@ -24,6 +24,11 @@ type targetSide struct {
 
 	mu   sync.Mutex
 	jobs map[string]*tjob
+	// persistSeq numbers record snapshots (under mu); writes run outside
+	// mu and skip a snapshot older than the one already written.
+	persistSeq uint64
+	writeMu    sync.Mutex
+	written    uint64
 }
 
 type tjob struct {
@@ -86,7 +91,17 @@ func (t *targetSide) persistLocked() {
 		}
 	}
 	b, _ := json.Marshal(recs)
-	go t.d.kvSet(targetJobsKey, string(b))
+	t.persistSeq++
+	seq := t.persistSeq
+	go func() {
+		t.writeMu.Lock()
+		defer t.writeMu.Unlock()
+		if seq < t.written {
+			return // a newer snapshot is already stored
+		}
+		t.d.kvSet(targetJobsKey, string(b))
+		t.written = seq
+	}()
 }
 
 // restore rebuilds the job table after a restart: supervisors kept running

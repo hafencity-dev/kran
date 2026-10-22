@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -142,5 +144,50 @@ func TestPumpJobStopsReadingBeforeReturning(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if after := sp.outputBytes(); after != at {
 		t.Fatalf("output kept arriving after pumpJob returned: %d → %d bytes", at, after)
+	}
+}
+
+// slowFirstSet delays the first write of a key, like a busy sqlite.
+type slowFirstSet struct {
+	*memStore
+	mu   sync.Mutex
+	seen map[string]bool
+}
+
+func (s *slowFirstSet) Set(ctx context.Context, key, value string) error {
+	s.mu.Lock()
+	first := !s.seen[key]
+	s.seen[key] = true
+	s.mu.Unlock()
+	if first {
+		time.Sleep(100 * time.Millisecond)
+	}
+	return s.memStore.Set(ctx, key, value)
+}
+
+// The record of started jobs is what a restarted target uses to release
+// their slots: the last state must win even when writes overlap.
+func TestTargetJobRecordLastWriteWins(t *testing.T) {
+	n := newCluster(t, "a").nodes["a"]
+	st := &slowFirstSet{memStore: newMemStore(), seen: map[string]bool{}}
+	d, err := New(Deps{Config: n.cfg, Dirs: n.dirs, Store: st, Sched: newFakeSched("a", alwaysLocal), Est: n.est,
+		Prober: n.prober, Timing: n.timing, Logf: n.log.logf("a")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tg := d.target
+	slot := proto.SlotRef{Node: "a", RepoID: "r", Index: 1, Path: "/x"}
+	tg.mu.Lock()
+	tg.jobs["0000000001"] = &tjob{ID: "0000000001", Origin: "o", started: true}
+	tg.persistLocked()
+	tg.jobs["0000000002"] = &tjob{ID: "0000000002", Origin: "o", started: true, Slot: &slot}
+	tg.persistLocked()
+	tg.mu.Unlock()
+	time.Sleep(300 * time.Millisecond)
+	v, _, _ := st.Get(context.Background(), targetJobsKey)
+	var recs map[string]tjobRecord
+	json.Unmarshal([]byte(v), &recs)
+	if r, ok := recs["0000000002"]; !ok || r.Slot == nil || len(recs) != 2 {
+		t.Fatalf("persisted record is stale: %s", v)
 	}
 }
