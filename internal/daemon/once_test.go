@@ -244,3 +244,59 @@ func TestTargetRestartDuringSetupRunsOnce(t *testing.T) {
 		t.Fatalf("the command ran %d times", n)
 	}
 }
+
+// The origin stops while job.start is still in flight on the target (its
+// answer never arrives). The restarted origin must settle that with the
+// target before placing the job again: the start goes through there, so
+// the job is followed, not run a second time.
+func TestOriginStopWhileStartInFlight(t *testing.T) {
+	c := newCluster(t, "a", "b")
+	a, b := c.nodes["a"], c.nodes["b"]
+	a.place = preferRemote("b")
+	gate := make(chan struct{})
+	b.exec.startGate = gate
+	b.start()
+	a.start()
+	c.waitOnline("a", "b")
+	ws := workspaceDir(t, map[string]string{"f": "x"})
+	marker := filepath.Join(shortDir(t), "ran")
+	ctx, cancel := testContext(40 * time.Second)
+	defer cancel()
+	res := &cliResult{}
+	var once sync.Once
+	err := runCLIInto(ctx, a.sock(), shSpec(ws, onceScript(marker, 7)), cliOpts{
+		hook: func(rs client.RunSession, ft proto.FrameType, p []byte, r *cliResult) error {
+			if ft == proto.FrameDecision {
+				once.Do(func() {
+					go func() {
+						waitFor(t, 10*time.Second, "Start entered on b", func() bool {
+							n, _, _ := b.exec.counts()
+							return n == 1
+						})
+						a.stop()
+					}()
+				})
+			}
+			return nil
+		}}, res)
+	if err == nil {
+		t.Fatalf("session survived the daemon stop: exit %+v", res.exit)
+	}
+	waitStopped(t, a)
+	a.start()
+	time.AfterFunc(300*time.Millisecond, func() { close(gate) })
+	err = runCLIInto(ctx, a.sock(), proto.JobSpec{}, cliOpts{reattach: &proto.Reattach{JobID: res.jobID, Offset: res.offset}}, res)
+	if err != nil {
+		t.Fatalf("reattach: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if n := runs(t, marker); n != 1 {
+		t.Fatalf("the command ran %d times (exit %+v)", n, res.exit)
+	}
+	if res.exit == nil || res.exit.Code != 7 || res.exit.Node != "b" {
+		t.Fatalf("exit %+v", res.exit)
+	}
+	if n, _, _ := b.exec.counts(); n != 1 {
+		t.Fatalf("job.start reached b %d times", n)
+	}
+}
