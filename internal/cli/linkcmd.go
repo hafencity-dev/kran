@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -78,10 +79,29 @@ func parseKV(list []string) (map[string]string, error) {
 	return m, nil
 }
 
+var aliasRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
+
+// looksLikeAlias reports whether host is a bare ssh alias (not user@host, an
+// FQDN or an address), which is a good node name.
+func looksLikeAlias(host string) bool {
+	return host != "" && aliasRe.MatchString(host) && host != "localhost"
+}
+
 func (a *App) linkOptions(f linkFlags) (link.Options, error) {
 	renv, err := parseKV(f.RemoteEnv)
 	if err != nil {
 		return link.Options{}, err
+	}
+	for k, v := range renv {
+		if strings.HasPrefix(v, "~") || strings.Contains(v, "$") {
+			return link.Options{}, usagef("--remote-env %s=%s: use an absolute path; the other machine's home is not expanded", k, v)
+		}
+	}
+	if strings.HasPrefix(f.RemoteBinDir, "$") {
+		return link.Options{}, usagef("--remote-bin-dir %s: use an absolute path or ~/…", f.RemoteBinDir)
+	}
+	if f.Name == "" && looksLikeAlias(f.Host) {
+		f.Name = config.SanitizeName(f.Host) // `kran link devmac` names the node devmac on both sides
 	}
 	self, err := a.Self()
 	if err != nil {

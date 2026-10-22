@@ -83,6 +83,9 @@ func (a *App) runSetup(ctx context.Context, f setupFlags) error {
 			fmt.Fprintf(a.Out, format+"\n", args...)
 		}
 	}
+	if os.Getenv("KRAN_NO_SERVICE") != "" {
+		f.NoService = true // set by development/CI setups that must not install a service
+	}
 	interactive := !f.Yes && a.In != nil && isTerminal(a.In) && a.outTTY
 	pr := &prompter{r: bufio.NewReader(a.In), ask: interactive, w: func(s string) { fmt.Fprint(a.Out, s) }}
 
