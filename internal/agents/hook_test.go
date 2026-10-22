@@ -15,6 +15,9 @@ func TestMain(m *testing.M) {
 	os.Setenv("HOME", home)
 	os.Unsetenv("CLAUDE_CONFIG_DIR")
 	os.Unsetenv("CLAUDE_PROJECT_DIR")
+	// Nor the developer's opt-out: tests often run with KRAN_NO_HOOK=1 so
+	// the hook leaves the test command itself alone.
+	os.Unsetenv("KRAN_NO_HOOK")
 	managedSettings = []string{home + "/managed-settings.json"}
 	code := m.Run()
 	os.RemoveAll(home)
