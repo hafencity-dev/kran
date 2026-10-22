@@ -13,9 +13,12 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/hafencity-dev/kran/internal/proto"
 )
@@ -110,6 +113,36 @@ func (te *testEnv) killAll(m *manager) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		p.Wait(ctx)
 		cancel()
+	}
+	// The status is a supervisor's last write, but the process may still
+	// be exiting; t.TempDir cleanup must not race with it.
+	for _, id := range listDirs(m.l.jobsDir()) {
+		if !waitSupervisorExit(m.l.job(id), 15*time.Second) {
+			te.t.Errorf("supervisor of %s still running at cleanup", id)
+		}
+	}
+}
+
+// waitSupervisorExit blocks until no process holds the job's lock (the
+// kernel drops a flock when its holder exits).
+func waitSupervisorExit(dir string, d time.Duration) bool {
+	f, err := os.OpenFile(filepath.Join(dir, fileLock), os.O_RDWR, 0)
+	if err != nil {
+		return true
+	}
+	got := make(chan struct{})
+	go func() {
+		defer f.Close()
+		if unix.Flock(int(f.Fd()), unix.LOCK_EX) == nil {
+			unix.Flock(int(f.Fd()), unix.LOCK_UN)
+		}
+		close(got)
+	}()
+	select {
+	case <-got:
+		return true
+	case <-time.After(d):
+		return false
 	}
 }
 
@@ -889,5 +922,33 @@ func jsonUnmarshal(t *testing.T, s string, v any) {
 	t.Helper()
 	if err := json.Unmarshal([]byte(s), v); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestRunningPhaseBeforeOutput: whoever reads a job's output has been told
+// the command started before seeing its first byte (the origin decides
+// fallback vs. exit 125 by that), even for jobs that print and exit at once.
+func TestRunningPhaseBeforeOutput(t *testing.T) {
+	te := newTestEnv(t)
+	ref := te.slot(testRepo, nil, proto.RuntimeNative)
+	for i := 0; i < 10; i++ {
+		var running atomic.Bool
+		p := te.start(ref, sh("echo hi"), func(r *StartRequest) {
+			r.OnPhase = func(ph proto.Phase) {
+				if ph.State == proto.JobRunning {
+					running.Store(true)
+				}
+			}
+		})
+		r := p.Output(0)
+		buf := make([]byte, 64<<10)
+		if _, _, err := proto.ReadFrame(r, buf); err != nil {
+			t.Fatal(err)
+		}
+		if !running.Load() {
+			t.Fatalf("run %d: output before the running phase", i)
+		}
+		r.Close()
+		waitExit(t, p, 20*time.Second)
 	}
 }

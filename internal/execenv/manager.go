@@ -192,22 +192,19 @@ func (m *manager) reindex() {
 			writeJSONAtomic(filepath.Join(dir, fileStatus), exit)
 			continue
 		}
-		js := m.track(spec.JobID, dir, spec, nil)
 		// The slot stays busy across the restart; the daemon releases it
 		// with its persisted SlotRef once the job ended (and the reaper
 		// frees it if nobody does within slotHoldIdle).
-		if sl := m.pool.markBusy(spec.Slot, spec.JobID); sl != nil {
-			js.mu.Lock()
-			js.slot = sl
-			js.mu.Unlock()
-		}
+		m.track(spec.JobID, dir, spec, nil, m.pool.markBusy(spec.Slot, spec.JobID))
 		m.logf("re-attached running job %s", spec.JobID)
 	}
 }
 
 // track registers a job and starts its watcher.
-func (m *manager) track(id, dir string, spec superSpec, onPhase func(proto.Phase)) *jobState {
-	js := &jobState{m: m, id: id, dir: dir, spec: spec, done: make(chan struct{}), onPhase: onPhase}
+// The slot is set before the watcher starts: a job that ends at once must
+// still find it to free it.
+func (m *manager) track(id, dir string, spec superSpec, onPhase func(proto.Phase), sl *slot) *jobState {
+	js := &jobState{m: m, id: id, dir: dir, spec: spec, done: make(chan struct{}), onPhase: onPhase, slot: sl}
 	m.jobsMu.Lock()
 	m.jobs[id] = js
 	m.jobsMu.Unlock()
@@ -488,11 +485,7 @@ func (m *manager) Start(ctx context.Context, req StartRequest) (Process, error) 
 		return nil, fmt.Errorf("start job on %s: %w", m.opts.NodeName, err)
 	}
 	ok = true
-	js := m.track(id, dir, spec, req.OnPhase)
-	js.mu.Lock()
-	js.slot = s
-	js.mu.Unlock()
-	return &process{js: js}, nil
+	return &process{js: m.track(id, dir, spec, req.OnPhase, s)}, nil
 }
 
 // nativeSpec fills spec for the native runtime.
@@ -604,7 +597,7 @@ func (m *manager) Attach(ctx context.Context, jobID string) (Process, error) {
 		return &process{js: js}, nil
 	}
 	m.jobsMu.Unlock()
-	return &process{js: m.track(jobID, dir, spec, nil)}, nil
+	return &process{js: m.track(jobID, dir, spec, nil, nil)}, nil
 }
 
 func (m *manager) Active() []string {

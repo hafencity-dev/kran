@@ -75,6 +75,11 @@ type supervisor struct {
 	lastCPU  float64
 	lastTime time.Time
 	api      *dockerAPI // container jobs: stats probe
+
+	sampleStop chan struct{} // nil until the sampler runs
+	sampleDone chan struct{}
+	stopOnce   sync.Once
+	closeOnce  sync.Once
 }
 
 const (
@@ -160,6 +165,7 @@ func (s *supervisor) run() int {
 	}
 	s.event(ev)
 	go s.watchLease()
+	s.sampleStop, s.sampleDone = make(chan struct{}), make(chan struct{})
 	go s.sample()
 
 	var usage proto.Usage
@@ -235,7 +241,19 @@ func (s *supervisor) prepareStdio() error {
 	return nil
 }
 
-func (s *supervisor) closeAll() {
+// stopSampling ends the sampler and waits until it wrote its last file.
+func (s *supervisor) stopSampling() {
+	s.stopOnce.Do(func() {
+		if s.sampleStop != nil {
+			close(s.sampleStop)
+			<-s.sampleDone
+		}
+	})
+}
+
+func (s *supervisor) closeAll() { s.closeOnce.Do(s.closeFiles) }
+
+func (s *supervisor) closeFiles() {
 	if s.ln != nil {
 		s.ln.Close()
 		os.Remove(s.spec.CtlPath)
@@ -259,14 +277,18 @@ func (s *supervisor) event(e event) {
 	}
 }
 
+// writeStatus is the supervisor's last write to the job dir: once the
+// status exists, readers may treat the job dir as final (and tests may
+// delete it), so sampling stops, files close and the per-job tmp goes
+// first.
 func (s *supervisor) writeStatus(exit proto.Exit) {
-	// Everything the job owned is gone before anyone learns it ended.
-	os.RemoveAll(filepath.Join(s.dir, dirTmp))
+	s.stopSampling()
+	s.event(event{Ev: "exit", State: exit.State, Message: exit.Reason})
+	s.logf("ended: state=%s code=%d %s", exit.State, exit.Code, exit.Reason)
+	s.closeAll()
 	if err := writeJSONAtomic(filepath.Join(s.dir, fileStatus), exit); err != nil {
 		s.logf("write status: %v", err)
 	}
-	s.event(event{Ev: "exit", State: exit.State, Message: exit.Reason})
-	s.logf("ended: state=%s code=%d %s", exit.State, exit.Code, exit.Reason)
 }
 
 func (s *supervisor) reason() string {
@@ -297,6 +319,15 @@ func (s *supervisor) runStep(setup bool) stepResult {
 		return startFailure(err)
 	}
 	tty := !setup && s.ptySlave != nil
+	// Output reaches the spool only after the running event is written,
+	// so whoever reads the spool learns that the command started before
+	// seeing its first byte (the origin decides fallback by that).
+	gate := make(chan struct{})
+	openGate := sync.OnceFunc(func() { close(gate) })
+	if setup {
+		openGate()
+	}
+	defer openGate()
 	var (
 		readers  sync.WaitGroup
 		closers  []*os.File
@@ -320,8 +351,8 @@ func (s *supervisor) runStep(setup bool) stepResult {
 		cmd.Stdout, cmd.Stderr = outW, errW
 		closers = append(closers, outW, errW)
 		readers.Add(2)
-		go s.pump(&readers, outR, proto.FrameStdout, true)
-		go s.pump(&readers, errR, proto.FrameStderr, true)
+		go s.pump(&readers, outR, proto.FrameStdout, true, gate)
+		go s.pump(&readers, errR, proto.FrameStderr, true, gate)
 		if !setup && s.stdinR != nil {
 			cmd.Stdin = s.stdinR
 			closers = append(closers, s.stdinR)
@@ -341,12 +372,13 @@ func (s *supervisor) runStep(setup bool) stepResult {
 		s.mu.Unlock()
 	}
 	if err != nil {
+		openGate()
 		readers.Wait()
 		return startFailure(err)
 	}
 	if tty {
 		readers.Add(1)
-		go s.pump(&readers, s.ptmx, proto.FrameStdout, false)
+		go s.pump(&readers, s.ptmx, proto.FrameStdout, false, gate)
 	}
 	exited := make(chan struct{})
 	s.mu.Lock()
@@ -359,6 +391,7 @@ func (s *supervisor) runStep(setup bool) stepResult {
 	if !setup {
 		s.event(event{Ev: "phase", State: proto.JobRunning, PID: cmd.Process.Pid, Container: name})
 	}
+	openGate()
 
 	werr := cmd.Wait()
 	close(exited)
@@ -464,12 +497,13 @@ func (s *supervisor) buildCmd(setup bool) (*exec.Cmd, string, error) {
 // pump copies one output stream into the spool until EOF (EIO on a pty
 // whose last slave closed). Pipes are closed here; the pty master is
 // closed by runStep because stdin and resize use it too.
-func (s *supervisor) pump(wg *sync.WaitGroup, r *os.File, t proto.FrameType, closeAtEOF bool) {
+func (s *supervisor) pump(wg *sync.WaitGroup, r *os.File, t proto.FrameType, closeAtEOF bool, gate <-chan struct{}) {
 	defer wg.Done()
 	buf := make([]byte, spoolChunk)
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
+			<-gate
 			if werr := s.spool.write(t, buf[:n]); werr != nil {
 				s.logf("spool write: %v", werr)
 			}
@@ -637,8 +671,13 @@ func (s *supervisor) watchLease() {
 // sample records live usage once per SampleEvery, tracks the peak and, for
 // native jobs without a cgroup, enforces the memory cap.
 func (s *supervisor) sample() {
+	defer close(s.sampleDone)
 	for {
-		time.Sleep(s.spec.SampleEvery)
+		select {
+		case <-s.sampleStop:
+			return
+		case <-time.After(s.spec.SampleEvery):
+		}
 		s.mu.Lock()
 		cmd, pgid, container := s.cmd, s.pgid, s.container
 		s.mu.Unlock()
