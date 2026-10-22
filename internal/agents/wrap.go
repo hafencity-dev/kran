@@ -36,7 +36,12 @@ func wrapWith(kranPath, cmd string) (string, bool) {
 }
 
 // ---------------------------------------------------------------------------
-// Policy. Whitelist approach: the command must be made only of
+// Policy. Move what benefits and leave the rest: tests, checks, type checks,
+// lints and builds that take long and whose result is the exit code and the
+// output. Anything whose point is a file or image on THIS machine (go build
+// of one package, -o, --load, coverage/junit files, --fix, snapshot updates)
+// stays local, as do servers, watchers, installs and quick commands.
+// Whitelist approach: the command must be made only of
 //   * one or more heavy commands (never reading a pipe),
 //   * `cd DIR`, `export X=y`, `true`, `echo …`,
 //   * output filters (tail, head, grep, …) that read the heavy command's pipe,
@@ -54,7 +59,10 @@ func shouldWrap(cmd string) bool {
 	if strings.TrimSpace(cmd) == "" || strings.ContainsRune(cmd, 0) {
 		return false
 	}
-	// Command substitution would need real shell parsing; backticks likewise.
+	// `make -j$(nproc)` is the one substitution agents write all the time, and
+	// the remote shell should expand it for the machine that runs the job.
+	cmd = strings.NewReplacer("$(nproc)", "8", "$(nproc --all)", "8").Replace(cmd)
+	// Other command substitution would need real shell parsing; backticks likewise.
 	if strings.Contains(cmd, "$(") || strings.Contains(cmd, "`") {
 		return false
 	}
@@ -92,6 +100,7 @@ func shouldWrap(cmd string) bool {
 	return heavy > 0
 }
 
+var durationRe = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?[smhd]?$`)
 var assignRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
 
 // stripPrefixes drops `VAR=x`, `time`, `nice [-n N]` and `env` prefixes.
@@ -106,6 +115,8 @@ func stripPrefixes(w []string) []string {
 			w = w[1:]
 		case w[0] == "time" || w[0] == "env":
 			w = w[1:]
+		case w[0] == "timeout" && len(w) >= 3 && durationRe.MatchString(w[1]):
+			w = w[2:]
 		case w[0] == "nice":
 			w = w[1:]
 			if len(w) >= 2 && w[0] == "-n" {
@@ -132,6 +143,13 @@ func isBenign(w []string) bool {
 		}
 		return true
 	case "true", ":", "echo":
+		return true
+	case "set": // set -e, set -euo pipefail
+		for _, a := range w[1:] {
+			if !strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "+") && a != "pipefail" && a != "errexit" && a != "nounset" {
+				return false
+			}
+		}
 		return true
 	}
 	return false
@@ -173,7 +191,7 @@ func isHeavy(w []string) bool {
 		case "-w", "watch", "--ui", "--headed", "--debug", "--inspect", "--inspect-brk":
 			return false
 		}
-		if strings.HasPrefix(a, "--watch") {
+		if staysLocalFlag(a) {
 			return false
 		}
 	}
@@ -198,6 +216,12 @@ func isHeavy(w []string) bool {
 		return in(firstPositional(args), "build", "test")
 	case name == "cmake":
 		return anyIn(args, "--build")
+	case name == "ctest":
+		return true
+	case name == "golangci-lint":
+		return firstPositional(args) == "run"
+	case name == "turbo" || name == "nx":
+		return turboHeavy(args)
 	case name == "pytest" || name == "py.test":
 		return !anyIn(args, "--looponfail", "-f")
 	case isPython(name):
@@ -210,6 +234,28 @@ func isHeavy(w []string) bool {
 		return jsRunnerHeavy(args)
 	case in(name, "npm", "pnpm", "yarn", "bun"):
 		return pmHeavy(name, args)
+	}
+	return false
+}
+
+// staysLocalFlag reports flags that mean "watch" or "write files here":
+// the watcher must stay interactive, and --fix/-u/coverage files are wanted in
+// this checkout, not on the machine that ran the command.
+func staysLocalFlag(a string) bool {
+	if strings.HasPrefix(a, "--watch") {
+		// --watch=false and --watchAll=false switch watching off.
+		return !strings.HasSuffix(a, "=false") && !strings.HasSuffix(a, "=0")
+	}
+	switch a {
+	case "--fix", "--write", "-u", "-update", "--snapshot-update", "--junitxml", "--junit-xml", "--outputFile", "--output-file", "--html":
+		return true
+	}
+	for _, p := range []string{"--fix=", "--write=", "--update", "--junitxml=", "--junit-xml=", "--outputFile=",
+		"--output-file=", "-coverprofile", "-cpuprofile", "-memprofile", "-blockprofile", "-mutexprofile", "-trace",
+		"-outputdir", "--cov-report=html", "--cov-report=xml", "--cov-report=json", "--cov-report=lcov", "--cov-report=annotate", "--html="} {
+		if strings.HasPrefix(a, p) {
+			return true
+		}
 	}
 	return false
 }
@@ -261,17 +307,29 @@ func goHeavy(args []string) bool {
 	if !in(sub, "test", "build", "vet") {
 		return false
 	}
+	devNull := false
 	for i, a := range args {
 		if a == "-o" || strings.HasPrefix(a, "-o=") {
 			// A build artifact would stay on the machine that built it; only
 			// `-o /dev/null` (compile check) is safe.
 			if a == "-o" && i+1 < len(args) && args[i+1] == "/dev/null" {
+				devNull = true
 				continue
 			}
 			return false
 		}
 	}
-	return true
+	if sub == "test" || devNull {
+		return true
+	}
+	// build and vet are only worth moving over many packages: `go build .`
+	// or `go build ./cmd/x` writes a binary here, `go vet ./pkg` is quick.
+	for _, a := range args {
+		if strings.Contains(a, "...") {
+			return true
+		}
+	}
+	return false
 }
 
 func makeHeavy(args []string) bool {
@@ -288,7 +346,7 @@ func makeHeavy(args []string) bool {
 		if strings.HasPrefix(a, "-") || strings.Contains(a, "=") {
 			continue
 		}
-		if a == "test" || a == "tests" || a == "build" || a == "all" || a == "check" ||
+		if in(a, "test", "tests", "build", "all", "check", "lint", "ci", "typecheck", "e2e") ||
 			strings.HasPrefix(a, "test-") || strings.HasPrefix(a, "test_") || strings.HasPrefix(a, "build-") {
 			return true
 		}
@@ -310,8 +368,9 @@ func dockerHeavy(args []string) bool {
 		return false
 	}
 	for _, a := range args {
-		if in(a, "-o", "--load") || strings.HasPrefix(a, "--output") || strings.HasPrefix(a, "--load") {
-			return false // result must land on this machine
+		if in(a, "-o", "--load", "--push") || strings.HasPrefix(a, "--output") || strings.HasPrefix(a, "--load") ||
+			strings.HasPrefix(a, "--push") {
+			return false // the result must land here, or the registry login lives here
 		}
 	}
 	return true
@@ -416,6 +475,23 @@ func pmHeavy(pm string, args []string) bool {
 		return isHeavy(pos)
 	}
 	return scriptHeavy(cmd)
+}
+
+// turboHeavy covers `turbo run build test`, `turbo test`, `nx run-many -t test`,
+// `nx test web`: a task graph runner is heavy when it runs a heavy task.
+func turboHeavy(args []string) bool {
+	for _, a := range args {
+		if a == "dev" || a == "serve" || a == "start" || a == "watch" {
+			return false
+		}
+	}
+	for _, a := range args {
+		a = strings.TrimPrefix(strings.TrimPrefix(a, "--target="), "-t=")
+		if scriptHeavy(a) {
+			return true
+		}
+	}
+	return false
 }
 
 func jsToolName(s string) bool { return in(s, "vitest", "jest", "playwright", "tsc", "next") }
