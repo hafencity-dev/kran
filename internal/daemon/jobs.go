@@ -267,8 +267,14 @@ func (e *jobEntry) update(fn func(j *proto.Job)) proto.Job {
 func (e *jobEntry) setState(s proto.JobState, reason string) {
 	e.update(func(j *proto.Job) {
 		j.State = s
+		if s == proto.JobQueued {
+			j.PlaceReason = "" // placed again later, maybe elsewhere
+		}
 		if reason != "" {
 			j.Reason = reason
+		} else if s == proto.JobRunning && j.PlaceReason != "" {
+			// Sync and setup messages were transient.
+			j.Reason = j.PlaceReason
 		}
 		if s == proto.JobRunning && j.StartedAt.IsZero() {
 			j.StartedAt = e.d.now().UTC()
@@ -286,6 +292,7 @@ func (e *jobEntry) markPlaced(p scheduler.Placement) {
 		j.Local = p.Local
 		j.Alloc = p.Alloc
 		j.Reason = p.Reason
+		j.PlaceReason = p.Reason
 		if p.Fallback {
 			j.Fallback = true
 		}
@@ -467,8 +474,13 @@ func (e *jobEntry) finish(x proto.Exit) {
 	j.Node = x.Node
 	j.Live = nil
 	j.QueuePos = 0
-	if x.Reason != "" {
-		j.Reason = x.Reason
+	switch {
+	case x.Reason != "":
+		j.Reason = x.Reason // why it failed: that is what matters now
+	case j.PlaceReason != "":
+		// Not the last phase message ("syncing to devmac"): why it ran
+		// where it ran.
+		j.Reason = j.PlaceReason
 	}
 	e.persistLocked()
 	final := cloneJob(*j)

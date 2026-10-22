@@ -316,11 +316,31 @@ any node's total schedulable memory is admitted alone on the largest node
 (reason shown) rather than queued forever.
 
 Scoring among admissible nodes — minimize expected completion:
-`wait + sync_bytes/bandwidth + setup_estimate + duration_estimate × speed(node)`
+`wait + sync_bytes/bandwidth + setup_estimate + duration_estimate × speed(node) × slowdown(node)`
 where `speed` is learned per (fingerprint, node) and starts from the node's
 single-core benchmark ratio; `bandwidth` is measured on blob uploads (EWMA).
+`slowdown` is contention that free CPUs do not show (a node thrashing on
+memory runs every job slower with cores idle): `1 / (1 − stall)`, stall
+combined from independent sources as `1 − Π(1 − s)` and capped at 0.8 (5×).
+Linux: PSI "some" avg10 — memory × 1.0, CPU × 0.5, I/O × 0.5 (with many
+cores or one busy disk "some task waited" overstates what a new job waits);
+swap ≥ 90% used while memory is tight (memory PSI ≥ 10 or < 10% available)
+adds 0.2; without PSI, run-queue oversubscription `1 − cpus/load1`. macOS:
+`1 − cpus/load1` and memory pressure (100 − memorystatus level) above 75
+scaled to at most 0.6; swap is not used (it grows on demand). A Linux VM's
+container runtime takes the host's slowdown plus its own CPU saturation.
+Reasons name a slowdown of 1.2× or more: "devmac (Linux container): 15.8
+CPUs free, est. 1m3s vs 2m32s here (slowed ~2.5x by memory pressure 40%,
+full swap)".
 Tie-break: origin first, then lowest load. Jobs with estimated duration under
 5 s or sync cost greater than estimated savings stay local.
+
+A job's record keeps the placement rationale in `place_reason`. Its
+`reason` is the wait reason while queued, may name the transient phase
+while syncing, in setup or reconnecting, and returns to the placement
+rationale once the command runs; a finished job's `reason` is why it
+failed when kran knows (infra error, memory cap, cancel), else the
+placement rationale (`kran jobs --why`).
 
 Queue: per-owner FIFO, owners served round-robin (weighted by priority:
 high 4, normal 2, low 1). Interactive (tty) jobs default to `high`. Every
@@ -362,7 +382,33 @@ wall seconds, p90 peak memory (last 20 runs), and per (fingerprint, node)
 speed ratio. Unknown job defaults: by command family (`go test`: cpu = min(8,
 cores), mem 4 GiB; `go build`/`go vet`: 4/2 GiB; `next build`: 4/6 GiB;
 `vitest`/`jest`: 4/4 GiB; `tsc`: 2/3 GiB; `pytest`: 2/2 GiB; `docker build`:
-4/4 GiB; `cargo`: 8/4 GiB; other: 1/1 GiB). Explicit flags and rules win.
+4/4 GiB; `cargo`: 8/4 GiB; other: 1/1 GiB).
+
+Between the two sits a learned **repo-family tier**: agents rarely repeat a
+command exactly, but "go test in this repo" has plenty of history. Per (repo
+ID, family; `-race` is its own variant of `go test`/`go build`; not for
+"other") the last 24 runs are kept (at most 64 groups, least recently
+updated dropped, persisted in the store's KV). From 3 runs on, each quantity
+replaces the family default, blended with it in log space (the default
+counts as 2 runs, 5 for memory):
+* duration: mean of the runs with the outer 10% clamped (median below 5);
+* cpu: that mean of cpu-seconds/wall × 1.5, at most 1.2 × the most any run
+  used, at least 0.5; a container run that used ≥ 85% of its `--cpus` cap
+  counts as 1.5 × its use, so a low allocation can grow;
+* memory: the largest peak (p90 from 10 runs) × 1.25, and at least 0.6 ×
+  the largest peak, so every peak seen stays under the job's cap (§6.8).
+
+Which runs teach what: successful runs everything; failed runs memory, and
+duration/cpu only when they ran at least half the expected duration (the
+best estimate available: fingerprint, then repo-family, then default) —
+and, for the repo-family tier, at most 4 × its usual duration (a hang);
+canceled and lost runs only memory, at most.
+
+Explicit flags and rules set only what they give (`--cpus`, `--mem`);
+everything else still comes from history and defaults. `Estimate.Source`
+says where cpu/mem came from (`learned`, `repo:<family>`,
+`family:<family>`, `flag`, `rule`), `duration_source` where the duration
+came from, `repo_samples` how many runs a `repo:` estimate rests on.
 Usage is measured per job: Linux cgroup (`memory.peak`, `cpu.stat`),
 container (`docker stats` sampling / cgroup), macOS (1 s sampling of the
 process tree RSS + CPU time).
