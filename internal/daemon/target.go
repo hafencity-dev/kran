@@ -117,7 +117,20 @@ func (t *targetSide) restore() {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	for _, id := range ex.Active() {
+	active := ex.Active()
+	live := map[string]bool{}
+	for _, id := range active {
+		live[id] = true
+	}
+	for id, r := range recs {
+		// Ended while the daemon was down: execenv keeps its slot busy
+		// until it is released with the recorded SlotRef.
+		if !live[id] && r.Slot != nil {
+			ex.ReleaseSlot(*r.Slot)
+			t.d.logf("target: job %s from %s ended while the daemon was down; released its slot", id, r.Origin)
+		}
+	}
+	for _, id := range active {
 		r := recs[id]
 		j := &tjob{ID: id, Origin: r.Origin, Alloc: r.Alloc, Runtime: r.Runtime, Slot: r.Slot, Owner: r.Owner, Argv: r.Argv,
 			started: true, phaseCh: make(chan struct{}), reservedAt: t.d.now()}

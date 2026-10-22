@@ -191,3 +191,37 @@ func TestTargetJobRecordLastWriteWins(t *testing.T) {
 		t.Fatalf("persisted record is stale: %s", v)
 	}
 }
+
+// A job that finishes while its target daemon is down still holds its slot
+// in execenv (released only with the persisted SlotRef): the restarted
+// daemon must release it, not leave it to the reaper's 30 min safety net.
+func TestTargetRestartReleasesSlotOfJobThatEndedMeanwhile(t *testing.T) {
+	_, a, b := twoNodes(t)
+	ws := workspaceDir(t, map[string]string{"f": "x"})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var once sync.Once
+	restarted := make(chan struct{})
+	res, err := runCLI(ctx, a.sock(), shSpec(ws, "echo x; sleep 0.3; echo y"), cliOpts{
+		hook: func(rs client.RunSession, ft proto.FrameType, p []byte, r *cliResult) error {
+			if ft == proto.FrameStdout {
+				once.Do(func() {
+					go func() {
+						defer close(restarted)
+						b.stop()
+						waitFor(t, 5*time.Second, "job ended on b", func() bool { return len(b.exec.Active()) == 0 })
+						b.start()
+					}()
+				})
+			}
+			return nil
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-restarted
+	if res.exit == nil || res.exit.Code != 0 || res.out() != "x\ny\n" {
+		t.Fatalf("exit %+v out %q", res.exit, res.out())
+	}
+	waitFor(t, 5*time.Second, "slot released after restart", func() bool { return b.exec.heldSlots() == 0 })
+}
