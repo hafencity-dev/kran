@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -100,6 +102,22 @@ func (a *App) internalCommand() *cobra.Command {
 			// Runs inside the kran-sync container (container runtime on
 			// macOS): applies a slot update streamed on stdin.
 			if code := execenv.Apply(args); code != 0 {
+				return &ExitError{Code: code}
+			}
+			return nil
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:    "watch-parent <pgid>",
+		Hidden: true,
+		Args:   cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			// Started by kran run without a daemon (lifeline.go).
+			pgid, err := strconv.Atoi(args[0])
+			if err != nil {
+				return usagef("watch-parent needs a process group id")
+			}
+			if code := watchParent(os.Stdin, pgid, 5*time.Second); code != 0 {
 				return &ExitError{Code: code}
 			}
 			return nil

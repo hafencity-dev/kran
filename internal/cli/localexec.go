@@ -33,6 +33,10 @@ type localJob struct {
 	// ScopeProbe reports whether a transient systemd scope with this memory cap
 	// can be created. nil uses the real probe.
 	ScopeProbe func(memMax int64) bool
+	// Watcher, when set, guards a job no daemon looks after: the job dies
+	// with kran run, even by SIGKILL (lifeline.go; on Linux the leader
+	// also gets a parent-death signal).
+	Watcher func(pgid int) *exec.Cmd
 }
 
 // localProc is a running local job.
@@ -42,6 +46,7 @@ type localProc struct {
 	start    time.Time
 	scope    string
 	fgTTY    *os.File // terminal we handed to the child; reclaimed after Wait
+	life     *lifeline
 	resultCh chan proto.Exit
 }
 
@@ -168,7 +173,11 @@ func startLocal(j localJob) (*localProc, *localError) {
 		fg = j.Stdio.In
 	}
 	start := time.Now()
-	if err := cmd.Start(); err != nil {
+	startCmd := cmd.Start
+	if j.Watcher != nil {
+		startCmd = func() error { return startWithDeathSignal(cmd) }
+	}
+	if err := startCmd(); err != nil {
 		code := 126
 		if errors.Is(err, os.ErrNotExist) {
 			code = 127
@@ -179,7 +188,7 @@ func startLocal(j localJob) (*localProc, *localError) {
 		_ = syscall.Setpriority(syscall.PRIO_PROCESS, cmd.Process.Pid, j.Envelope.Nice)
 	}
 	p := &localProc{
-		cmd: cmd, start: start, scope: scope, fgTTY: fg,
+		cmd: cmd, start: start, scope: scope, fgTTY: fg, life: startLifeline(cmd.Process.Pid, j.Watcher),
 		Started:  proto.Started{JobID: j.JobID, PID: cmd.Process.Pid, PGID: cmd.Process.Pid, Scope: scope},
 		resultCh: make(chan proto.Exit, 1),
 	}
@@ -214,6 +223,7 @@ func (p *localProc) wait() {
 	} else {
 		ex.State = proto.JobFailed
 	}
+	p.life.release()
 	if p.fgTTY != nil {
 		reclaimTerminal(p.fgTTY)
 	}

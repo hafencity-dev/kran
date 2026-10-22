@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"syscall"
@@ -46,6 +47,8 @@ type runner struct {
 	size    func() *proto.TTY
 	tm      timing
 	start   func(localJob) (*localProc, *localError)
+	// watcher builds `kran internal watch-parent <pgid>` (nil: the real one).
+	watcher func(pgid int) *exec.Cmd
 	probe   func(int64) bool
 	color   style
 
@@ -248,7 +251,13 @@ func (r *runner) localJob(env *proto.LocalEnvelope) localJob {
 
 // standalone runs the command locally with no daemon involvement.
 func (r *runner) standalone(ctx context.Context) int {
-	p, lerr := r.start(r.localJob(defaultEnvelope()))
+	job := r.localJob(defaultEnvelope())
+	// No daemon will kill the job if kran run dies: it must die with us.
+	job.Watcher = r.watcher
+	if job.Watcher == nil {
+		job.Watcher = defaultWatcher
+	}
+	p, lerr := r.start(job)
 	if lerr != nil {
 		return r.launchFailed(lerr)
 	}
