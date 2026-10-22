@@ -71,7 +71,7 @@ func handler(files fs.FS) http.Handler {
 		if name == "index.html" {
 			h.Set("Referrer-Policy", "no-referrer")
 			h.Set("X-Frame-Options", "DENY")
-			h.Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'")
+			h.Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'")
 		}
 		w.WriteHeader(http.StatusOK)
 		if r.Method == http.MethodHead {

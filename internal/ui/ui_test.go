@@ -75,4 +75,9 @@ func TestEmbeddedBuild(t *testing.T) {
 	if rec.Code != http.StatusOK || rec.Header().Get("Content-Security-Policy") == "" {
 		t.Fatalf("index: %d, csp %q", rec.Code, rec.Header().Get("Content-Security-Policy"))
 	}
+	for _, d := range []string{"object-src 'none'", "form-action 'none'", "frame-ancestors 'none'"} {
+		if !strings.Contains(rec.Header().Get("Content-Security-Policy"), d) {
+			t.Errorf("csp lacks %s", d)
+		}
+	}
 }
