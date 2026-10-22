@@ -227,14 +227,33 @@ type readerOnly struct{ r io.Reader }
 func (r readerOnly) Read(p []byte) (int, error) { return r.r.Read(p) }
 
 // channelWriter half-closes the channel (EOF to the client) on Close so the
-// client's reader ends while the exit status can still be sent.
+// client's reader ends while the exit status can still be sent. x/crypto's
+// CloseWrite must not run concurrently with Write, so both take mu; Close
+// does not wait for a Write blocked on the client's window.
 type channelWriter struct {
-	ch   ssh.Channel
-	once sync.Once
+	ch     ssh.Channel
+	mu     sync.Mutex
+	once   sync.Once
+	closed bool
 }
 
-func (w *channelWriter) Write(p []byte) (int, error) { return w.ch.Write(p) }
+func (w *channelWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return 0, io.ErrClosedPipe
+	}
+	return w.ch.Write(p)
+}
+
 func (w *channelWriter) Close() error {
-	w.once.Do(func() { w.ch.CloseWrite() })
+	w.once.Do(func() {
+		go func() {
+			w.mu.Lock()
+			defer w.mu.Unlock()
+			w.closed = true
+			w.ch.CloseWrite()
+		}()
+	})
 	return nil
 }

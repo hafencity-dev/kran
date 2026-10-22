@@ -378,12 +378,12 @@ type stdioConn struct {
 
 func (c *stdioConn) Read(p []byte) (int, error)  { return c.r.Read(p) }
 func (c *stdioConn) Write(p []byte) (int, error) { return c.w.Write(p) }
+// Close tears down the channel and the connection. It deliberately skips
+// stdin's CloseWrite: x/crypto does not synchronize it with a concurrent
+// Write, and closing the channel ends both directions anyway.
 func (c *stdioConn) Close() error {
 	var err error
-	c.once.Do(func() {
-		c.w.Close()
-		err = c.closeFn()
-	})
+	c.once.Do(func() { err = c.closeFn() })
 	return err
 }
 

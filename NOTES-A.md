@@ -123,8 +123,8 @@
   in-process multi-daemon harness (`harness_test.go`) with fakes that covers the SPEC §12 scenarios
   owned by A.
 * Spool size is not capped (a job printing gigabytes uses that much disk on the origin for 7 days).
-* Once, on macOS, a race report appeared in `TestRemoteRunOverSSH` while a since-fixed bug closed a
-  session mid-stream; it did not reproduce in 60+ further runs on macOS and Linux.
+* x/crypto/ssh's `channel.CloseWrite` is not synchronized with `Write` (data race); the transport
+  never calls it concurrently (client side closes the whole channel; the test sshd serializes it).
 
 ## Tests
 
