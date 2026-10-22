@@ -65,6 +65,7 @@ const (
 	codeInternal     = "internal"
 	codeNoSlot       = "slot"
 	codeDisk         = "disk_floor"
+	codeNotLinked    = "not_linked"
 )
 
 type peerError struct {

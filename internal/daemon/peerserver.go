@@ -95,21 +95,21 @@ func (d *Daemon) servePeerStream(ps *peerSession, c net.Conn) {
 	case proto.PeerAdmit:
 		t.handleAdmit(ps, pc, req)
 	case proto.PeerSlotAcquire:
-		t.handleSlotAcquire(pc, req)
+		t.handleSlotAcquire(ps, pc, req)
 	case proto.PeerSlotDiff:
-		t.handleSlotDiff(pc, req)
+		t.handleSlotDiff(ps, pc, req)
 	case proto.PeerBlobPut:
-		t.handleBlobPut(pc, req)
+		t.handleBlobPut(ps, pc, req)
 	case proto.PeerSlotCommit:
-		t.handleSlotCommit(pc, req)
+		t.handleSlotCommit(ps, pc, req)
 	case proto.PeerSlotRelease:
-		t.handleSlotRelease(pc, req)
+		t.handleSlotRelease(ps, pc, req)
 	case proto.PeerJobStart:
 		t.handleJobStart(ps, pc, req)
 	case proto.PeerJobAttach:
 		t.handleJobAttach(ps, pc, req)
 	case proto.PeerJobHeartbeat, proto.PeerJobSignal, proto.PeerJobResize, proto.PeerJobCancel:
-		t.handleJobControl(pc, req)
+		t.handleJobControl(ps, pc, req)
 	default:
 		pc.fail(codeBadRequest, "unknown method %q (the other node runs a newer kran; run kran upgrade)", req.Method)
 	}
@@ -126,18 +126,28 @@ func (d *Daemon) handleHello(ps *peerSession, pc *peerConn, req rawPeerRequest) 
 			h.Node.Name, h.Node.Version, h.Protocol, d.self, d.nodeInfo().Version, protocolString())
 		return
 	}
+	// Only linked nodes get served, under the name they are linked as (the
+	// same name an outbound session to them carries), so jobs stay bound
+	// to their origin whichever session it uses.
+	name := h.Node.Name
+	if ps.inbound {
+		if name = d.peers.linkedName(h.Node.Name, h.Node.ID); name == "" {
+			pc.fail(codeNotLinked, "%s is not linked with %s; run kran link", h.Node.Name, d.self)
+			return
+		}
+	}
 	ps.mu.Lock()
 	first := ps.remote == ""
 	if first {
-		ps.remote = h.Node.Name
+		ps.remote = name
 	}
 	ps.mu.Unlock()
 	if err := pc.respond(d.helloBody()); err != nil {
 		return
 	}
 	if first && ps.inbound {
-		d.logf("peer: %s connected", h.Node.Name)
-		d.peers.attachInbound(h.Node.Name, ps.s)
+		d.logf("peer: %s connected", name)
+		d.peers.attachInbound(name, ps.s)
 	}
 }
 
@@ -198,11 +208,12 @@ func (t *targetSide) handleAdmit(ps *peerSession, pc *peerConn, req rawPeerReque
 }
 
 // begin marks a prestart operation in flight (keeps the reservation alive).
-func (t *targetSide) begin(id string) (*tjob, error) {
+// Only the origin that admitted the job may act on it.
+func (t *targetSide) begin(id, origin string) (*tjob, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	j := t.jobs[id]
-	if j == nil || j.ended {
+	if j == nil || j.ended || j.Origin != origin {
 		return nil, &peerError{Code: codeUnknownJob, Msg: fmt.Sprintf("%s holds no reservation for job %s (it expired or was released)", t.d.self, id)}
 	}
 	if j.started {
@@ -228,13 +239,13 @@ func failPeer(pc *peerConn, err error) {
 	pc.fail(codeInternal, "%v", err)
 }
 
-func (t *targetSide) handleSlotAcquire(pc *peerConn, req rawPeerRequest) {
+func (t *targetSide) handleSlotAcquire(ps *peerSession, pc *peerConn, req rawPeerRequest) {
 	var b slotAcquireBody
 	if err := json.Unmarshal(req.Body, &b); err != nil || b.RepoID == "" {
 		pc.fail(codeBadRequest, "malformed slot.acquire")
 		return
 	}
-	j, err := t.begin(req.JobID)
+	j, err := t.begin(req.JobID, ps.name())
 	if err != nil {
 		failPeer(pc, err)
 		return
@@ -280,8 +291,8 @@ func newZstdDecoder() (*zstd.Decoder, error) {
 		zstd.WithDecoderMaxMemory(1<<30))
 }
 
-func (t *targetSide) handleSlotDiff(pc *peerConn, req rawPeerRequest) {
-	j, err := t.begin(req.JobID)
+func (t *targetSide) handleSlotDiff(ps *peerSession, pc *peerConn, req rawPeerRequest) {
+	j, err := t.begin(req.JobID, ps.name())
 	if err != nil {
 		failPeer(pc, err)
 		return
@@ -330,16 +341,17 @@ func (t *targetSide) handleSlotDiff(pc *peerConn, req rawPeerRequest) {
 	pc.respond(plan)
 }
 
-func (t *targetSide) handleBlobPut(pc *peerConn, req rawPeerRequest) {
-	var j *tjob
-	if req.JobID != "" {
-		var err error
-		if j, err = t.begin(req.JobID); err != nil {
-			failPeer(pc, err)
-			return
-		}
-		defer t.end(j)
+func (t *targetSide) handleBlobPut(ps *peerSession, pc *peerConn, req rawPeerRequest) {
+	if req.JobID == "" { // blobs land on disk: only for a live reservation
+		pc.fail(codeBadRequest, "blob.put needs a job")
+		return
 	}
+	j, err := t.begin(req.JobID, ps.name())
+	if err != nil {
+		failPeer(pc, err)
+		return
+	}
+	defer t.end(j)
 	if err := pc.respond(nil); err != nil {
 		return
 	}
@@ -371,11 +383,9 @@ func (t *targetSide) handleBlobPut(pc *peerConn, req rawPeerRequest) {
 			if err := pc.writeJSONFrame(pfAck, ack); err != nil {
 				return
 			}
-			if j != nil {
-				t.mu.Lock()
-				j.reservedAt = t.d.now()
-				t.mu.Unlock()
-			}
+			t.mu.Lock()
+			j.reservedAt = t.d.now()
+			t.mu.Unlock()
 		default:
 			return
 		}
@@ -437,8 +447,8 @@ func (t *targetSide) putBlob(ctx context.Context, pc *peerConn, dec *zstd.Decode
 	return err
 }
 
-func (t *targetSide) handleSlotCommit(pc *peerConn, req rawPeerRequest) {
-	j, err := t.begin(req.JobID)
+func (t *targetSide) handleSlotCommit(ps *peerSession, pc *peerConn, req rawPeerRequest) {
+	j, err := t.begin(req.JobID, ps.name())
 	if err != nil {
 		failPeer(pc, err)
 		return
@@ -460,9 +470,9 @@ func (t *targetSide) handleSlotCommit(pc *peerConn, req rawPeerRequest) {
 	pc.respond(nil)
 }
 
-func (t *targetSide) handleSlotRelease(pc *peerConn, req rawPeerRequest) {
+func (t *targetSide) handleSlotRelease(ps *peerSession, pc *peerConn, req rawPeerRequest) {
 	t.mu.Lock()
-	if j := t.jobs[req.JobID]; j != nil && !j.started {
+	if j := t.jobs[req.JobID]; j != nil && !j.started && j.Origin == ps.name() {
 		t.releaseLocked(j, "released by origin")
 	}
 	t.mu.Unlock()
@@ -476,7 +486,7 @@ func (t *targetSide) handleJobStart(ps *peerSession, pc *peerConn, req rawPeerRe
 		pc.fail(codeBadRequest, "malformed job.start")
 		return
 	}
-	j, err := t.begin(req.JobID)
+	j, err := t.begin(req.JobID, ps.name())
 	if err != nil {
 		failPeer(pc, err)
 		return
@@ -530,6 +540,12 @@ func (t *targetSide) handleJobAttach(ps *peerSession, pc *peerConn, req rawPeerR
 	}
 	t.mu.Lock()
 	j := t.jobs[req.JobID]
+	if j != nil && j.Origin != ps.name() {
+		j = nil
+		t.mu.Unlock()
+		pc.fail(codeUnknownJob, "%s has no job %s", t.d.self, req.JobID)
+		return
+	}
 	if j == nil {
 		// Not in memory (e.g. finished long ago or lost on restart without
 		// a record): execenv may still know it.
@@ -559,11 +575,11 @@ func (t *targetSide) handleJobAttach(ps *peerSession, pc *peerConn, req rawPeerR
 	t.streamJob(pc, j, proc, b.Offset)
 }
 
-func (t *targetSide) handleJobControl(pc *peerConn, req rawPeerRequest) {
+func (t *targetSide) handleJobControl(ps *peerSession, pc *peerConn, req rawPeerRequest) {
 	t.mu.Lock()
 	j := t.jobs[req.JobID]
 	t.mu.Unlock()
-	if j == nil {
+	if j == nil || j.Origin != ps.name() {
 		pc.fail(codeUnknownJob, "%s has no job %s", t.d.self, req.JobID)
 		return
 	}
