@@ -18,7 +18,7 @@ func (a *App) statusCommand() *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Show the mesh at a glance: nodes, free capacity, running and queued jobs",
+		Short: "Show your machines at a glance: free CPU and memory, running and queued jobs",
 		Example: `  kran status
   kran status --json | jq '.nodes[] | {name: .info.name, free: .free}'`,
 		Args: cobra.NoArgs,
@@ -296,12 +296,12 @@ func (a *App) cancelCommand() *cobra.Command {
 }
 
 func (a *App) drainCommand(verb string) *cobra.Command {
-	short := "Stop sending new jobs to a node (running jobs finish)"
+	short := "Stop sending new jobs to a machine (running jobs finish)"
 	if verb == "resume" {
-		short = "Let a drained node accept jobs again"
+		short = "Let a drained machine accept jobs again"
 	}
 	return &cobra.Command{
-		Use:               verb + " <node>",
+		Use:               verb + " <machine>",
 		Short:             short,
 		Example:           "  kran " + verb + " devmac",
 		Args:              cobra.ExactArgs(1),
@@ -315,7 +315,7 @@ func (a *App) drainCommand(verb string) *cobra.Command {
 					err = cl.Resume(cmd.Context(), args[0])
 				}
 				if err != nil {
-					return &ExitError{Code: 1, Msg: fmt.Sprintf("cannot %s %s: %v (see node names with `kran status`)", verb, args[0], err)}
+					return &ExitError{Code: 1, Msg: fmt.Sprintf("cannot %s %s: %v (machine names are in `kran status`)", verb, args[0], err)}
 				}
 				if verb == "drain" {
 					fmt.Fprintf(a.Out, "%s is draining: running jobs finish, nothing new starts there. Undo with `kran resume %s`.\n", args[0], args[0])

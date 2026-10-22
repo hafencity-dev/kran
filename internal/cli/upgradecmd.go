@@ -172,7 +172,7 @@ func (u *upgrader) run(ctx context.Context, f upgradeFlags) error {
 		}
 	}
 	if len(failed) > 0 {
-		return fmt.Errorf("could not upgrade %s; check `kran doctor <node>` and rerun `kran upgrade`", strings.Join(failed, ", "))
+		return fmt.Errorf("could not upgrade %s; check `kran doctor <machine>` and rerun `kran upgrade`", strings.Join(failed, ", "))
 	}
 	return nil
 }

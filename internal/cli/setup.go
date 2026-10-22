@@ -43,7 +43,7 @@ already done.`,
 	fs := cmd.Flags()
 	fs.BoolVarP(&f.Yes, "yes", "y", false, "accept the defaults without asking")
 	fs.BoolVarP(&f.Quiet, "quiet", "q", false, "print only errors")
-	fs.StringVar(&f.Name, "name", "", "node name (default: short hostname)")
+	fs.StringVar(&f.Name, "name", "", "name for this machine (default: short hostname)")
 	fs.BoolVar(&f.NoService, "no-service", false, "do not install the background service")
 	fs.BoolVar(&f.Agents, "agents", false, "install the agent integration without asking")
 	fs.BoolVar(&f.NoAgents, "no-agents", false, "skip the agent integration")
@@ -104,16 +104,16 @@ func (a *App) runSetup(ctx context.Context, f setupFlags) error {
 			return &ExitError{Code: 2, Msg: err.Error()}
 		}
 		cfg.Name = f.Name
-		say("node name set to %s", f.Name)
+		say("this machine is now called %s", f.Name)
 	}
 	id, created, err := config.EnsureNodeID()
 	if err != nil {
 		return &ExitError{Code: 1, Msg: err.Error()}
 	}
 	if created {
-		say("created node %s (%s)", cfg.Name, id[:8])
+		say("this machine is %s (id %s)", cfg.Name, id[:8])
 	} else {
-		say("node %s already set up (%s)", cfg.Name, id[:8])
+		say("this machine is %s (id %s)", cfg.Name, id[:8])
 	}
 	_, keyNew, err := config.EnsureKey(cfg.Name)
 	if err != nil {
