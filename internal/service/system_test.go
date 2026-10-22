@@ -12,8 +12,8 @@ func newSystemMgr(t *testing.T, r Runner, uid int, mod func(*Options)) (Manager,
 	t.Helper()
 	dir := t.TempDir()
 	return newMgr(t, "darwin", r, map[string]string{"PATH": "/opt/homebrew/bin:/usr/bin", "KRAN_STATE_DIR": ""}, func(o *Options) {
-		o.System, o.SystemDir, o.User, o.Group, o.UID = true, dir, "lokalaise", "staff", uid
-		o.Home = "/Users/lokalaise"
+		o.System, o.SystemDir, o.User, o.Group, o.UID = true, dir, "acme", "staff", uid
+		o.Home = "/Users/dev"
 		o.LogPath = filepath.Join(t.TempDir(), "state", "daemon.out.log")
 		if mod != nil {
 			mod(o)
@@ -26,13 +26,13 @@ func TestSystemPlist(t *testing.T) {
 	u := m.Unit()
 	for _, want := range []string{
 		"<key>Label</key>\n\t<string>dev.hafencity.kran</string>",
-		"<key>UserName</key>\n\t<string>lokalaise</string>",
+		"<key>UserName</key>\n\t<string>acme</string>",
 		"<key>GroupName</key>\n\t<string>staff</string>",
 		"<key>InitGroups</key>\n\t<true/>",
 		"<key>RunAtLoad</key>\n\t<true/>", "<key>KeepAlive</key>\n\t<true/>",
-		"<key>HOME</key>\n\t\t<string>/Users/lokalaise</string>",
-		"<key>USER</key>\n\t\t<string>lokalaise</string>",
-		"<key>LOGNAME</key>\n\t\t<string>lokalaise</string>",
+		"<key>HOME</key>\n\t\t<string>/Users/dev</string>",
+		"<key>USER</key>\n\t\t<string>acme</string>",
+		"<key>LOGNAME</key>\n\t\t<string>acme</string>",
 		"<key>PATH</key>\n\t\t<string>/opt/homebrew/bin:/usr/bin</string>",
 		"<string>/home/u/.local/bin/kran</string>\n\t\t<string>daemon</string>",
 		"<key>StandardOutPath</key>\n\t<string>" + o.LogPath + "</string>",

@@ -1,6 +1,6 @@
 // Package estimate computes job fingerprints and learns resource estimates
 // (cpu, peak memory, duration) and per-node speed from finished jobs.
-// SPEC §6.6. Owner: C.
+// SPEC §6.6.
 package estimate
 
 import (

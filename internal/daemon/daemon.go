@@ -1,6 +1,6 @@
 // Package daemon is the long-running node process: local API (unix socket +
 // UI listener), event bus, peer manager, job orchestration on origin and
-// target side, heartbeats and reattach. SPEC §3, §6, §8. Owner: A.
+// target side, heartbeats and reattach. SPEC §3, §6, §8.
 package daemon
 
 import "context"

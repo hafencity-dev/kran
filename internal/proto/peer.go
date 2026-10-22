@@ -42,7 +42,7 @@ const (
 	PeerJobCancel        = "job.cancel"
 	PeerMeshPeers        = "mesh.peers"
 	PeerAdmit            = "admit" // ask target to reserve resources for a job (two-phase admission)
-	// added by A: the peer's current time (body {"time"}), to measure the
+	// the peer's current time (body {"time"}), to measure the
 	// clock offset over the live session.
 	PeerClock = "clock"
 )

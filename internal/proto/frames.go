@@ -20,7 +20,7 @@ const (
 	FrameStarted   FrameType = 4  // both           JSON Started
 	FrameStdin     FrameType = 5  // client→daemon  raw
 	FrameStdinEOF  FrameType = 6  // client→daemon  empty
-	FrameStdout    FrameType = 7  // both           raw (client→daemon: a local job's output for the history; added by P1)
+	FrameStdout    FrameType = 7  // both           raw (client→daemon: a local job's output for the history)
 	FrameStderr    FrameType = 8  // both           raw (as FrameStdout)
 	FrameResize    FrameType = 9  // client→daemon  JSON TTY
 	FrameSignal    FrameType = 10 // client→daemon  JSON Signal
@@ -29,7 +29,7 @@ const (
 	FrameReattach  FrameType = 13 // client→daemon  JSON Reattach
 	FrameError     FrameType = 14 // daemon→client  JSON APIError; session ends
 	FramePhase     FrameType = 15 // daemon→client  JSON Phase (syncing/setup/running + progress)
-	// added by A: stdin flow control. kran run forwards input only below
+	// stdin flow control. kran run forwards input only below
 	// the credit's limit and keeps what the job has not consumed, so input
 	// lost on a broken connection is sent again from Resume.
 	FrameStdinCredit FrameType = 16 // daemon→client  JSON StdinCredit
@@ -94,12 +94,12 @@ type Decision struct {
 	// Envelope applies to local execution by the CLI.
 	Envelope *LocalEnvelope `json:"envelope,omitempty"`
 	Estimate Estimate       `json:"estimate"`
-	// added by A: for a remote job, input may be forwarded below this offset
+	// for a remote job, input may be forwarded below this offset
 	// until a FrameStdinCredit says more (0: no flow control, old daemon).
 	StdinLimit int64 `json:"stdin_limit,omitempty"`
 }
 
-// StdinCredit (added by A) tells kran run how much input it may forward.
+// StdinCredit tells kran run how much input it may forward.
 // Offsets count input bytes from the start of the job.
 type StdinCredit struct {
 	Consumed int64 `json:"consumed"` // the job has taken input up to here; earlier bytes may be forgotten
@@ -109,7 +109,7 @@ type StdinCredit struct {
 	Resume *int64 `json:"resume,omitempty"`
 }
 
-// StdinResume (added by A) answers a credit's Resume: input follows from
+// StdinResume answers a credit's Resume: input follows from
 // Offset. Lost means kran run no longer has that input.
 type StdinResume struct {
 	Offset int64 `json:"offset"`
@@ -152,7 +152,7 @@ type Exit struct {
 	Usage    Usage    `json:"usage"`
 	Node     string   `json:"node"`
 	Fallback bool     `json:"fallback,omitempty"`
-	// added by B: set when the job ended before the user's command started
+	// set when the job ended before the user's command started
 	// (setup failed, toolchain missing, runtime not ready). Nothing of the
 	// command ran, so the origin may still fall back to running it locally.
 	BeforeStart bool `json:"before_start,omitempty"`

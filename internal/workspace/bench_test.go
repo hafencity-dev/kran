@@ -9,14 +9,13 @@ import (
 
 // BenchmarkRescan measures a re-scan of an unchanged repository with a warm
 // hash cache (SPEC §6.7 target: < 300 ms for 30k files). The repository is
-// only read. Set KRAN_BENCH_REPO to pick one; defaults to the lokalaise
-// checkout on the shared dev box.
+// only read. Set KRAN_BENCH_REPO to pick one; defaults to this repository.
 //
 //	KRAN_BENCH_REPO=~/src/big nice go test -run '^$' -bench Rescan ./internal/workspace/
 func BenchmarkRescan(b *testing.B) {
 	repo := os.Getenv("KRAN_BENCH_REPO")
 	if repo == "" {
-		repo = "/home/lokalaise/Development/Git/lokalaise"
+		repo = "../.."
 	}
 	if _, err := os.Stat(filepath.Join(repo, ".git")); err != nil {
 		b.Skipf("no repository at %s", repo)
@@ -46,7 +45,7 @@ func BenchmarkRescan(b *testing.B) {
 func BenchmarkDetect(b *testing.B) {
 	repo := os.Getenv("KRAN_BENCH_REPO")
 	if repo == "" {
-		repo = "/home/lokalaise/Development/Git/lokalaise"
+		repo = "../.."
 	}
 	if _, err := os.Stat(repo); err != nil {
 		b.Skip("no repository")

@@ -1,7 +1,7 @@
 // Package execenv executes jobs on a target node: slots, manifest apply,
 // blob cache, project setup, runtimes (native/container), the per-job
 // supervisor, process-tree kill, resource caps and the reaper. SPEC §6.2,
-// §6.7, §6.8. Owner: B.
+// §6.7, §6.8.
 package execenv
 
 import (

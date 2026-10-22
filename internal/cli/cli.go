@@ -1,4 +1,4 @@
-// Package cli implements every kran command (SPEC §11). Owner: E.
+// Package cli implements every kran command (SPEC §11).
 package cli
 
 import (

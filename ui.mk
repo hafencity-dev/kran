@@ -1,4 +1,4 @@
-# UI targets (owner D). Included from the root Makefile: include ui.mk
+# UI targets. Included from the root Makefile: include ui.mk
 .PHONY: ui-dev ui-mock ui-shots
 
 # `make ui` (build the dashboard into internal/ui/dist) lives in the root Makefile.

@@ -38,7 +38,7 @@ exchanges dedicated keys so neither side needs anything else. Safe to repeat.
 Without a host, kran lists machines from your SSH config, Tailscale and
 known_hosts to choose from.`,
 		Example: `  kran link devmac
-  kran link lokalaise@192.168.1.20
+  kran link acme@192.168.1.20
   kran link                         # choose from a list`,
 		Args:              cobra.MaximumNArgs(1),
 		ValidArgsFunction: completeNodes,

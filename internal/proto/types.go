@@ -79,7 +79,7 @@ type Runtime struct {
 	// Toolchains found on this runtime, e.g. {"go":"1.25.10","node":"24.8.0","mise":"2026.10.1"}.
 	Toolchains map[string]string `json:"toolchains,omitempty"`
 	Docker     bool              `json:"docker"` // jobs can reach a Docker daemon
-	// added by P1: the container runtime's image is not built yet; the
+	// the container runtime's image is not built yet; the
 	// first container job builds it (about 30 s) before it can start.
 	FirstUse bool `json:"first_use,omitempty"`
 }
@@ -131,12 +131,12 @@ type NodeState struct {
 	Running   int         `json:"running"`   // kran jobs running here
 	Accepts   bool        `json:"accepts"`   // accept.enabled
 	LastSeen  time.Time   `json:"last_seen,omitempty"`
-	// added by C: config accept.max_jobs (0 = unlimited) so origins
+	// config accept.max_jobs (0 = unlimited) so origins
 	// respect a peer's job limit when placing.
 	MaxJobs int `json:"max_jobs,omitempty"`
-	// added by A (UI request): jobs other origins run on this node.
+	// jobs other origins run on this node.
 	Guests []JobRef `json:"guests,omitempty"`
-	// added by C: IDs of the jobs counted in Allocated (from the node's own
+	// IDs of the jobs counted in Allocated (from the node's own
 	// scheduler snapshot). Lets an origin tell which of its placements a
 	// peer's report already includes, so they are not counted twice.
 	AllocatedJobs []string `json:"allocated_jobs,omitempty"`
@@ -149,7 +149,7 @@ type LinkInfo struct {
 	// BandwidthBps is the EWMA of measured upload throughput to this node.
 	BandwidthBps float64 `json:"bandwidth_bps,omitempty"`
 	Connected    bool    `json:"connected"`
-	// added by A: the node's clock minus this node's, measured over the
+	// the node's clock minus this node's, measured over the
 	// link (midpoint of a request, fastest of several samples); the error is
 	// at most ClockRTTMillis/2. ClockRTTMillis is 0 when not measured.
 	ClockOffsetMillis float64 `json:"clock_offset_ms,omitempty"`
@@ -203,7 +203,7 @@ const (
 type Owner struct {
 	Kind OwnerKind `json:"kind"`
 	ID   string    `json:"id"`   // stable within a session: session id or ancestor pid
-	Name string    `json:"name"` // display name, e.g. "claude · lokalaise-a1"
+	Name string    `json:"name"` // display name, e.g. "claude · acme-a1"
 }
 
 // OSPolicy controls where a job may run relative to the origin OS.
@@ -237,8 +237,8 @@ type Requirements struct {
 	// Toolchains required by the workspace, e.g. {"go":"1.25.10","node":"24"}.
 	Toolchains map[string]string `json:"toolchains,omitempty"`
 	// NoDocker keeps the Docker socket out of a container job (.kran.toml
-	// docker = false, --no-docker). // added by R2 (security review): the
-	// socket is root-equivalent on rootful Docker.
+	// docker = false, --no-docker). The socket is root-equivalent on
+	// rootful Docker.
 	NoDocker bool `json:"no_docker,omitempty"`
 }
 
@@ -324,7 +324,7 @@ type Job struct {
 	EndedAt     time.Time   `json:"ended_at,omitempty"`
 	Origin      string      `json:"origin"` // origin node name
 	QueuePos    int         `json:"queue_pos,omitempty"`
-	// added by A (UI request): when the job was placed, when the user's
+	// when the job was placed, when the user's
 	// command started (same as StartedAt), and the last phase report
 	// (sync/setup progress) while it is not running yet.
 	PlacedAt  time.Time `json:"placed_at,omitempty"`
@@ -343,7 +343,7 @@ type Stats struct {
 	// SavedSeconds estimates origin wall time avoided by offloading today.
 	SavedSecondsToday float64            `json:"saved_seconds_today"`
 	CPUSecondsByNode  map[string]float64 `json:"cpu_seconds_by_node"`
-	// added by A (UI request): start of "today" (local midnight on the daemon).
+	// start of "today" (local midnight on the daemon).
 	Since time.Time `json:"since"`
 }
 
@@ -395,7 +395,7 @@ type VersionInfo struct {
 	Protocol  string `json:"protocol"` // "1.0"
 }
 
-// DaemonInfo (added by A) says which process serves the local API, so
+// DaemonInfo says which process serves the local API, so
 // `kran service` can tell a daemon its service manager runs from one started
 // on demand that must hand over (GET /api/v1/daemon).
 type DaemonInfo struct {
@@ -413,13 +413,13 @@ type APIError struct {
 }
 
 // QueueEvent is the Data of an EventQueue event.
-// added by A: typed payload so the client, TUI and UI decode the same shape.
+// typed payload so the client, TUI and UI decode the same shape.
 type QueueEvent struct {
 	Queue []string `json:"queue"`
 }
 
 // LogEvent is the Data of an EventLog event.
-// added by A: typed payload for notable daemon log lines.
+// typed payload for notable daemon log lines.
 type LogEvent struct {
 	Level string    `json:"level"` // "info" | "warn" | "error"
 	Msg   string    `json:"msg"`
@@ -430,7 +430,7 @@ type LogEvent struct {
 
 // OutputChunk is one message of the followed job log (GET
 // /api/v1/jobs/{id}/log?follow=1, unnamed SSE messages).
-// added by A: binary-safe log streaming for the CLI and the UI.
+// binary-safe log streaming for the CLI and the UI.
 type OutputChunk struct {
 	Offset int64  `json:"offset"`           // payload offset after this chunk
 	Data   string `json:"data"`             // the bytes as UTF-8 text (never splits a character)
@@ -439,7 +439,7 @@ type OutputChunk struct {
 }
 
 // JobRef is a job another origin runs on a node (NodeState.Guests).
-// added by A (UI request): show jobs from other machines.
+// show jobs from other machines.
 type JobRef struct {
 	ID     string     `json:"id"`
 	Origin string     `json:"origin"`

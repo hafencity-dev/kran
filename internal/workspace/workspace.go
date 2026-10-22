@@ -1,7 +1,6 @@
 // Package workspace is the origin-side view of a job's files: repo root and
 // ID detection, the file scan with a persistent hash cache, toolchain
 // detection and the optional project config `.kran.toml`. SPEC §5, §6.7.
-// Owner: B.
 package workspace
 
 import (

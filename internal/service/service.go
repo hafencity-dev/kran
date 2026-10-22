@@ -1,6 +1,6 @@
 // Package service installs and controls the kran daemon as a per-user
 // service: a systemd user unit on Linux, a launchd LaunchAgent on macOS.
-// No root is ever needed. Owner: E.
+// No root is ever needed.
 package service
 
 import (

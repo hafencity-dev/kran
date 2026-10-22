@@ -1,6 +1,6 @@
 package daemon
 
-// Adapters over internal/config (owner E): the daemon only sees NodeConfig,
+// Adapters over internal/config: the daemon only sees NodeConfig,
 // PeerConfig and PeerSource, so tests can feed them directly.
 
 import (

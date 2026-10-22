@@ -69,7 +69,7 @@ func fingerprint(parts ...string) string {
 
 func (s *Sim) newJob(at time.Time, t *template) *simJob {
 	owner, prio := s.pickOwner()
-	root := "/home/lokalaise/Development/Git/" + t.ws
+	root := "/home/dev/Development/Git/" + t.ws
 	spec := proto.JobSpec{
 		ID:   s.newID(at),
 		Argv: append([]string{}, t.argv...),

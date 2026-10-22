@@ -274,8 +274,8 @@ listen = ""
 	os.WriteFile(peers, []byte(`[[peer]]
 name = "devmac"
 id = "x"
-addresses = ["100.90.84.115:22", "192.168.178.130:22"]
-user = "lokalaise"
+addresses = ["100.64.0.2:22", "192.168.1.20:22"]
+user = "acme"
 host_key = "ssh-ed25519 AAAA"
 direction = "both"
 `), 0o600)
@@ -286,14 +286,14 @@ direction = "both"
 	if err != nil || len(ps) != 1 || ps[0].Name != "devmac" || len(ps[0].Addresses) != 2 {
 		t.Fatalf("%+v %v", ps, err)
 	}
-	if err := src.savePreferred("devmac", "192.168.178.130:22"); err != nil {
+	if err := src.savePreferred("devmac", "192.168.1.20:22"); err != nil {
 		t.Fatal(err)
 	}
 	ps, _ = src.Load()
-	if ps[0].PreferredAddress != "192.168.178.130:22" || !ps[0].sameConnection(PeerConfig{Name: "devmac", ID: "x", Addresses: ps[0].Addresses, User: "lokalaise", HostKey: "ssh-ed25519 AAAA", Direction: "both"}) {
+	if ps[0].PreferredAddress != "192.168.1.20:22" || !ps[0].sameConnection(PeerConfig{Name: "devmac", ID: "x", Addresses: ps[0].Addresses, User: "acme", HostKey: "ssh-ed25519 AAAA", Direction: "both"}) {
 		t.Fatalf("%+v", ps[0])
 	}
-	if got := orderAddresses(ps[0].Addresses, ps[0].PreferredAddress); got[0] != "192.168.178.130:22" || len(got) != 2 {
+	if got := orderAddresses(ps[0].Addresses, ps[0].PreferredAddress); got[0] != "192.168.1.20:22" || len(got) != 2 {
 		t.Fatalf("order %v", got)
 	}
 }

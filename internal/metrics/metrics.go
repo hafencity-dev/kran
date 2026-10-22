@@ -1,6 +1,6 @@
 // Package metrics probes static node info and samples live metrics on Linux
 // and macOS, including the Docker VM (container runtime capacity) and NVIDIA
-// GPUs. SPEC §6.3, proto.NodeInfo/NodeMetrics. Owner: C.
+// GPUs. SPEC §6.3, proto.NodeInfo/NodeMetrics.
 package metrics
 
 import (

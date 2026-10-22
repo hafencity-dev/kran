@@ -65,8 +65,8 @@ const fixtureNvidiaDiscrete = `NVIDIA GeForce RTX 4090, 24564, 1203, 37
 NVIDIA GeForce RTX 4090, 24564, 0, 0
 `
 
-const fixtureDockerStats = "lokalaise-qdrant\t0.20%\t71.45MiB / 4GiB\n" +
-	"lokalaise-postgres\t31.24%\t1.825GiB / 8GiB\n" +
+const fixtureDockerStats = "acme-qdrant\t0.20%\t71.45MiB / 4GiB\n" +
+	"acme-postgres\t31.24%\t1.825GiB / 8GiB\n" +
 	"kran-job-abc\t250.00%\t512KiB / 16GiB\n" +
 	"stopped\t--\t0B / 0B\n"
 

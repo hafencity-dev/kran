@@ -22,15 +22,15 @@ type Peer struct {
 	KranPath  string    `toml:"kran_path"`
 	Direction string    `toml:"direction"` // both | outbound | inbound
 	LinkedAt  time.Time `toml:"linked_at"`
-	// PreferredAddress is the last address that connected fastest (added by E).
+	// PreferredAddress is the last address that connected fastest.
 	PreferredAddress string `toml:"preferred_address,omitempty"`
 	// RemoteConfigDir is set when the peer runs with a non-default config dir
-	// (development setups); `kran unlink` and `doctor` use it (added by E).
+	// (development setups); `kran unlink` and `doctor` use it.
 	RemoteConfigDir string `toml:"remote_config_dir,omitempty"`
-	// OS and Arch of the peer as seen at link time (added by E).
+	// OS and Arch of the peer as seen at link time.
 	OS   string `toml:"os,omitempty"`
 	Arch string `toml:"arch,omitempty"`
-	// Tag marks authorized_keys lines this link added, e.g. "kran-dev" (added by E).
+	// Tag marks authorized_keys lines this link added, e.g. "kran-dev".
 	Tag string `toml:"tag,omitempty"`
 }
 

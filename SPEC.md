@@ -77,32 +77,32 @@ targets linux/darwin × arm64/amd64.
 * Connections are bidirectional when both sides can reach each other; each
   side dials its own outbound connection (no reliance on reverse tunnels).
 
-### Package layout and ownership
+### Package layout
 
-| Package | Purpose | Owner |
-|---|---|---|
-| `cmd/kran` | main | E |
-| `internal/proto` | shared wire + API types (this spec, §7–§8) | lead |
-| `internal/paths` | all filesystem locations per OS | lead |
-| `internal/version` | build info | lead |
-| `internal/transport` | ssh dialer, yamux session, `serve --stdio` bridge, peer listener, in-memory pipe transport for tests | A |
-| `internal/daemon` | daemon process: local API server (unix+tcp), event bus, peer manager, job orchestration (origin + target side), lease heartbeats, reattach | A |
-| `internal/client` | Go client for the local API used by CLI and TUI (state, events, run session, cancel, drain…) | A |
-| `internal/execenv` | target-side execution: slots, manifest apply, blob cache, deps setup, runtimes (native/container), supervisor, pty, process-tree kill, resource caps, reaper | B |
-| `internal/workspace` | origin-side: repo root/ID detection, file scan, manifest with hash cache, toolchain detection, project config `.kran.toml` | B |
-| `internal/scheduler` | queue, fair share, admission, placement scoring, reasons | C |
-| `internal/metrics` | node probe (static info) + live metrics, linux + darwin + docker VM + nvidia | C |
-| `internal/estimate` | fingerprints, learned estimates (cpu, mem, duration, per-node speed) | C |
-| `internal/store` | sqlite (modernc.org/sqlite), migrations, job history | C |
-| `internal/ui` + `web/` | embedded web dashboard (Vite + Preact + TS, built to `internal/ui/dist`, committed) | D |
-| `internal/tui` | `kran top` (bubbletea) | D |
-| `internal/cli` | all cobra commands, output style, `run` (spec building, env filter, owner detection, local fallback) | E |
-| `internal/config` | `config.toml`, `peers.toml` load/save (atomic), defaults | E |
-| `internal/link` | `kran link/unlink`: ssh bootstrap, binary push, key exchange, reverse reachability | E |
-| `internal/service` | systemd user unit / launchd agent install, start, stop, status | E |
-| `internal/agents` | `kran agents install`: Claude skill, CLAUDE.md/AGENTS.md block, Claude PreToolUse hook (`kran hook claude`) | E |
-| `internal/doctor` | `kran doctor [--fix]` checks | E |
-| release | goreleaser, `install.sh`, GitHub Actions CI | E |
+| Package | Purpose |
+|---|---|
+| `cmd/kran` | main |
+| `internal/proto` | shared wire + API types (this spec, §7–§8) |
+| `internal/paths` | all filesystem locations per OS |
+| `internal/version` | build info |
+| `internal/transport` | ssh dialer, yamux session, `serve --stdio` bridge, peer listener, in-memory pipe transport for tests |
+| `internal/daemon` | daemon process: local API server (unix+tcp), event bus, peer manager, job orchestration (origin + target side), lease heartbeats, reattach |
+| `internal/client` | Go client for the local API used by CLI and TUI (state, events, run session, cancel, drain…) |
+| `internal/execenv` | target-side execution: slots, manifest apply, blob cache, deps setup, runtimes (native/container), supervisor, pty, process-tree kill, resource caps, reaper |
+| `internal/workspace` | origin-side: repo root/ID detection, file scan, manifest with hash cache, toolchain detection, project config `.kran.toml` |
+| `internal/scheduler` | queue, fair share, admission, placement scoring, reasons |
+| `internal/metrics` | node probe (static info) + live metrics, linux + darwin + docker VM + nvidia |
+| `internal/estimate` | fingerprints, learned estimates (cpu, mem, duration, per-node speed) |
+| `internal/store` | sqlite (modernc.org/sqlite), migrations, job history |
+| `internal/ui` + `web/` | embedded web dashboard (Vite + Preact + TS, built to `internal/ui/dist`, committed) |
+| `internal/tui` | `kran top` (bubbletea) |
+| `internal/cli` | all cobra commands, output style, `run` (spec building, env filter, owner detection, local fallback) |
+| `internal/config` | `config.toml`, `peers.toml` load/save (atomic), defaults |
+| `internal/link` | `kran link/unlink`: ssh bootstrap, binary push, key exchange, reverse reachability |
+| `internal/service` | systemd user unit / launchd agent install, start, stop, status |
+| `internal/agents` | `kran agents install`: Claude skill, CLAUDE.md/AGENTS.md block, Claude PreToolUse hook (`kran hook claude`) |
+| `internal/doctor` | `kran doctor [--fix]` checks |
+| release | goreleaser, `install.sh`, GitHub Actions CI |
 
 Packages talk through the Go interfaces in §10. No package reaches into
 another's internals.
@@ -110,7 +110,7 @@ another's internals.
 ## 4. Files and locations (`internal/paths`)
 
 | What | Linux | macOS |
-|---|---|---|
+|---|---|
 | config dir | `$XDG_CONFIG_HOME/kran` (`~/.config/kran`) | `~/.config/kran` (same, deliberate: one place to look) |
 | state dir (db, logs, slots, blobs) | `$XDG_STATE_HOME/kran` (`~/.local/state/kran`) | `~/Library/Application Support/kran` |
 | runtime dir (sockets, locks) | `$XDG_RUNTIME_DIR/kran` else state dir | state dir |
@@ -144,10 +144,10 @@ enabled = "auto"              # auto = when docker reachable and needed
 [[peer]]
 name = "devmac"
 id = "…"                      # node ID (random 16-byte hex, generated at setup)
-addresses = ["100.90.84.115:22", "192.168.178.130:22"]  # tried in order, fastest wins and is remembered
-user = "lokalaise"
+addresses = ["100.64.0.2:22", "192.168.1.20:22"]  # tried in order, fastest wins and is remembered
+user = "acme"
 host_key = "ssh-ed25519 AAAA…"
-kran_path = "/Users/lokalaise/.local/bin/kran"
+kran_path = "/Users/dev/.local/bin/kran"
 direction = "both"            # both | outbound | inbound
 linked_at = 2026-10-22T12:00:00Z
 ```
@@ -402,7 +402,7 @@ lowercase base32 (job IDs: 10 chars, sortable by time).
 ### 8.1 Local HTTP API (unix socket and UI listener)
 
 | Method | Path | Purpose |
-|---|---|---|
+|---|---|
 | GET | `/api/v1/state` | `proto.State` snapshot |
 | GET | `/api/v1/events` | SSE: `proto.Event` stream (`state` first, then deltas) |
 | GET | `/api/v1/jobs?limit=&owner=&node=` | job history |
@@ -486,7 +486,7 @@ Defined in code (authoritative):
 * `internal/store/store.go` — `Store`.
 * `internal/client/client.go` — `Client`.
 
-## 11. CLI surface (owner E)
+## 11. CLI surface
 
 ```
 kran setup                 first-run wizard: service, node name, optional link + agents

@@ -75,8 +75,8 @@ func TestHostKeyFromKnownHostsHome(t *testing.T) {
 }
 
 func TestParseSSHG(t *testing.T) {
-	g := parseSSHG("user lokalaise\nhostname 192.168.178.130\nport 2200\nidentityfile ~/.ssh/id\nhostkeyalias none\n")
-	if g.User != "lokalaise" || g.Hostname != "192.168.178.130" || g.Port != 2200 || g.HostKeyAlias != "none" {
+	g := parseSSHG("user acme\nhostname 192.168.1.20\nport 2200\nidentityfile ~/.ssh/id\nhostkeyalias none\n")
+	if g.User != "acme" || g.Hostname != "192.168.1.20" || g.Port != 2200 || g.HostKeyAlias != "none" {
 		t.Fatalf("%+v", g)
 	}
 	if g := parseSSHG(""); g.Port != 22 {
@@ -145,8 +145,8 @@ Host *
     ServerAliveInterval 30
 
 Host devmac mac-studio
-    HostName 192.168.178.130
-    User lokalaise
+    HostName 192.168.1.20
+    User acme
 
 Host *.internal !bad
     User x
@@ -162,7 +162,7 @@ Host gx10
 
 const tailscaleJSON = `{"Self":{"HostName":"gx10","OS":"linux","Online":true},
 "Peer":{
- "nodekey:1":{"HostName":"devmac","DNSName":"devmac.tail1234.ts.net.","OS":"macOS","Online":true,"TailscaleIPs":["100.90.84.115"]},
+ "nodekey:1":{"HostName":"devmac","DNSName":"devmac.tail1234.ts.net.","OS":"macOS","Online":true,"TailscaleIPs":["100.64.0.2"]},
  "nodekey:2":{"HostName":"nas","DNSName":"nas.tail1234.ts.net.","OS":"linux","Online":false,"TailscaleIPs":["100.90.1.9"]},
  "nodekey:3":{"HostName":"phone","DNSName":"phone.tail1234.ts.net.","OS":"iOS","Online":true,"TailscaleIPs":["100.90.1.10"]}
 }}`
@@ -186,7 +186,7 @@ func TestReadSSHConfigHosts(t *testing.T) {
 	if got := strings.Join(names, ","); got != "devmac,mac-studio,build-box,gx10" {
 		t.Fatalf("got %s", got)
 	}
-	if hs[0].HostName != "192.168.178.130" || hs[0].User != "lokalaise" || hs[2].User != "ci" {
+	if hs[0].HostName != "192.168.1.20" || hs[0].User != "acme" || hs[2].User != "ci" {
 		t.Fatalf("%+v", hs)
 	}
 }

@@ -1,5 +1,5 @@
 // Package client talks to the local daemon over its unix socket. Used by the
-// CLI and `kran top`. Owner: A.
+// CLI and `kran top`.
 package client
 
 import (

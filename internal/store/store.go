@@ -1,7 +1,7 @@
 // Package store is the daemon's sqlite database (modernc.org/sqlite, WAL):
 // job history, estimate samples, active remote jobs (for reattach), small
 // key/value state. Other packages may create their own tables through Exec
-// with a package prefix (e.g. workspace hash cache: "ws_hash"). Owner: C.
+// with a package prefix (e.g. workspace hash cache: "ws_hash").
 package store
 
 import (

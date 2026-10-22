@@ -1,6 +1,6 @@
 // Package scheduler decides where and when jobs run: per-owner fair queue,
 // resource admission, placement scoring and human-readable reasons.
-// SPEC §6.3. Owner: C. Pure logic: no I/O, no goroutines except those the
+// SPEC §6.3. Pure logic: no I/O, no goroutines except those the
 // caller drives; deterministic given inputs and the injected clock.
 package scheduler
 
@@ -78,7 +78,7 @@ type Snapshot struct {
 	Allocated map[string]proto.Resources // node → Σ allocations
 	Free      map[string]proto.Resources // node → admissible now
 	Running   map[string]int             // node → jobs
-	// added by C:
+	//
 	// Jobs lists the job IDs counted in Allocated per node (fill
 	// proto.NodeState.AllocatedJobs of the self node from Jobs[self]).
 	Jobs map[string][]string
@@ -98,7 +98,7 @@ type Options struct {
 	Now   func() time.Time
 	Logf  func(format string, args ...any)
 
-	// added by C (all optional):
+	//
 	// SyncCost returns the expected seconds to sync the job's workspace to
 	// node and run its setup there; nil = learned from Release usage
 	// (SyncSeconds+SetupSeconds per repo and node) with a cold-start guess.

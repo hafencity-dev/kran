@@ -69,9 +69,9 @@ func logLines(k logKind, r *rand.Rand, frac float64) string {
 	case logGoTest:
 		p := goPkgs[r.IntN(len(goPkgs))]
 		if r.IntN(5) == 0 {
-			return fmt.Sprintf("?   \tgithub.com/lokalaise/app/internal/%s\t[no test files]\r\n", p)
+			return fmt.Sprintf("?   \tgithub.com/acme/app/internal/%s\t[no test files]\r\n", p)
 		}
-		return fmt.Sprintf("%sok%s  \tgithub.com/lokalaise/app/internal/%s\t%.3fs\r\n", green, reset, p, 0.2+r.Float64()*6)
+		return fmt.Sprintf("%sok%s  \tgithub.com/acme/app/internal/%s\t%.3fs\r\n", green, reset, p, 0.2+r.Float64()*6)
 	case logVitest:
 		f := tsFiles[r.IntN(len(tsFiles))]
 		return fmt.Sprintf(" %s✓%s %s %s(%d tests)%s %dms\r\n", green, reset, f, dim, 3+r.IntN(20), reset, 20+r.IntN(900))
@@ -105,7 +105,7 @@ func failTail(k logKind) string {
 	switch k {
 	case logGoTest:
 		return "--- FAIL: TestShardMerge/overlapping_ranges (0.04s)\r\n    merge_test.go:118: got 41 segments, want 40\r\n" +
-			red + "FAIL" + reset + "\tgithub.com/lokalaise/app/internal/indexplane/merge\t1.882s\r\n" + red + "FAIL" + reset + "\r\n"
+			red + "FAIL" + reset + "\tgithub.com/acme/app/internal/indexplane/merge\t1.882s\r\n" + red + "FAIL" + reset + "\r\n"
 	case logVitest, logTsc:
 		return " " + red + "×" + reset + " src/lib/retry.test.ts > retries with backoff\r\n   " + red + "AssertionError: expected 3 to be 4" + reset + "\r\n\r\n " + bold + "Test Files" + reset + "  " + red + "1 failed" + reset + " | 23 passed (24)\r\n"
 	}
@@ -119,7 +119,7 @@ func okTail(k logKind, wall float64) string {
 	case logNext:
 		return "\r\nRoute (app)                              Size     First Load JS\r\n┌ ○ /                                    5.2 kB         112 kB\r\n└ ○ /projects/[id]                       18.4 kB        141 kB\r\n"
 	case logDocker:
-		return "#14 naming to docker.io/lokalaise/api:dev done\r\n"
+		return "#14 naming to docker.io/acme/api:dev done\r\n"
 	case logBench:
 		return yel + "done:" + reset + " 1000 steps, mean tok/s 18942\r\n"
 	}

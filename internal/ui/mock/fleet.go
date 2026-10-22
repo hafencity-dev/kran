@@ -73,7 +73,7 @@ func fleet(now time.Time, extra int) []*simNode {
 			Status: proto.NodeOnline, Accepts: true,
 			Capacity: proto.Resources{CPUs: 26, Mem: 88 * gib},
 			Reserve:  proto.Resources{CPUs: 2, Mem: 8 * gib},
-			Link:     proto.LinkInfo{Address: "192.168.178.130:22", Direction: "both", RTTMillis: 1.7, BandwidthBps: 108e6, Connected: true},
+			Link:     proto.LinkInfo{Address: "192.168.1.20:22", Direction: "both", RTTMillis: 1.7, BandwidthBps: 108e6, Connected: true},
 		},
 		outside: 3, outsideLo: 1, outsideHi: 9, baseMem: 41 * gib,
 		vm: proto.Resources{CPUs: 16, Mem: 32 * gib},
@@ -164,13 +164,13 @@ const (
 )
 
 var templates = []template{
-	{argv: []string{"go", "test", "./internal/indexplane/..."}, ws: "lokalaise", branch: "feat/index-shards", family: "family:go-test", cpus: 8, mem: 4 * gib, dur: 48, weight: 9, exitFail: 0.12, log: logGoTest},
-	{argv: []string{"go", "test", "-race", "./..."}, ws: "lokalaise", branch: "main", family: "learned", cpus: 12, mem: 7 * gib, dur: 150, weight: 4, exitFail: 0.08, log: logGoTest},
+	{argv: []string{"go", "test", "./internal/indexplane/..."}, ws: "acme", branch: "feat/index-shards", family: "family:go-test", cpus: 8, mem: 4 * gib, dur: 48, weight: 9, exitFail: 0.12, log: logGoTest},
+	{argv: []string{"go", "test", "-race", "./..."}, ws: "acme", branch: "main", family: "learned", cpus: 12, mem: 7 * gib, dur: 150, weight: 4, exitFail: 0.08, log: logGoTest},
 	{argv: []string{"go", "vet", "./..."}, ws: "kran", branch: "agent/c-sched", family: "family:go-vet", cpus: 4, mem: 2 * gib, dur: 18, weight: 4, log: logGeneric},
-	{argv: []string{"pnpm", "vitest", "run"}, ws: "lokalaise-web", branch: "fix/upload-retry", family: "learned", cpus: 4, mem: 4 * gib, dur: 64, setup: true, weight: 7, exitFail: 0.1, log: logVitest},
-	{argv: []string{"pnpm", "tsc", "--noEmit"}, ws: "lokalaise-web", branch: "fix/upload-retry", family: "family:tsc", cpus: 2, mem: 3 * gib, dur: 26, setup: true, weight: 5, exitFail: 0.15, log: logTsc},
-	{argv: []string{"next", "build"}, ws: "lokalaise-web", branch: "main", family: "family:next-build", cpus: 4, mem: 6 * gib, dur: 112, setup: true, weight: 4, log: logNext},
-	{argv: []string{"docker", "build", "-t", "lokalaise/api:dev", "."}, ws: "lokalaise", branch: "main", family: "family:docker-build", cpus: 4, mem: 4 * gib, dur: 160, weight: 3, log: logDocker},
+	{argv: []string{"pnpm", "vitest", "run"}, ws: "acme-web", branch: "fix/upload-retry", family: "learned", cpus: 4, mem: 4 * gib, dur: 64, setup: true, weight: 7, exitFail: 0.1, log: logVitest},
+	{argv: []string{"pnpm", "tsc", "--noEmit"}, ws: "acme-web", branch: "fix/upload-retry", family: "family:tsc", cpus: 2, mem: 3 * gib, dur: 26, setup: true, weight: 5, exitFail: 0.15, log: logTsc},
+	{argv: []string{"next", "build"}, ws: "acme-web", branch: "main", family: "family:next-build", cpus: 4, mem: 6 * gib, dur: 112, setup: true, weight: 4, log: logNext},
+	{argv: []string{"docker", "build", "-t", "acme/api:dev", "."}, ws: "acme", branch: "main", family: "family:docker-build", cpus: 4, mem: 4 * gib, dur: 160, weight: 3, log: logDocker},
 	{argv: []string{"python", "bench.py", "--gpu"}, ws: "embed-bench", branch: "exp/fp8", family: "flag", cpus: 6, mem: 24 * gib, dur: 210, gpu: true, weight: 2, log: logBench},
 	{argv: []string{"pytest", "-x", "tests/"}, ws: "embed-bench", branch: "exp/fp8", family: "family:pytest", cpus: 2, mem: 2 * gib, dur: 34, weight: 3, exitFail: 0.2, log: logGeneric},
 	{argv: []string{"go", "test", "./internal/e2e/..."}, ws: "kran", branch: "agent/a-core", family: "learned", cpus: 6, mem: 3 * gib, dur: 75, local: true, weight: 2, exitFail: 0.25, log: logGoTest},
@@ -181,10 +181,10 @@ var owners = []struct {
 	weight int
 	prio   proto.Priority
 }{
-	{proto.Owner{Kind: proto.OwnerClaude, ID: "sess-7f3a", Name: "claude · lokalaise-a1"}, 6, proto.PriorityNormal},
-	{proto.Owner{Kind: proto.OwnerClaude, ID: "sess-91c2", Name: "claude · lokalaise-b2"}, 4, proto.PriorityNormal},
+	{proto.Owner{Kind: proto.OwnerClaude, ID: "sess-7f3a", Name: "claude · acme-a1"}, 6, proto.PriorityNormal},
+	{proto.Owner{Kind: proto.OwnerClaude, ID: "sess-91c2", Name: "claude · acme-b2"}, 4, proto.PriorityNormal},
 	{proto.Owner{Kind: proto.OwnerCodex, ID: "codex-48121", Name: "codex"}, 4, proto.PriorityNormal},
-	{proto.Owner{Kind: proto.OwnerHuman, ID: "pts/3", Name: "marius@pts/3"}, 3, proto.PriorityHigh},
+	{proto.Owner{Kind: proto.OwnerHuman, ID: "pts/3", Name: "alex@pts/3"}, 3, proto.PriorityHigh},
 	{proto.Owner{Kind: proto.OwnerAgent, ID: "cursor-2231", Name: "cursor · kran"}, 1, proto.PriorityLow},
 	{proto.Owner{Kind: proto.OwnerCI, ID: "ci", Name: "ci · nightly"}, 1, proto.PriorityLow},
 }

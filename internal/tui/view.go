@@ -346,7 +346,7 @@ func (m *Model) ownerCell(o proto.Owner, w int) string {
 	return m.st.ownerStyle(o.Kind).Render("●") + " " + fit(compactOwner(name, w-2), w-2)
 }
 
-// compactOwner keeps what tells sessions apart: "claude · lokalaise-a1" in
+// compactOwner keeps what tells sessions apart: "claude · acme-a1" in
 // 12 cells becomes "claude…se-a1", not "claude · lo…".
 func compactOwner(name string, w int) string {
 	if ansi.StringWidth(name) <= w {

@@ -1,7 +1,7 @@
 // Package transport carries the peer protocol: SSH dialing with the kran key
 // and pinned host keys, the yamux session over the forced-command stdio, the
 // `kran serve --stdio` bridge to the local peer socket, and an in-memory
-// transport for tests. SPEC §3, §8.3. Owner: A.
+// transport for tests. SPEC §3, §8.3.
 package transport
 
 import (
