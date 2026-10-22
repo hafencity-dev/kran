@@ -100,7 +100,7 @@ func TestPeersFileWatch(t *testing.T) {
 	if _, ok := a.scheduler().node("b"); ok {
 		t.Fatal("b known before it was linked")
 	}
-	os.WriteFile(peers, []byte(`[[peer]]
+	writeFileAtomic(peers, []byte(`[[peer]]
 name = "b"
 id = "b-id"
 addresses = ["mem:22"]
@@ -109,13 +109,13 @@ host_key = "ssh-ed25519 AAAA"
 direction = "both"
 `), 0o600)
 	c.waitOnline("a", "b")
-	os.WriteFile(peers, []byte("# unlinked\n"), 0o600)
+	writeFileAtomic(peers, []byte("# unlinked\n"), 0o600)
 	waitFor(t, 5*time.Second, "b removed", func() bool {
 		_, ok := a.scheduler().node("b")
 		return !ok && len(a.daemon().State().Nodes) == 1
 	})
 	// A broken file keeps the current peers.
-	os.WriteFile(peers, []byte(`[[peer]]
+	writeFileAtomic(peers, []byte(`[[peer]]
 name = "b"
 id = "b-id"
 addresses = ["mem:22"]
@@ -124,9 +124,20 @@ host_key = "k"
 direction = "both"
 `), 0o600)
 	c.waitOnline("a", "b")
-	os.WriteFile(peers, []byte("[[peer]\nbroken"), 0o600)
+	writeFileAtomic(peers, []byte("[[peer]\nbroken"), 0o600)
 	time.Sleep(300 * time.Millisecond)
 	if ns, ok := a.scheduler().node("b"); !ok || ns.Status != proto.NodeOnline {
 		t.Fatal("a broken peers.toml disconnected b")
 	}
+}
+
+// writeFileAtomic replaces a file the way kran link does (temp + rename),
+// so a watcher never sees it half-written: on a loaded machine the gap
+// between os.WriteFile's truncate and write can span several polls.
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, mode); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
