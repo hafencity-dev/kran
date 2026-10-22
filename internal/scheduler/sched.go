@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -401,7 +402,11 @@ func (s *sched) Reject(jobID string, node string, err error) Ticket {
 		j.excluded = map[string]string{}
 	}
 	j.excluded[node] = msg
-	if node != s.opts.Origin {
+	// A node that is full (another origin got there first; our view of it
+	// lags) is busy, not broken: no breaker, no used-up remote attempt.
+	var ae *AdmitError
+	busy := errors.As(err, &ae) && (ae.Code == "busy" || ae.Code == "max_jobs")
+	if node != s.opts.Origin && !busy {
 		j.rejects++
 		if n := s.nodes[node]; n != nil {
 			s.tripBreaker(n, msg, now)

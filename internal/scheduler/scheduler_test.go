@@ -373,6 +373,40 @@ func TestNoFallbackNeverRunsOnOrigin(t *testing.T) {
 	}
 }
 
+// TestBusyRefusalIsNotAFailure: a target that refuses admission because
+// another origin filled it first is busy, not broken; losing that race
+// again and again must not open its breaker or use up remote attempts.
+func TestBusyRefusalIsNotAFailure(t *testing.T) {
+	clk := &fakeClock{t0}
+	g := self(gx10(t0))
+	g.Metrics.MemAvailable = 10 * gib
+	p3 := devmac(t0)
+	p3.Info.Name = "studio2"
+	s := newTestSched(t, clk, g, devmac(t0), p3)
+	for i := 0; i < 4; i++ {
+		id := fmt.Sprintf("j%d", i)
+		pl := placed(t, s.Submit(newJob(id, "a", 1, 4*gib, 60, withReq(func(r *proto.Requirements) { r.Node = "devmac" }))))
+		if pl.Node != "devmac" {
+			t.Fatalf("%s on %s", id, pl.Node)
+		}
+		s.Reject(id, "devmac", &AdmitError{Code: "max_jobs", Reason: "devmac: at its limit of 1 jobs"})
+		s.Cancel(id)
+	}
+	if u := s.Snapshot().Unavailable["devmac"]; u != "" {
+		t.Errorf("busy refusals opened the breaker: %q", u)
+	}
+	// An auto job that lost the race moves on, but keeps both remote
+	// attempts for real failures.
+	pl := placed(t, s.Submit(newJob("k", "a", 4, 4*gib, 60)))
+	if pl.Node != "devmac" {
+		t.Fatalf("%+v", pl)
+	}
+	pl = placed(t, s.Reject("k", "devmac", &AdmitError{Code: "busy", Reason: "devmac: needs 4 CPUs"}))
+	if pl.Node != "studio2" || pl.Fallback {
+		t.Fatalf("after a busy refusal: %+v", pl)
+	}
+}
+
 func TestBreakerOpensAfterRepeatedFailures(t *testing.T) {
 	clk := &fakeClock{t0}
 	g := self(gx10(t0))

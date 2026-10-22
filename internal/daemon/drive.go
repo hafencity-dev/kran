@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/hafencity-dev/kran/internal/proto"
@@ -161,12 +162,50 @@ func (d *Daemon) drive(ctx context.Context, e *jobEntry, mode driveMode) {
 		if ctx.Err() != nil {
 			return
 		}
+		if code := peerCode(pe.err); code == codeBusy || code == codeMaxJobs {
+			// Another origin filled the node first (our view of it lags by
+			// up to one metrics interval): it is busy, not broken.
+			why := strings.TrimPrefix(pe.err.Error(), "admission: ")
+			e.unplace()
+			e.setState(proto.JobQueued, "waiting: "+why)
+			if spec.Req.Node == p.Node || spec.NoFallback || spec.Req.Prefer == proto.PreferRemote {
+				// The job may only run there: wait for room like any
+				// queued job instead of giving up.
+				d.deps.Sched.Release(e.id, nil)
+				e.notice("queued", "waiting: "+why)
+				if !d.pauseBeforeRequeue(ctx, e) {
+					return
+				}
+				j := e.snapshot()
+				ticket = d.deps.Sched.Submit(&j)
+				d.publishQueue()
+				continue
+			}
+			lastFail = pe
+			ticket = d.deps.Sched.Reject(e.id, p.Node, &scheduler.AdmitError{Code: code, Reason: why})
+			continue
+		}
 		d.notable("warn", p.Node, e.id, "job %s: %s failed before the job started: %v", e.id, p.Node, pe.err)
 		d.peers.recordFailure(p.Node, pe.err)
 		e.unplace()
 		e.setState(proto.JobQueued, fmt.Sprintf("%s failed before start: %v", p.Node, pe.err))
 		lastFail = pe
 		ticket = d.deps.Sched.Reject(e.id, p.Node, pe.err)
+	}
+}
+
+// pauseBeforeRequeue gives a full target one metrics interval to report
+// its new load before the job is placed again; false when the job was
+// canceled meanwhile (it is then finished) or the daemon stops.
+func (d *Daemon) pauseBeforeRequeue(ctx context.Context, e *jobEntry) bool {
+	select {
+	case <-time.After(d.t.MetricsEvery):
+		return true
+	case <-e.cancelCh:
+		d.finishCanceledBeforeStart(e)
+		return false
+	case <-ctx.Done():
+		return false
 	}
 }
 
