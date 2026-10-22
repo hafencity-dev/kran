@@ -546,7 +546,11 @@ process tree RSS + CPU time).
   Linux; the image label hashes all three, so a new binary rebuilds the
   last layer). Debian stable-slim with git, build-essential, pkg-config,
   ca-certificates, curl, wget, locales with common UTF-8 locales prebuilt,
-  tzdata, setpriv, mise, the Docker CLI with the compose and buildx plugins,
+  tzdata, setpriv, mise, the Docker CLI with the compose and buildx plugins
+  (also as `/usr/bin/docker` and `/usr/bin/docker-compose`, for scripts
+  with a fixed `PATH`), Debian's python3 with venv as `/usr/bin/python3`
+  (for `env -i`, a narrowed `PATH` or `python3 -I -S`; on the job's
+  `PATH` the shims still give the origin's or the repo's python first),
   and the everyday tools scripts expect on a Linux box: envsubst, jq,
   ripgrep, shellcheck, lsof, strace, fdisk/sfdisk, file, zip/unzip, xz,
   zstd, bzip2, rsync, procps, psmisc, iproute2, ping, netcat, dig, less,
@@ -615,7 +619,8 @@ process tree RSS + CPU time).
   under the job's own mounts are rewritten to where those live on the
   Docker host (`KRAN_INIT_DOCKER_MAP`, from the volumes' mountpoints): the
   workspace → the slot, the home → `kran-cache`'s `home`, `/kran/cache` and
-  `/kran/tools` → their volumes. So `docker run -v "$PWD":/src`, relative
+  `/kran/tools` → their volumes, and `/tmp` → the job's own `/tmp` volume.
+  So `docker run -v "$PWD":/src`, `-v "$(mktemp -d)":/certs`, relative
   bind mounts in compose files, `--mount type=bind` and BuildKit builds
   work as on the origin, and see the live slot. The map is per job, so
   concurrent jobs of one worktree (different slots, same path) and of other
@@ -624,8 +629,9 @@ process tree RSS + CPU time).
   restart. Each request is parsed on its own connection (the proxy asks
   Docker to close it after the response); upgraded connections (attach,
   exec, BuildKit sessions) are copied raw. Limits: only paths under those
-  mounts are mapped, so a bind of the job's `/tmp` or of anything else that
-  exists only in the job's container still gets the Docker host's path; a
+  mounts are mapped, so a bind of anything else that exists only in the
+  job's container (`/etc`, `/run`, `/dev/shm`, `/var/tmp`, the image's
+  files) still gets the Docker host's path; a
   path that leaves the workspace through a symlink is not followed; a
   client that bypasses `/var/run/docker.sock` (`DOCKER_HOST` set by the
   job to another endpoint, or a nested container that mounts the socket
@@ -633,6 +639,22 @@ process tree RSS + CPU time).
   written by nested containers belong to the user they run as. Without the
   kran binary in the image (an image of an older kran), the job gets
   Docker's socket directly.
+* **The job's `/tmp`** (`TMPDIR`): each job container (and its setup
+  container) gets an anonymous volume at `/tmp` (labels `kran.ns`,
+  `kran.tmp=1`), 1777 (kran-init), so it lives on the Docker host's disk
+  where the proxy can map it: single files and directories in it can be
+  bind-mounted by nested containers. Removing the container (`docker rm
+  --volumes`, by the supervisor or the reaper's orphan sweep) removes it;
+  the reaper also removes any unused volume with both labels (a container
+  removed otherwise). It is on the Docker disk as the container's writable
+  layer was before, so the Docker disk floor below covers it; the cache
+  trim never touches it.
+* Docker disk floor: on macOS container jobs write to the Docker VM's disk
+  (slots, caches, `/tmp`), not the state dir's. The cache trim measures it
+  (§6.2); while its last measurement (at most two hours old) is below the
+  node's floor (max(10 GiB, 5%) of that disk, or `DiskFloor`), container
+  slots are refused with reason `disk` and the next reaper pass trims at
+  once.
 * Resource caps: memory cap = admitted estimate × 2, at least 2 GiB, at most
   free memory at start; on cap breach the job is OOM-killed and the exit
   reason says so (`kran: job hit its 6 GiB memory cap on devmac — rerun with

@@ -3,6 +3,7 @@ package execenv
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -10,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"regexp"
@@ -59,8 +61,39 @@ func parseDockerMaps(s string) []dockerMap {
 		}
 		out = append(out, m)
 	}
-	sort.SliceStable(out, func(i, j int) bool { return len(out[i].Ctr) > len(out[j].Ctr) })
-	return out
+	return sortDockerMaps(out)
+}
+
+// sortDockerMaps puts the longest container path first.
+func sortDockerMaps(maps []dockerMap) []dockerMap {
+	sort.SliceStable(maps, func(i, j int) bool { return len(maps[i].Ctr) > len(maps[j].Ctr) })
+	return maps
+}
+
+// containerMountSource asks Docker (at sock) where the volume mounted at
+// dst in container name lives on the Docker host ("" when unknown).
+func containerMountSource(sock, name, dst string) string {
+	cl := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", sock)
+		}}}
+	resp, err := cl.Get("http://docker/containers/" + url.PathEscape(name) + "/json")
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	var c struct {
+		Mounts []struct{ Type, Source, Destination string }
+	}
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&c) != nil {
+		return ""
+	}
+	for _, m := range c.Mounts {
+		if m.Destination == dst && m.Type == "volume" && cleanAbs(m.Source) && m.Source != "/" {
+			return m.Source
+		}
+	}
+	return ""
 }
 
 func cleanAbs(p string) bool { return p != "" && path.IsAbs(p) && path.Clean(p) == p }
@@ -220,6 +253,13 @@ func DockerProxy(args []string) int {
 		return 2
 	}
 	maps := parseDockerMaps(os.Getenv("KRAN_INIT_DOCKER_MAP"))
+	// The job's /tmp is a volume of its own container, created with it:
+	// only Docker knows where it lives.
+	if name := os.Getenv("KRAN_INIT_CONTAINER"); name != "" {
+		if dir := containerMountSource(*upstream, name, ctrTmp); dir != "" {
+			maps = sortDockerMaps(append(maps, dockerMap{Ctr: ctrTmp, Host: dir}))
+		}
+	}
 	os.Remove(*listen)
 	ln, err := net.Listen("unix", *listen)
 	if err != nil {

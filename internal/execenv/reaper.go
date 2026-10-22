@@ -3,8 +3,10 @@ package execenv
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +31,7 @@ func (m *manager) Reap(ctx context.Context) error {
 	if err := m.reapContainers(ctx); err != nil {
 		errs = append(errs, err)
 	}
+	m.reapTmpVolumes(ctx)
 	m.reapProcesses()
 	if err := m.pruneImages(ctx); err != nil {
 		errs = append(errs, err)
@@ -138,6 +141,44 @@ func (m *manager) reapContainers(ctx context.Context) error {
 	m.logf("reaper: removing %d orphan containers", len(ids))
 	_, err = dk.run(ctx, nil, append([]string{"rm", "--force", "--volumes"}, ids...)...)
 	return err
+}
+
+// reapTmpVolumes removes job /tmp volumes no container uses any more.
+// Removing a job's container removes its /tmp with it (--volumes); this
+// catches one removed otherwise (by hand, or by a Docker that crashed).
+func (m *manager) reapTmpVolumes(ctx context.Context) {
+	dk, _ := m.docker()
+	if dk == nil || dk.api == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	f, _ := json.Marshal(map[string][]string{"label": {"kran.ns=" + m.ns, "kran.tmp=1"}, "dangling": {"true"}})
+	var out struct {
+		Volumes []struct {
+			Name   string
+			Labels map[string]string
+		}
+	}
+	if err := dk.api.get(ctx, "/volumes?filters="+url.QueryEscape(string(f)), &out); err != nil {
+		return
+	}
+	var names []string
+	for _, v := range out.Volumes {
+		// Docker filtered already; check again, as deleting a volume
+		// cannot be undone.
+		if v.Labels["kran.ns"] == m.ns && v.Labels["kran.tmp"] == "1" {
+			names = append(names, v.Name)
+		}
+	}
+	if len(names) == 0 {
+		return
+	}
+	if _, err := dk.run(ctx, nil, append([]string{"volume", "rm"}, names...)...); err != nil {
+		m.logf("reaper: removing left-over job /tmp volumes: %v", err)
+		return
+	}
+	m.logf("reaper: removed %d left-over job /tmp volumes", len(names))
 }
 
 // reapProcesses kills processes that still carry the KRAN_JOB_ID of an

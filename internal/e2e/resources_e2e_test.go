@@ -150,8 +150,9 @@ func TestE2EContainerPathParity(t *testing.T) {
 	// job's slot (a file only the job wrote), not the origin's directory
 	// of the same path on the Docker host.
 	r = a.kran(runOpts{dir: filepath.Join(repo, "sub"), timeout: 10 * time.Minute}, "run", "-n", "b", "--",
-		"sh", "-c", `echo written-in-the-job > from-job && docker run --rm --user "$(id -u)" -v "$PWD":/w alpine:3.20 cat /w/from-job /w/x.txt`)
-	if r.code != 0 || string(r.stdout) != "written-in-the-job\nx\n" {
+		"sh", "-c", `echo written-in-the-job > from-job && docker run --rm --user "$(id -u)" -v "$PWD":/w alpine:3.20 cat /w/from-job /w/x.txt &&
+t=$(mktemp -d) && echo tmp-ok > "$t/f" && docker run --rm -v "$t/f":/x:ro alpine:3.20 cat /x`)
+	if r.code != 0 || string(r.stdout) != "written-in-the-job\nx\ntmp-ok\n" {
 		t.Errorf("docker bind mount from the job: %s", r)
 	}
 	a.waitIdle(30 * time.Second)

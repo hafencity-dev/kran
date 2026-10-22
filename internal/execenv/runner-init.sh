@@ -130,6 +130,9 @@ for kr_var in SSL_CERT_FILE SSL_CERT_DIR NODE_EXTRA_CA_CERTS REQUESTS_CA_BUNDLE 
 	if [ -n "$kr_val" ] && [ ! -e "$kr_val" ]; then unset "$kr_var"; fi
 done
 
+# --- /tmp is a fresh volume (the job's own, on the Docker host's disk).
+chmod 1777 /tmp 2>/dev/null || kr_warn "could not open /tmp to the job"
+
 kr_groups=$kr_gid$kr_extra
 kr_drop() { setpriv --reuid="$kr_uid" --regid="$kr_gid" --groups="$kr_groups" -- "$@"; }
 
@@ -168,5 +171,5 @@ if [ -f "$kr_lock" ] && [ -r "$kr_lock" ] && command -v flock >/dev/null 2>&1 &&
 	fi
 fi
 
-unset KRAN_INIT_UID KRAN_INIT_GID KRAN_INIT_GROUPS KRAN_INIT_USER KRAN_INIT_GROUP KRAN_INIT_TOOLS KRAN_INIT_SHIMS KRAN_INIT_TZ KRAN_INIT_DOCKER_MAP
+unset KRAN_INIT_UID KRAN_INIT_GID KRAN_INIT_GROUPS KRAN_INIT_USER KRAN_INIT_GROUP KRAN_INIT_TOOLS KRAN_INIT_SHIMS KRAN_INIT_TZ KRAN_INIT_DOCKER_MAP KRAN_INIT_CONTAINER
 exec setpriv --reuid="$kr_uid" --regid="$kr_gid" --groups="$kr_groups" -- "$@" 9<&-
