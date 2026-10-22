@@ -2,18 +2,19 @@
 
 ## Wiring the lead must do on merge
 
-1. `internal/daemon/run.go`: set `UI: ui.Handler()` in the `Deps` literal (currently `nil`, which
-   serves a small placeholder page from `internal/daemon/ui.go`; delete that file afterwards if you like).
-2. Nothing else: `run()` already wires `store.Open`, `metrics.New`, `estimate.New`, `scheduler.New`,
-   `execenv.New`, `workspace.NewScanner`, `transport.NewDialer` and E's `internal/config`. In this
-   branch the C stubs panic, so `kran daemon` only runs once B and C are merged.
-3. `execenv.Options.LinuxBinary` and `BlobCap`/`DiskFloor` are not set by `run()` (B decides defaults).
+Nothing: `internal/daemon/run.go` wires `store.Open`, `metrics.New`, `estimate.NewWithOptions` (benchmark
+score prior, late-bound to the daemon), `scheduler.New`, `execenv.New`, `workspace.NewScanner`,
+`transport.NewDialer`, E's `internal/config` and `ui.Handler()` (mounted at `/`, API at `/api/v1/`).
+`execenv.Options.LinuxBinary`, `BlobCap` and `DiskFloor` are left to B's defaults. Run `go mod tidy`
+once after all merges (several imports are still marked `// indirect`).
 
 ## Proto changes (additive, marked `// added by A`)
 
-* `proto.QueueEvent{Queue}` — data of `EventQueue`.
-* `proto.LogEvent{Level, Msg, Time}` — data of `EventLog` (not emitted yet).
-* `proto.OutputChunk{Stream, Offset, B64}` — SSE event `output` of `GET /api/v1/jobs/{id}/log?follow=1`.
+* `QueueEvent{Queue}`, `LogEvent{Level, Msg, Time, Node, JobID}` — typed event payloads.
+* `OutputChunk{Offset, Data, Stream, B64}` — log-follow messages (`Offset` is after the chunk).
+* `JobRef` and `NodeState.Guests` — jobs other origins run on a node.
+* `Job.PlacedAt`, `Job.RunningAt`, `Job.Phase` — placement time, command start, last sync/setup phase.
+* `Stats.Since` — local midnight of "today".
 
 ## Contracts others rely on (as implemented)
 
@@ -46,24 +47,24 @@
 * `peers.toml` `preferred_address` is tried first; when another address wins it is written back with
   `config.UpdatePeers`. Changing it does not reconnect (it is excluded from the change check).
 
-### For C (scheduler, store, estimate, metrics)
-* `UpdateNode`: `Capacity` is already **net of allocations the scheduler does not own** (other origins'
-  jobs on that node, and our own jobs reattached after a restart). Subtract only your own placements.
-  `Allocated`/`Running` in the pushed state are the node's totals for display; please do not subtract
-  them again. Self is pushed every 2 s, peers on every status message (2 s) and state change.
-* Circuit breaker: the daemon owns it (3 pre-start failures → `NodeDegraded` with reason for 60 s); the
-  scheduler only has to skip non-`online` nodes.
-* `Reject(job, node, err)` is assumed to **free** the failed placement's allocation; the daemon does not
-  call `Release` after `Reject`. `Release(job, nil)` is called when a placement raced a cancel.
-* `Ticket.Updates()` may be nil; reasons are forwarded as `notice{kind:"queued"}` on change.
-* `Tick` is called every 2 s from the daemon.
-* Request: `Restore(job *proto.Job, p Placement)` so allocations of jobs reattached after an origin
-  restart are tracked again (today the capacity adjustment above covers it).
-* Store: every job transition is `PutJob`; `ActiveJobs` drives restart recovery; KV keys used:
-  `node.id`, `drained` (JSON list of node names), `target.jobs` (JSON map, target-side records).
-  `ListJobs` with `Since` = local midnight and `Limit` 100000 rebuilds today's stats at start.
-* `estimate.Observe` is called for jobs that ended `succeeded` or `failed` (not canceled/infra).
-* `metrics.JobUsage(UsageRef{PGID})` is sampled every 2 s for running local jobs (→ `Job.Live`).
+### For C (scheduler, store, estimate, metrics) — implemented per NOTES-C
+* Self is pushed every 2 s with gross `Capacity`, `MaxJobs`, `Allocated`/`Running`/`Free` and
+  `AllocatedJobs` from `Snapshot()`; peers are pushed with the totals *they* report (their own
+  `Snapshot()`), `AllocatedJobs` always non-nil. Every peers.toml entry is registered (offline) before
+  the sockets open.
+* Target side calls `Sched.Admit` for `PeerAdmit` (codes passed through as `PeerResponse.Code`) and
+  `Release` when the reservation expires/is released or the job ends (with usage). Jobs restored after a
+  target or origin restart are re-registered with `Admit` so they keep counting.
+* `UpdateJobUsage`: local jobs (process group via `metrics.JobUsage`), remote jobs on the target
+  (`Process.Live`) and on the origin (from the target's status stream), every 2 s.
+* `*UnplaceableError`: with `--remote`/`--no-fallback` → exit 125 with its reason; otherwise the
+  session ends with `FrameError` (the CLI runs the command itself) and the job is recorded as
+  `canceled`, `Fallback: true`.
+* `Reject` is used for every pre-start failure; the daemon additionally marks a node `degraded` for
+  60 s after 3 consecutive pre-start failures (SPEC §6.1 wording; shown in the UI).
+* `Tick` every 2 s; `PruneJobs(now-7d)` hourly; `Spec.Priority` left empty when no flag was given.
+* Request (low priority): `Snapshot.Free` per runtime would let the daemon fill D's per-runtime
+  capacity request.
 
 ### For B (execenv, workspace)
 * `Process.Output(offset)`: offset counts **payload bytes of stdout+stderr frames** (same unit as
@@ -82,18 +83,21 @@
   `metrics.Sample().DiskFree`; execenv may still refuse on its own.
 * `workspace.Scanner.Open(hash)` is called concurrently from 4 upload workers.
 
-### For D (UI)
-* `GET /api/v1/events`: SSE with `id: <seq>`, `event: <type>`, `data: <proto.Event JSON>`; the first
-  event is `state`; sequence numbers are contiguous per stream, a gap or a closed stream means
-  "reconnect" (the daemon drops slow consumers). `node.metrics` ≤ 1/s per node. A `state` event is
-  also pushed when peers are added or removed.
-* Log follow: `GET /api/v1/jobs/{id}/log?follow=1&offset=N` → events `output` (`proto.OutputChunk`),
-  then `exit` (`proto.Exit`) or `end`. Without `follow`: raw bytes. Local jobs have no captured output.
-* UI listener auth: loopback → reads open, POSTs need `X-Kran-Token`, Host must be loopback;
-  non-loopback (`tailscale` or an IP) → every `/api/` call needs the token (header, or `?token=` for
-  GETs such as EventSource); static assets are public. Run sessions are refused on TCP.
-* Token: `<state>/ui.token` (= `paths.TokenFile()`), 0600, created at start.
-* In `State`, node `Capacity` is gross, `Allocated` all origins, `Free` from our scheduler.
+### For D (UI) — per NOTES-D
+* `GET /api/v1/events`: `id: <seq>`, `event: <type>`, `data: <proto.Event>`; first event `state` with the
+  seq it includes; contiguous seq per stream; slow subscribers are disconnected; `node.metrics` every
+  2 s per node (or a `node` event when status changes). `log` events carry notable lines (peer
+  connected/lost, breaker, pre-start failures). A `state` event follows peer additions/removals.
+* Log follow: unnamed `data: {"offset": <after chunk>, "data": "<utf-8>", "stream": "...", "b64": "..."}`
+  (text never splits a UTF-8 sequence; `b64` is exact), then `event: end` / `data: {"offset": N,
+  "exit": {...}}`. Without `follow`: `text/plain` from `offset`.
+* `GET /api/v1/nodes/{name}/metrics?since=<RFC 3339>`: last 10 min of 2 s samples.
+* `GET /api/v1/jobs?state=` filter added (`before`/`q` paging not done).
+* `Spec.Env` is never sent by the API (state, events, jobs).
+* Auth: loopback listener — reads open, mutations need `X-Kran-Token`, Host must be loopback;
+  non-loopback — `/api/` needs the token (header or `?token=` on GETs), Host must be the bind host
+  unless a valid token is present; run sessions refused on TCP. 401/403 carry `APIError{error,hint}`.
+* Not done: per-runtime capacity (needs C), `ReasonCode` (C), `Estimate.DurationOnNode` (C).
 
 ## Design notes
 
@@ -118,7 +122,6 @@
 
 ## Not done / limits
 
-* `EventLog` events are not emitted (only the type exists).
 * The chaos suite (`make chaos`) and `internal/e2e` are not written; the daemon package has an
   in-process multi-daemon harness (`harness_test.go`) with fakes that covers the SPEC §12 scenarios
   owned by A.
