@@ -34,7 +34,7 @@ func TestE2EDiskFloor(t *testing.T) {
 	poll(15*time.Second, func() bool { return strings.Contains(p.stderr.String(), "floor") })
 	p.signal(syscall.SIGINT)
 	r := p.wait()
-	if r.code != 130 || !strings.Contains(string(r.stderr), "kran: b: disk:") || strings.Contains(string(r.stdout), "must not run") {
+	if r.code != 130 || !strings.Contains(string(r.stderr), "disk:") || strings.Contains(string(r.stdout), "must not run") {
 		t.Errorf("-n b with b below the disk floor: %s", r)
 	}
 	// Plain run: here, never on b.

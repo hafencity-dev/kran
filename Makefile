@@ -23,7 +23,7 @@ endif
 PREFIX ?= $(HOME)/.local/bin
 PLATFORMS := linux/arm64 linux/amd64 darwin/arm64 darwin/amd64
 
-.PHONY: help build test fmt-check lint ui release-snapshot install smoke chaos clean
+.PHONY: help build test fmt-check lint ui release-snapshot install e2e smoke chaos clean
 
 help: ## list targets
 	@grep -E "^[a-z-]+:.*## " $(MAKEFILE_LIST) | sed "s/:.*## /\t/" | sort
@@ -64,14 +64,21 @@ install: ## install to $(PREFIX) and fill the binary cache for all four platform
 	@echo "installed $(PREFIX)/kran $(VERSION). A running daemon keeps the old binary: run: kran service restart (waits for idle jobs)."
 	@case ":$$PATH:" in *":$(PREFIX):"*) ;; *) echo "note: $(PREFIX) is not on your PATH";; esac
 
-smoke: ## real-machine smoke test: make smoke NODE=devmac
-	@test -n "$(NODE)" || { echo "usage: make smoke NODE=<linked node>"; exit 2; }
-	@if ls internal/e2e/*_test.go >/dev/null 2>&1; then KRAN_SMOKE_NODE=$(NODE) go test -tags e2e -run Smoke -count=1 ./internal/e2e/...; \
-	else echo "smoke tests are not implemented yet (internal/e2e has no tests)"; fi
+# System-level suites (internal/e2e) run the real kran binary, built once
+# with the race detector; output stays visible (-v) for the summaries.
+E2E_GO := nice -n 10 go test -count=1 -v
+CHAOS_DURATION ?= 3m
 
-chaos: ## randomized failure suite
-	@if ls internal/e2e/*_test.go >/dev/null 2>&1; then go test -tags e2e -run Chaos -count=1 ./internal/e2e/...; \
-	else echo "chaos tests are not implemented yet (internal/e2e has no tests)"; fi
+e2e: ## black-box suite on real daemons (KRAN_TEST_DOCKER=1 adds container tests)
+	KRAN_E2E_RACE=1 $(E2E_GO) -tags e2e -timeout 60m ./internal/e2e/
+
+chaos: ## randomized failure suite: make chaos [CHAOS_DURATION=3m] [CHAOS_SEED=n]
+	KRAN_E2E_RACE=1 KRAN_CHAOS_DURATION=$(CHAOS_DURATION) KRAN_CHAOS_SEED=$(CHAOS_SEED) \
+		$(E2E_GO) -tags chaos -run Chaos -timeout 60m ./internal/e2e/
+
+smoke: ## real-machine smoke test: make smoke NODE=devmac
+	@test -n "$(NODE)" || { echo "usage: make smoke NODE=<ssh host>"; exit 2; }
+	KRAN_SMOKE_NODE=$(NODE) $(E2E_GO) -tags smoke -run Smoke -timeout 60m ./internal/e2e/
 
 clean: ## remove build output
 	rm -rf bin dist

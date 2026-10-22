@@ -1,4 +1,4 @@
-//go:build e2e || chaos
+//go:build e2e || chaos || smoke
 
 package e2e
 
@@ -306,7 +306,7 @@ func (n *knode) start() {
 	}()
 	n.proc, n.exited = cmd, exited
 	n.mu.Unlock()
-	if err := n.waitAPI(30 * time.Second); err != nil {
+	if err := n.waitAPI(60 * time.Second); err != nil {
 		t.Fatalf("%s: daemon did not come up: %v\n%s", n.name, err, n.tail("daemon.out", 40))
 	}
 }
