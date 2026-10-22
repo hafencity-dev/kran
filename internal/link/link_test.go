@@ -133,7 +133,7 @@ func TestLinkEndToEnd(t *testing.T) {
 	// peers.toml on both sides
 	p := res.Peer
 	if p.Name != "devbox" || p.Direction != "both" || p.Tag != "kran-dev" || p.User != "tester" || !strings.HasPrefix(p.HostKey, "ssh-ed25519 ") ||
-		p.KranPath != filepath.Join(w.remoteHome, "bin", "kran") || p.PreferredAddress == "" || p.RemoteConfigDir != w.remoteEnv["KRAN_CONFIG_DIR"] {
+		(p.KranPath != filepath.Join(w.remoteHome, "bin", "kran") && p.KranPath != resolved(filepath.Join(w.remoteHome, "bin", "kran"))) || p.PreferredAddress == "" || p.RemoteConfigDir != w.remoteEnv["KRAN_CONFIG_DIR"] {
 		t.Fatalf("local peer: %+v", p)
 	}
 	rp, ok := w.remotePeers().Find("gx-local")
