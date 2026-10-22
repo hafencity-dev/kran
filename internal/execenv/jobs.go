@@ -32,6 +32,7 @@ type jobState struct {
 	done chan struct{}
 	exit proto.Exit
 
+	evMu    sync.Mutex // serializes readEvents and its callbacks
 	mu      sync.Mutex
 	onPhase func(proto.Phase)
 	evOff   int64
@@ -101,7 +102,12 @@ func (js *jobState) readStatus() (proto.Exit, bool) {
 	return exit, true
 }
 
+// readEvents delivers new events; evMu serializes callers including the
+// phase callbacks, so when readEvents returns every event already in the
+// file has been reported.
 func (js *jobState) readEvents() {
+	js.evMu.Lock()
+	defer js.evMu.Unlock()
 	f, err := os.Open(filepath.Join(js.dir, fileEvents))
 	if err != nil {
 		return
@@ -296,6 +302,17 @@ func (p *process) Output(offset int64) io.ReadCloser {
 		_, err := os.Stat(status)
 		return err == nil
 	})
+	// The supervisor writes the running event before any command output,
+	// so catching up on events before handing out a frame guarantees
+	// OnPhase(running) precedes the command's first byte.
+	r.beforeFrame = func() {
+		p.js.mu.Lock()
+		running := p.js.running
+		p.js.mu.Unlock()
+		if !running {
+			p.js.readEvents()
+		}
+	}
 	return r
 }
 
