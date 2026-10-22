@@ -212,6 +212,21 @@ func testContainerRuntime(t *testing.T, volume bool) {
 		assertNoContainer(t, te, "kran-test-job-"+p.JobID())
 	})
 
+	// The sync helper writes every repo's slots: a job must not be able to
+	// replace it (it used to live in the job-writable tools volume).
+	if volume {
+		t.Run("sync-helper-out-of-reach", func(t *testing.T) {
+			p := te.startCtr(ref, sh(`for f in $(find /kran -name 'kran-*' 2>/dev/null); do rm -f "$f" && printf '#!/bin/sh\nexit 3\n' > "$f" && chmod 755 "$f" && echo "replaced $f"; done; true`))
+			waitExit(t, p, 120*time.Second)
+			out, _ := output(t, p)
+			if strings.Contains(out, "replaced") {
+				t.Errorf("job replaced the helper: %s", out)
+			}
+			te.commit(ref, testRepo, map[string]string{"sub/f.txt": "inside the container\n", "lock": "v2"})
+			te.commit(ref, testRepo, files)
+		})
+	}
+
 	t.Run("signal-stdin-tty", func(t *testing.T) {
 		p := te.startCtr(ref, sh("kill -TERM $$"))
 		if exit := waitExit(t, p, 60*time.Second); exit.Code != 143 || exit.Signal != "TERM" {
