@@ -58,6 +58,20 @@ targets linux/darwin × arm64/amd64.
 
 * One binary `kran`. Long-running role: `kran daemon` (systemd user unit /
   launchd LaunchAgent). Everything else is a short-lived CLI.
+* One daemon per node (per set of `KRAN_*_DIR`s): before it restores jobs,
+  dials peers or logs, the daemon takes a lock (`daemon.lock` in the
+  runtime dir; a daemon already answering on `kran.sock` counts as holding
+  it). Started by hand, a second daemon fails at once; under systemd or
+  launchd it waits and takes over when the first stops, instead of being
+  respawned every few seconds.
+* The daemon runs with priority over the jobs it manages: its unit sets
+  `CPUWeight=1000`, `IOWeight=1000`, best-effort I/O at level 0 and
+  `MemoryLow=256M` (systemd; `Nice` < 0 and a lower `OOMScoreAdjust` need
+  privileges a user unit lacks), `ProcessType Interactive` and
+  `LowPriorityIO false` (launchd). Units carry a format marker
+  (`kran-unit-format: N`); `kran service restart` (and so `kran upgrade`)
+  rewrites an older unit keeping its binary path and environment, and
+  `kran doctor` reports one (`--fix` rewrites it).
 * **CLI ↔ local daemon:** HTTP over unix socket
   `$XDG_RUNTIME_DIR/kran/kran.sock` (fallback `~/.local/state/kran/kran.sock`;
   macOS `~/Library/Application Support/kran/kran.sock`). Same handler also
@@ -76,6 +90,27 @@ targets linux/darwin × arm64/amd64.
   in `peers.toml`.
 * Connections are bidirectional when both sides can reach each other; each
   side dials its own outbound connection (no reliance on reverse tunnels).
+* **Link liveness** (load-tolerant): every inbound byte counts as a sign
+  of life, not only ping replies. A ping goes out every 5 s (it also
+  measures the RTT, an EWMA seeded by a warm ping after the handshake). A
+  peer silent for 45 s is dead; while it last reported heavy load, or this
+  node is overloaded itself (`metrics.Stressed`: load ≥ 1.5 × cores,
+  memory PSI ≥ 20 %, I/O PSI ≥ 40 %, CPU PSI ≥ 80 %, swap full; macOS:
+  memorystatus ≥ 90), or the link is slow (20 × RTT), up to 2 minutes. A
+  keepalive tick that comes late because this process was not scheduled
+  counts as one interval at most. Job-level timers stay shorter on
+  purpose: heartbeats 2 s < stream silence 10 s < lease 15 s (+5 s grace)
+  < link tolerance; a stalled link costs a running job its lease, but not
+  the link itself nor sync and setup in flight (each prestart RPC is
+  bounded by its own 2 min timeout). `KRAN_KEEPALIVE=<interval>,<dead
+  after>,<max dead after>` overrides the timings.
+* **Reconnects**: exponential backoff with jitter from 1 s, capped at
+  20 s; it starts over when the peer dials in or this machine's
+  addresses change. A job waiting for the peer may retry sooner, but never
+  more often than every second. The log records changes (first failure,
+  a different error, the reconnect with the number of failed attempts)
+  and otherwise a summary every 10 minutes ("still unreachable after N
+  attempts").
 
 ### Package layout
 
@@ -117,7 +152,11 @@ another's internals.
 | cache dir (binaries for other platforms) | `~/.cache/kran` | `~/Library/Caches/kran` |
 
 Files: `config.toml`, `peers.toml`, `id_ed25519[.pub]`, `kran.db`,
-`kran.sock`, `kran-peer.sock`, `daemon.log` (rotated, 10 MB × 3),
+`kran.sock`, `kran-peer.sock`, `daemon.lock`, `daemon.log` (the daemon's
+only log, rotated, 10 MB × 3; also mirrored to stderr when that is a
+terminal), `daemon.out.log` (stdout/stderr when launchd or the on-demand
+start runs the daemon: fatal errors and crash traces only, cut to its
+last 64 KiB above 1 MiB; under systemd that goes to the journal),
 `jobs/<id>/` (spool, status), `slots/`, `blobs/`, `bin/<os>-<arch>/kran`.
 
 ## 5. Configuration (all optional)
@@ -234,6 +273,11 @@ Flags: `-l/--local`, `-r/--remote`, `-n/--node NAME`, `--gpu`, `--cpus N`,
 * The origin daemon persists active remote jobs; on restart it reattaches.
   The CLI, if its daemon connection drops mid-run, retries the connection for
   10 s and resumes via `reattach`; otherwise it exits 125.
+* Probes that fork a helper (`nvidia-smi`, the docker CLI) back off
+  exponentially after a failure and run at most every 30 s while the node
+  is overloaded (the last reading stands in). The container runtime counts
+  as unavailable only after 3 consecutive failed probes; engine capacity
+  comes from the Engine API when the endpoint is a unix socket.
 * Reaper (every 30 s, and at daemon start): kills scopes/containers/process
   groups labelled kran whose job is not active; deletes job dirs older than
   7 days; trims blob cache (LRU, cap default 20 GiB or 10% of disk) and
