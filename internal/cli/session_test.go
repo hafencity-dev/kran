@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -679,20 +680,78 @@ func TestReconnectGivesUpWith125(t *testing.T) {
 	}
 }
 
-// TestDropDuringRemoteSetupNoDaemonRunsHere: the daemon goes away while the
-// job is set up on its target: the job runs here (a restarted daemon
-// cancels it there before the setup ends).
-func TestDropDuringRemoteSetupNoDaemonRunsHere(t *testing.T) {
+// TestDropDuringRemoteSetupReattaches: the daemon goes away while the job
+// is set up on its target (a restart, a graceful stop). The job may still
+// start there, so kran run reattaches instead of running it here too.
+func TestDropDuringRemoteSetupReattaches(t *testing.T) {
+	for _, ph := range []proto.JobState{proto.JobSyncing, proto.JobSetup} {
+		mark := filepath.Join(t.TempDir(), "ran-here")
+		s1, s2 := newFakeSession(), newFakeSession()
+		h := newHarness(t, &fakeClient{sessions: []*fakeSession{s1, s2}}, "sh", "-c", "touch "+mark+"; exit 6")
+		go func() {
+			s1.push(proto.FrameDecision, proto.Decision{JobID: "js", Mode: "remote", Node: "n"})
+			s1.push(proto.FramePhase, proto.Phase{State: ph})
+			time.Sleep(50 * time.Millisecond)
+			s1.drop()
+			waitFor(t, func() bool { return s2.count(proto.FrameReattach) == 1 })
+			s2.push(proto.FramePhase, proto.Phase{State: proto.JobRunning})
+			s2.push(proto.FrameStdout, []byte("remote"))
+			s2.push(proto.FrameExit, proto.Exit{JobID: "js", Code: 5, State: proto.JobFailed})
+		}()
+		if code := h.run(t); code != 5 || h.stdout.String() != "remote" {
+			t.Fatalf("%s: code %d stdout %q stderr %q", ph, code, h.stdout.String(), h.stderr.String())
+		}
+		if _, err := os.Stat(mark); err == nil {
+			t.Fatalf("%s: the command ran here as well", ph)
+		}
+	}
+}
+
+// TestDropDuringRemoteSetupNoDaemonExits125: when the daemon does not come
+// back, kran run cannot know whether the job started on its target, so it
+// does not run it here: exit 125 with what to check.
+func TestDropDuringRemoteSetupNoDaemonExits125(t *testing.T) {
+	mark := filepath.Join(t.TempDir(), "ran-here")
 	s1 := newFakeSession()
-	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s1}}, "sh", "-c", "exit 6")
+	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s1}}, "sh", "-c", "touch "+mark+"; exit 6")
 	go func() {
 		s1.push(proto.FrameDecision, proto.Decision{JobID: "js", Mode: "remote", Node: "n"})
 		s1.push(proto.FramePhase, proto.Phase{State: proto.JobSetup})
 		time.Sleep(50 * time.Millisecond)
 		s1.drop()
 	}()
-	if code := h.run(t); code != 6 {
+	if code := h.run(t); code != proto.ExitInfra {
 		t.Fatalf("code %d, stderr %q", code, h.stderr.String())
+	}
+	if _, err := os.Stat(mark); err == nil {
+		t.Fatal("the command ran here although it may run on n")
+	}
+	if !strings.Contains(h.stderr.String(), "job js may still start on n") {
+		t.Fatalf("%q", h.stderr.String())
+	}
+}
+
+// TestErrorAfterRemoteDecision: after a remote decision kran run runs the
+// command itself only when the daemon says nothing ran anywhere.
+func TestErrorAfterRemoteDecision(t *testing.T) {
+	for _, runLocally := range []bool{false, true} {
+		mark := filepath.Join(t.TempDir(), "ran-here")
+		s := newFakeSession()
+		h := newHarness(t, &fakeClient{sessions: []*fakeSession{s}}, "sh", "-c", "touch "+mark+"; exit 6")
+		go func() {
+			s.push(proto.FrameDecision, proto.Decision{JobID: "j", Mode: "remote", Node: "n"})
+			s.push(proto.FramePhase, proto.Phase{State: proto.JobSetup})
+			s.push(proto.FrameError, proto.APIError{Error: "job j is not running on this daemon", RunLocally: runLocally})
+		}()
+		code := h.run(t)
+		_, err := os.Stat(mark)
+		ranHere := err == nil
+		if runLocally && (code != 6 || !ranHere) {
+			t.Fatalf("run_locally: code %d ran here %v, stderr %q", code, ranHere, h.stderr.String())
+		}
+		if !runLocally && (code != proto.ExitInfra || ranHere) {
+			t.Fatalf("plain error: code %d ran here %v, stderr %q", code, ranHere, h.stderr.String())
+		}
 	}
 }
 
@@ -827,17 +886,19 @@ func TestJobTTYNeedsStdoutAndStderrTerminals(t *testing.T) {
 }
 
 // Output before the running phase is setup output: the command has not
-// started, and the daemon treats the job that way after a restart (it stops
-// it). Losing the daemon then means running the command here.
+// started. When the daemon later says nothing ran (a restarted daemon that
+// found the job stopped in its setup), kran run runs it here.
 func TestSetupOutputIsNotAStart(t *testing.T) {
-	s := newFakeSession()
-	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s}}, "sh", "-c", "exit 6")
+	s1, s2 := newFakeSession(), newFakeSession()
+	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s1, s2}}, "sh", "-c", "exit 6")
 	go func() {
-		s.push(proto.FrameDecision, proto.Decision{JobID: "j", Mode: "remote", Node: "n"})
-		s.push(proto.FramePhase, proto.Phase{State: proto.JobSetup, Message: "running setup: pnpm install"})
-		s.push(proto.FrameStdout, []byte("Packages: +12\n"))
+		s1.push(proto.FrameDecision, proto.Decision{JobID: "j", Mode: "remote", Node: "n"})
+		s1.push(proto.FramePhase, proto.Phase{State: proto.JobSetup, Message: "running setup: pnpm install"})
+		s1.push(proto.FrameStdout, []byte("Packages: +12\n"))
 		time.Sleep(50 * time.Millisecond)
-		s.drop()
+		s1.drop()
+		waitFor(t, func() bool { return s2.count(proto.FrameReattach) == 1 })
+		s2.push(proto.FrameError, proto.APIError{Error: "n: setup failed", RunLocally: true})
 	}()
 	if code := h.run(t); code != 6 {
 		t.Fatalf("code %d: %s", code, h.stderr.String())

@@ -134,6 +134,14 @@ func (d *Daemon) runRemote(ctx context.Context, e *jobEntry, p scheduler.Placeme
 	})
 
 	spec.ID = e.id
+	// kran run must still be there when the job starts: one that lost its
+	// session before it saw the decision runs the command itself, and one
+	// that reconnects reattaches (SPEC §6.1). The session's end cancels
+	// the job if it does not come back.
+	if err := e.waitAttached(pctx); err != nil {
+		abandon()
+		return fail(fmt.Errorf("start: %w", err))
+	}
 	d.noteFirstUse(e, node, p.Runtime)
 	stctx, cancel := rpc(d.t.PrestartTimeout)
 	var info jobStreamInfo
@@ -145,8 +153,24 @@ func (d *Daemon) runRemote(ctx context.Context, e *jobEntry, p scheduler.Placeme
 	}
 	cancel()
 	if err != nil {
-		abandon()
-		return fail(fmt.Errorf("start: %w", err))
+		if ctx.Err() != nil {
+			return nil // the daemon stops; a restarted one settles it
+		}
+		if c, _, _ := e.canceled(); c {
+			// Canceled while it started: stop it there, whatever it did.
+			go abandon()
+			return fail(fmt.Errorf("start: %w", err))
+		}
+		// The target may have started the job although its answer was
+		// lost (a timeout under load, a dropped connection): ask it before
+		// the job runs anywhere else.
+		d.logf("job %s: job.start on %s: %v; asking %s whether the job started", e.id, node, err, node)
+		ferr := d.followRemote(ctx, e, p, nil)
+		var pe *prestartError
+		if errors.As(ferr, &pe) {
+			return fail(fmt.Errorf("start: %w", err))
+		}
+		return ferr
 	}
 	if c, _, _ := e.canceled(); c {
 		// Canceled while starting: stop it right away.
@@ -218,6 +242,7 @@ func (d *Daemon) followRemote(ctx context.Context, e *jobEntry, p scheduler.Plac
 	e.streaming = true
 	e.mu.Unlock()
 	lastContact := d.now()
+	settles := 0
 	for {
 		if pc == nil {
 			var err error
@@ -230,12 +255,21 @@ func (d *Daemon) followRemote(ctx context.Context, e *jobEntry, p scheduler.Plac
 				running := e.started
 				e.mu.Unlock()
 				if !running {
-					cctx, c := context.WithTimeout(d.lifetime(), 5*time.Second)
-					if s, serr := d.peers.session(node); serr == nil {
-						peerOneShot(cctx, s, proto.PeerJobCancel, e.id, nil, nil)
+					// Only the target can tell whether the command started
+					// (its running phase may be lost on the way): fall back
+					// only when it confirms the job never will (SPEC §6.1).
+					switch d.settleOnTarget(node, e.id) {
+					case settleReleased:
+						return &prestartError{node: node, err: err}
+					case settleStarted:
+						if settles++; settles < 3 {
+							lastContact = d.now()
+							continue // it started after all: follow it
+						}
 					}
-					c()
-					return &prestartError{node: node, err: err}
+					e.finish(proto.Exit{Code: proto.ExitInfra, State: proto.JobInfraErr, Node: node,
+						Reason: fmt.Sprintf("%v; the job may have started on %s before contact was lost, so kran did not run it here too (check: kran logs %s)", err, node, e.id)})
+					return nil
 				}
 				state := proto.JobInfraErr
 				if peerCode(err) == codeUnknownJob {
@@ -286,6 +320,36 @@ func (d *Daemon) followRemote(ctx context.Context, e *jobEntry, p scheduler.Plac
 			e.notice("warn", fmt.Sprintf("lost connection to %s; reconnecting", node))
 		}
 	}
+}
+
+type settleResult int
+
+const (
+	settleUnknown  settleResult = iota // no answer, or one that proves nothing
+	settleReleased                     // the target confirms the job never started and now cannot
+	settleStarted                      // the job started there (it is being stopped)
+)
+
+// settleOnTarget cancels a job on its target and reports what the target
+// says about it (job.cancel answers with a jobCancelResult).
+func (d *Daemon) settleOnTarget(node, id string) settleResult {
+	ctx, cancel := context.WithTimeout(d.lifetime(), d.t.LeaseTTL)
+	defer cancel()
+	s, err := d.peers.waitSession(ctx, node)
+	if err != nil {
+		return settleUnknown
+	}
+	var res jobCancelResult
+	if err := peerOneShot(ctx, s, proto.PeerJobCancel, id, nil, &res); err != nil {
+		return settleUnknown
+	}
+	switch {
+	case res.Released:
+		return settleReleased
+	case res.Started:
+		return settleStarted
+	}
+	return settleUnknown // a target without the answer (older kran)
 }
 
 func firstNonEmpty(s ...string) string {

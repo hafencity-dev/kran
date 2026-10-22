@@ -23,14 +23,14 @@ type timing struct {
 	NoticeDelay time.Duration // a wait must exceed this before kran says anything
 	Heartbeat   time.Duration // we send a heartbeat this often
 	DeadAfter   time.Duration // no frame for this long = connection lost
-	Reconnect   time.Duration // how long to retry the daemon after a drop
+	Reconnect   time.Duration // how long to retry the daemon after a drop (a restarted daemon waits as long, CLIReattachWait)
 	DoubleInt   time.Duration // second Ctrl-C within this escalates to KILL
 	RetryEvery  time.Duration
 }
 
 func defaultTiming() timing {
 	return timing{NoticeDelay: 2 * time.Second, Heartbeat: 2 * time.Second, DeadAfter: 10 * time.Second,
-		Reconnect: 10 * time.Second, DoubleInt: 2 * time.Second, RetryEvery: 300 * time.Millisecond}
+		Reconnect: 20 * time.Second, DoubleInt: 2 * time.Second, RetryEvery: 300 * time.Millisecond}
 }
 
 // runner drives one `kran run` (SPEC §6.1).
@@ -626,7 +626,9 @@ func (r *runner) onExit(ex proto.Exit) int {
 	return code
 }
 
-// onErrorFrame: before the command started, fall back to local; after, exit 125.
+// onErrorFrame: before a remote decision, fall back to local. After one,
+// the job may run on its target (SPEC §6.1): only an error saying nothing
+// ran anywhere (RunLocally) lets kran run run it here; otherwise exit 125.
 func (r *runner) onErrorFrame(ctx context.Context, e proto.APIError) (int, bool) {
 	msg := e.Error
 	if msg == "" {
@@ -635,11 +637,24 @@ func (r *runner) onErrorFrame(ctx context.Context, e proto.APIError) (int, bool)
 	if e.Hint != "" {
 		msg += " (" + e.Hint + ")"
 	}
-	if r.local == nil && !r.started {
+	if r.local == nil && !r.started && (!r.remote || e.RunLocally) {
 		r.closeSession()
 		return r.noSession(ctx, msg+" — running locally", nil), true
 	}
+	if r.remote && !r.started {
+		msg += "; " + r.mayStillStart()
+	}
 	return r.fail(msg)
+}
+
+// mayStillStart says why kran run does not run a remote job here after
+// losing track of it before it started.
+func (r *runner) mayStillStart() string {
+	node := "its node"
+	if r.decision != nil {
+		node = r.decision.Node
+	}
+	return fmt.Sprintf("job %s may still start on %s, so kran does not run it here too (check: kran jobs; kran logs %s)", r.jobID, node, r.jobID)
 }
 
 func (r *runner) fail(msg string) (int, bool) {
@@ -648,11 +663,14 @@ func (r *runner) fail(msg string) (int, bool) {
 	return proto.ExitInfra, true
 }
 
-// onDisconnect handles a dropped daemon connection.
+// onDisconnect handles a dropped daemon connection. Before any decision
+// nothing can have started, so the job runs here. After one, kran run
+// reattaches: a remote job may start on its target while the daemon
+// restarts or shuts down, and only the daemon can tell (SPEC §6.1).
 func (r *runner) onDisconnect(ctx context.Context, cause error) (int, bool) {
 	r.closeSession()
 	switch {
-	case r.jobID == "" || (r.remote && !r.started):
+	case r.jobID == "":
 		return r.noSession(ctx, "lost the connection to the daemon before the job started — running locally", cause), true
 	case r.reconnectOn:
 		return 0, false
@@ -696,6 +714,9 @@ func (r *runner) onReconnect(ctx context.Context, rr reconnectResult) (int, bool
 		}
 		if r.local != nil {
 			return 0, false // keep running locally; the exit code is still ours
+		}
+		if r.remote && !r.started {
+			return r.fail("lost the connection to the kran daemon; " + r.mayStillStart())
 		}
 		node := "its node"
 		if r.decision != nil {

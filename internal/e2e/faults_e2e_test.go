@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"crypto/rand"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,35 +24,48 @@ func slowSetupRepo(t *testing.T, c *cluster, secs string) string {
 	})
 }
 
-// TestE2EFallbackWhenTargetDiesBeforeStart: the target daemon dies while
-// the job is still in setup → the job runs locally instead, exactly once.
-func TestE2EFallbackWhenTargetDiesBeforeStart(t *testing.T) {
+// TestE2ETargetDiesBeforeStart: the target daemon dies while the job is
+// still in setup. Back within the lease, the origin reattaches and the job
+// runs there, once. Gone for good, nobody can tell whether the command
+// started there before it died (SPEC §6.1 step 8): 125, and nothing runs
+// here; the command must not run there later either.
+func TestE2ETargetDiesBeforeStart(t *testing.T) {
 	c := newCluster(t, []string{"a", "b"}, nil)
 	a, b := c.node("a"), c.node("b")
 	repo := slowSetupRepo(t, c, "4")
 	marks := filepath.Join(c.base, "marks")
-	p := a.startKran(runOpts{dir: repo, env: []string{"MARKS=" + marks}}, "run", "--json-events", "-n", "b", "--",
-		"sh", "-c", `echo "${KRAN_NODE:-here}" >> "$MARKS"; echo "ran on ${KRAN_NODE:-here}"`)
-	if ev := waitPhase(p, "setup", 60*time.Second); ev == nil {
-		t.Fatalf("job never reached setup on b:\n%s", p.wait())
-	}
-	b.crash()
-	r := p.wait()
-	// Pinned to b, so the daemon hands the job back to the CLI, which runs
-	// it itself (no daemon envelope, no KRAN_NODE).
-	if r.code != 0 || string(r.stdout) != "ran on here\n" {
-		t.Fatalf("fallback run: %s", r)
-	}
-	if event(r.events(), "fallback") == nil && !strings.Contains(string(r.stderr), "failed before the job started") {
-		t.Errorf("no fallback notice on stderr: %q", r.stderr)
-	}
-	// b comes back; the abandoned job must not run its command there.
-	b.start()
-	c.waitMesh(60 * time.Second)
-	time.Sleep(execLease + 8*time.Second)
-	data, _ := os.ReadFile(marks)
-	if string(data) != "here\n" {
-		t.Errorf("command ran on %q, want exactly once, locally", strings.Fields(string(data)))
+	for _, comesBack := range []bool{true, false} {
+		os.Remove(marks)
+		must(t, os.WriteFile(filepath.Join(repo, "setup.lock"), []byte(fmt.Sprint(comesBack)), 0o644)) // setup runs again
+		p := a.startKran(runOpts{dir: repo, env: []string{"MARKS=" + marks}}, "run", "--json-events", "-n", "b", "--",
+			"sh", "-c", `echo "${KRAN_NODE:-here}" >> "$MARKS"; echo "ran on ${KRAN_NODE:-here}"`)
+		if ev := waitPhase(p, "setup", 60*time.Second); ev == nil {
+			t.Fatalf("job never reached setup on b:\n%s", p.wait())
+		}
+		b.crash()
+		if comesBack {
+			time.Sleep(2 * time.Second)
+			b.start()
+			if r := p.wait(); r.code != 0 || string(r.stdout) != "ran on b\n" {
+				t.Errorf("target back within the lease: %s", r)
+			}
+		} else {
+			r := p.wait()
+			if r.code != 125 || len(r.stdout) != 0 || !strings.Contains(string(r.stderr), "may have started on b") {
+				t.Errorf("target gone for good: %s", r)
+			}
+			b.start()
+		}
+		c.waitMesh(60 * time.Second)
+		time.Sleep(execLease + 8*time.Second)
+		data, _ := os.ReadFile(marks)
+		want := []string{"b"}
+		if !comesBack {
+			want = nil
+		}
+		if got := strings.Fields(string(data)); fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("target back %v: command ran on %v, want %v", comesBack, got, want)
+		}
 	}
 	a.waitIdle(30 * time.Second)
 	b.waitIdle(30 * time.Second)
@@ -459,26 +473,24 @@ func TestE2EOriginRestartBeforeStart(t *testing.T) {
 }
 
 // TestE2EStdinIntactAfterFallback: input is forwarded only once the
-// command runs remotely; a fallback before that gets all of it.
+// command runs remotely; a fallback before that (the setup fails on the
+// target: nothing ran there) gets all of it.
 func TestE2EStdinIntactAfterFallback(t *testing.T) {
 	c := newCluster(t, []string{"a", "b"}, nil)
-	b := c.node("b")
 	a := c.node("a")
-	repo := slowSetupRepo(t, c, "4")
+	repo := slowSetupRepo(t, c, "2; exit 3")
 	in := strings.Repeat("0123456789abcdef", 8<<10) // 128 KiB
 	p := a.startKran(runOpts{dir: repo, stdin: strings.NewReader(in)}, "run", "--json-events", "-i", "-n", "b", "--",
 		"sh", "-c", `wc -c | tr -d ' '`)
 	if waitPhase(p, "setup", 60*time.Second) == nil {
 		t.Fatalf("no setup phase: %s", p.wait())
 	}
-	b.crash()
 	r := p.wait()
-	if r.code != 0 || strings.TrimSpace(string(r.stdout)) != "131072" {
+	if r.code != 0 || strings.TrimSpace(string(r.stdout)) != "131072" || event(r.events(), "fallback") == nil {
 		t.Errorf("fallback after a failed remote start must get all of stdin: %s", r)
 	}
-	b.start()
-	c.waitMesh(60 * time.Second)
 	// And a normal remote run still gets everything.
+	must(t, os.WriteFile(filepath.Join(repo, ".kran.toml"), nil, 0o644))
 	r = a.kran(runOpts{dir: repo, stdin: strings.NewReader(in)}, "run", "-i", "-n", "b", "--", "sh", "-c", `wc -c | tr -d ' '`)
 	if r.code != 0 || strings.TrimSpace(string(r.stdout)) != "131072" {
 		t.Errorf("remote stdin: %s", r)

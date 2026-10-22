@@ -84,38 +84,76 @@ func (d *Daemon) drive(ctx context.Context, e *jobEntry, mode driveMode) {
 		d.restoreLocal(ctx, e)
 		return
 	case driveRestoreRemote:
-		// Heartbeats must resume at once (the target's lease is short);
-		// the CLI gets CLIReattachWait to come back.
 		job := e.snapshot()
+		p := scheduler.Placement{JobID: e.id, Node: job.Node, Runtime: job.Runtime, Alloc: job.Alloc}
 		if job.State != proto.JobRunning {
-			// Its kran run did not see the command start, so it ran it
-			// locally when we went away: stop it here before setup ends.
-			e.requestCancel("its kran run ran it locally when the daemon restarted before the job started", "TERM")
-			// Cancel there before reattaching: an attach renews the lease,
-			// which lets a command that waited out a finished setup start.
-			d.cancelOnTarget(job.Node, e.id)
+			// The command had not started (setup on the target). Its kran
+			// run reattaches (SPEC §6.1); until it does, no heartbeat goes
+			// to the target, whose supervisor starts the command only
+			// after one. Without its kran run the job is canceled there.
+			if !d.waitForCLI(ctx, e) {
+				if ctx.Err() == nil {
+					e.requestCancel("its kran run did not reconnect after the daemon restarted", "TERM")
+					d.cancelOnTarget(job.Node, e.id)
+					d.finishCanceledBeforeStart(e)
+				}
+				return
+			}
 		} else {
+			// Heartbeats must resume at once (the target's lease is short);
+			// the CLI gets CLIReattachWait to come back.
 			go d.cancelWithoutCLI(ctx, e)
 		}
-		p := scheduler.Placement{JobID: e.id, Node: job.Node, Runtime: job.Runtime, Alloc: job.Alloc}
 		if err := d.followRemote(ctx, e, p, nil); err != nil {
-			// Before running there is nothing to fall back to here: the
-			// CLI that could run it locally is gone or reattaching.
+			var pe *prestartError
+			if errors.As(err, &pe) {
+				// The target says nothing of the command ran: the
+				// reattached kran run may run it itself.
+				d.unplaceable(e, pe.Error())
+				return
+			}
 			e.finish(proto.Exit{Code: proto.ExitInfra, State: proto.JobInfraErr, Reason: err.Error()})
 		}
 		return
 	case driveResubmit:
-		e.setState(proto.JobQueued, "queued again after a daemon restart")
-		// A kran run that lost us before its job started runs the command
-		// itself: placing it again without a reattached CLI would run it
-		// twice.
+		prev := e.snapshot()
+		// Stopped while the job was set up on its target: job.start may
+		// have gone out. That is settled there before the job is placed
+		// anywhere else.
+		unsettled := prev.State == proto.JobSyncing && !prev.Local && prev.Node != "" && prev.Node != d.self
+		if !unsettled {
+			e.setState(proto.JobQueued, "queued again after a daemon restart")
+		}
+		// A kran run that lost us before its job was placed runs the
+		// command itself: placing it again without a reattached CLI would
+		// run it twice.
 		if !d.waitForCLI(ctx, e) {
 			if ctx.Err() != nil {
 				return
 			}
 			e.requestCancel("its kran run did not reconnect after the daemon restarted", "TERM")
+			if unsettled {
+				d.cancelOnTarget(prev.Node, e.id)
+			}
 			d.finishCanceledBeforeStart(e)
 			return
+		}
+		if unsettled {
+			p := scheduler.Placement{JobID: e.id, Node: prev.Node, Runtime: prev.Runtime, Alloc: prev.Alloc}
+			err := d.followRemote(ctx, e, p, nil)
+			var pe *prestartError
+			if err == nil || !errors.As(err, &pe) {
+				if err != nil && ctx.Err() == nil {
+					e.finish(proto.Exit{Code: proto.ExitInfra, State: proto.JobInfraErr, Reason: err.Error()})
+				}
+				return
+			}
+			// The target confirms the job never started there.
+			if c, _, _ := e.canceled(); c {
+				d.finishCanceledBeforeStart(e)
+				return
+			}
+			e.setState(proto.JobQueued, "queued again after a daemon restart")
 		}
 	}
 
@@ -334,7 +372,9 @@ func (d *Daemon) unplaceable(e *jobEntry, reason string) {
 		e.finish(proto.Exit{Code: proto.ExitInfra, State: proto.JobInfraErr, Reason: reason})
 		return
 	}
-	e.sendFrame(proto.FrameError, proto.APIError{Error: reason, Hint: "kran run runs it locally"})
+	// Only called when nothing of the job ran anywhere: kran run may run
+	// it, also after a remote decision (SPEC §6.1 step 8).
+	e.sendFrame(proto.FrameError, proto.APIError{Error: reason, Hint: "kran run runs it locally", RunLocally: true})
 	e.update(func(j *proto.Job) { j.Local = true })
 	e.finish(proto.Exit{Code: proto.ExitInfra, State: proto.JobCanceled, Fallback: true, Node: d.self,
 		Reason: reason + "; kran run ran it locally without the daemon"})

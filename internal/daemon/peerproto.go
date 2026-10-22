@@ -146,6 +146,15 @@ type jobAttachBody struct {
 	Offset int64 `json:"offset"`
 }
 
+// jobCancelResult answers job.cancel. Released: the job never started
+// here and no job.start can start it any more, so the origin may run it
+// elsewhere. Started: it started here and is being stopped. Neither (an
+// older target): nothing is certain.
+type jobCancelResult struct {
+	Released bool `json:"released,omitempty"`
+	Started  bool `json:"started,omitempty"`
+}
+
 type jobSignalBody struct {
 	Signal string `json:"signal"`
 }

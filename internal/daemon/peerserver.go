@@ -562,12 +562,23 @@ func (t *targetSide) handleJobStart(ps *peerSession, pc *peerConn, req rawPeerRe
 	}
 	t.mu.Lock()
 	slot := j.Slot
+	if slot != nil {
+		j.starting = make(chan struct{})
+	}
 	t.mu.Unlock()
 	if slot == nil {
 		t.end(j, true)
 		pc.fail(codeBadRequest, "job.start before slot.commit")
 		return
 	}
+	// Attaches and cancels wait for the outcome (see handleJobCancel).
+	startDone := sync.OnceFunc(func() {
+		t.mu.Lock()
+		close(j.starting)
+		j.starting = nil
+		t.mu.Unlock()
+	})
+	defer startDone()
 	b.Spec.ID = j.ID
 	ctx, cancel := context.WithTimeout(t.d.lifetime(), t.d.t.PrestartTimeout)
 	proc, err := t.d.deps.Exec.Start(ctx, execenv.StartRequest{
@@ -582,6 +593,7 @@ func (t *targetSide) handleJobStart(ps *peerSession, pc *peerConn, req rawPeerRe
 	cancel()
 	if err != nil {
 		t.end(j, true)
+		startDone()
 		pc.fail(codeInternal, "start on %s: %v", t.d.self, err)
 		return
 	}
@@ -597,6 +609,7 @@ func (t *targetSide) handleJobStart(ps *peerSession, pc *peerConn, req rawPeerRe
 	// origin canceled while it was starting.
 	t.startWatchLocked(j)
 	t.mu.Unlock()
+	startDone()
 	if canceled {
 		t.d.logf("target: job %s from %s was canceled while it started; stopping it", j.ID, j.Origin)
 		t.cancelProc(j, proc)
@@ -631,8 +644,17 @@ func (t *targetSide) handleJobAttach(ps *peerSession, pc *peerConn, req rawPeerR
 		// a record): execenv may still know it.
 		j = &tjob{ID: req.JobID, Origin: ps.name(), started: true, phaseCh: make(chan struct{}), reservedAt: t.d.now()}
 	}
+	starting := j.starting
 	t.mu.Unlock()
-	if !j.started {
+	if starting != nil {
+		// An origin that lost the answer to its job.start asks whether the
+		// job started: answer that, not "not yet".
+		t.waitStart(starting)
+	}
+	t.mu.Lock()
+	started := j.started
+	t.mu.Unlock()
+	if !started {
 		pc.fail(codeUnknownJob, "job %s has not started on %s", req.JobID, t.d.self)
 		return
 	}
@@ -655,7 +677,86 @@ func (t *targetSide) handleJobAttach(ps *peerSession, pc *peerConn, req rawPeerR
 	t.streamJob(pc, j, proc, b.Offset)
 }
 
+// waitStart waits for an in-flight job.start to finish (bounded like it).
+func (t *targetSide) waitStart(starting <-chan struct{}) {
+	tm := time.NewTimer(t.d.t.PrestartTimeout + 5*time.Second)
+	defer tm.Stop()
+	select {
+	case <-starting:
+	case <-tm.C:
+	case <-t.d.lifetime().Done():
+	}
+}
+
+// handleJobCancel stops a job and tells the origin whether it may run it
+// elsewhere: Released only when the job never started here and no
+// job.start can start it any more (SPEC §6.1, exactly once).
+func (t *targetSide) handleJobCancel(ps *peerSession, pc *peerConn, req rawPeerRequest) {
+	t.mu.Lock()
+	j := t.jobs[req.JobID]
+	if j != nil && j.Origin != ps.name() {
+		t.mu.Unlock()
+		pc.fail(codeUnknownJob, "%s has no job %s", t.d.self, req.JobID)
+		return
+	}
+	if j == nil {
+		t.mu.Unlock()
+		// No reservation: job.start fails from now on. Whether one
+		// started it earlier (the record lost on a restart) the executor
+		// knows.
+		if t.d.deps.Exec != nil {
+			ctx, cancel := context.WithTimeout(t.d.lifetime(), 10*time.Second)
+			proc, err := t.d.deps.Exec.Attach(ctx, req.JobID)
+			cancel()
+			if err == nil {
+				proc.Signal("TERM")
+				pc.respond(jobCancelResult{Started: true})
+				return
+			}
+		}
+		pc.respond(jobCancelResult{Released: true})
+		return
+	}
+	if !j.started {
+		t.cancelLocked(j, "canceled by origin")
+		starting := j.starting
+		t.mu.Unlock()
+		t.d.publishSelf()
+		if starting != nil {
+			t.waitStart(starting) // handleJobStart stops a job canceled while it started
+		}
+		t.mu.Lock()
+		started, inFlight := j.started, j.starting != nil
+		t.mu.Unlock()
+		switch {
+		case started:
+			pc.respond(jobCancelResult{Started: true})
+		case inFlight:
+			pc.fail(codeInternal, "job %s is still starting on %s", req.JobID, t.d.self)
+		default:
+			pc.respond(jobCancelResult{Released: true})
+		}
+		return
+	}
+	t.mu.Unlock()
+	ctx, cancel := context.WithTimeout(t.d.lifetime(), 10*time.Second)
+	proc, err := t.ensureProc(ctx, j)
+	cancel()
+	if err != nil {
+		pc.fail(codeUnknownJob, "%v", err)
+		return
+	}
+	if err := t.cancelProc(j, proc); err != nil {
+		t.d.logf("target: cancel %s: %v", j.ID, err)
+	}
+	pc.respond(jobCancelResult{Started: true})
+}
+
 func (t *targetSide) handleJobControl(ps *peerSession, pc *peerConn, req rawPeerRequest) {
+	if req.Method == proto.PeerJobCancel {
+		t.handleJobCancel(ps, pc, req)
+		return
+	}
 	t.mu.Lock()
 	j := t.jobs[req.JobID]
 	t.mu.Unlock()
@@ -665,14 +766,8 @@ func (t *targetSide) handleJobControl(ps *peerSession, pc *peerConn, req rawPeer
 	}
 	t.mu.Lock()
 	started := j.started
-	if !started && req.Method == proto.PeerJobCancel {
-		t.cancelLocked(j, "canceled by origin")
-	}
 	t.mu.Unlock()
 	if !started {
-		if req.Method == proto.PeerJobCancel {
-			t.d.publishSelf()
-		}
 		pc.respond(nil)
 		return
 	}
@@ -694,8 +789,6 @@ func (t *targetSide) handleJobControl(ps *peerSession, pc *peerConn, req rawPeer
 		var tty proto.TTY
 		json.Unmarshal(req.Body, &tty)
 		err = proc.Resize(tty)
-	case proto.PeerJobCancel:
-		err = t.cancelProc(j, proc)
 	}
 	if err != nil {
 		pc.fail(codeInternal, "%v", err)

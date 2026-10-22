@@ -48,6 +48,9 @@ type tjob struct {
 	// canceled: the origin gave the job up while an operation was in
 	// flight; the last one to finish releases (or stops) it.
 	canceled bool
+	// starting is open while a job.start runs Exec.Start: whether the job
+	// starts is not known until it closes.
+	starting chan struct{}
 	started  bool
 	ended    bool
 	endedAt  time.Time

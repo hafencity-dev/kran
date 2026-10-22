@@ -16,7 +16,8 @@ targets linux/darwin × arm64/amd64.
 
 1. **Never worse than local.** Any kran failure *before the user's command
    starts* falls back to running the command locally (with the local memory
-   guard). kran is never on the critical path in a way that loses or hangs work.
+   guard), as long as kran is certain the command cannot also run
+   elsewhere: a job runs exactly once (§6.1 step 8). kran is never on the critical path in a way that loses or hangs work.
    The daemon, the UI and the scheduler are optimizations, not dependencies.
 2. **Plug and play, KISS.** `curl … | sh` → `kran setup` → `kran link devmac`.
    No config files required. No open ports. No new credentials to manage.
@@ -216,6 +217,33 @@ Flags: `-l/--local`, `-r/--remote`, `-n/--node NAME`, `--gpu`, `--cpus N`,
    no automatic re-run.
 7. Ctrl-C in the CLI → `signal{INT}` forwarded; a second Ctrl-C within 2 s
    → `signal{KILL}`. Closing the CLI connection = cancel.
+8. **Exactly once.** A job runs on its target or here, never both, so a
+   fallback after a remote decision needs certainty that the command did
+   not and cannot start on the target:
+   * Before `job.start` is sent nothing can start there: a failure falls
+     back. The origin sends `job.start` only while a `kran run` is attached.
+   * After `job.start` was sent (answered or not), only the target can
+     tell. The origin sends `job.cancel`; its answer `released` (the job
+     never started, and no `job.start` can start it any more; a start in
+     flight is waited for) allows the fallback, `started` makes the origin
+     follow the job to its exit (`BeforeStart` exits still fall back). A
+     `job.start` whose answer was lost is settled this way, and `job.attach`
+     waits for a start in flight instead of answering "not started".
+   * Without an answer (the target unreachable until its lease expired)
+     the job ends with 125 ("it may have started there"): the setup may
+     have ended and the command started before contact was lost.
+   * `kran run` falls back on its own only before any decision. After a
+     decision it reattaches when it loses the daemon (a restart or a
+     graceful stop), and runs a remote job itself only on the daemon's
+     word: a `local` decision or a `FrameError` with `run_locally`. If the
+     daemon does not come back it exits 125 (the job may still start there).
+   * A restarted origin sends no heartbeat to a job still in setup until
+     its `kran run` reattached (the supervisor starts the command only
+     after a heartbeat newer than the setup); without one it cancels the
+     job. A job restored in `syncing` on a remote node is settled with its
+     target (as above) before it is placed again.
+   * A dropped run session of a placed job whose `kran run` still lives
+     gets `CLIDropGrace` to reattach instead of an immediate cancel.
 
 ### 6.2 Leases, supervisor, reaper (bulletproofing)
 
@@ -232,8 +260,9 @@ Flags: `-l/--local`, `-r/--remote`, `-n/--node NAME`, `--gpu`, `--cpus N`,
   daemon re-indexes `jobs/*/` and the origin reattaches (`reattach{job,
   offset}`) within the lease window and output continues from the offset.
 * The origin daemon persists active remote jobs; on restart it reattaches.
-  The CLI, if its daemon connection drops mid-run, retries the connection for
-  10 s and resumes via `reattach`; otherwise it exits 125.
+  The CLI, if its daemon connection drops after the decision, retries the
+  connection for 20 s (as long as a restarted daemon waits for it) and
+  resumes via `reattach`; otherwise it exits 125 (§6.1 step 8).
 * Reaper (every 30 s, and at daemon start): kills scopes/containers/process
   groups labelled kran whose job is not active; deletes job dirs older than
   7 days; trims blob cache (LRU, cap default 20 GiB or 10% of disk) and

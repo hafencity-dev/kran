@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -381,14 +382,16 @@ func (e *jobEntry) detach(clientPID int) {
 	e.attached--
 	left := e.attached
 	fin := e.finished || e.exitReported
-	started := e.started
+	placed := e.started || e.placed
 	e.mu.Unlock()
 	if left > 0 || fin || e.d.stopping.Load() {
 		return
 	}
-	// Before the command started, kran run does not reattach: it runs the
-	// command itself, so waiting would only risk running it twice.
-	if started && clientPID > 0 && e.d.clientAlive(clientPID) {
+	// A kran run that saw the decision reattaches; one that lost us before
+	// it runs the command itself, and a remote job then never gets to
+	// job.start without a kran run attached (waitAttached). Before the
+	// placement there is nothing to wait for.
+	if placed && clientPID > 0 && e.d.clientAlive(clientPID) {
 		go e.awaitCLI(clientPID)
 		return
 	}
@@ -421,6 +424,22 @@ func (e *jobEntry) awaitCLI(pid int) {
 				e.requestCancel("the kran run that started it went away", "TERM")
 				return
 			}
+		}
+	}
+}
+
+// waitAttached returns once a kran run is attached to the job, or with
+// ctx's error (a detached one that does not come back cancels the job).
+func (e *jobEntry) waitAttached(ctx context.Context) error {
+	for {
+		n, ch := e.attachedCount()
+		if n > 0 {
+			return nil
+		}
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return fmt.Errorf("kran run went away: %w", ctx.Err())
 		}
 	}
 }

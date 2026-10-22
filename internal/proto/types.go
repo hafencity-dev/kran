@@ -410,6 +410,10 @@ type DaemonInfo struct {
 type APIError struct {
 	Error string `json:"error"`
 	Hint  string `json:"hint,omitempty"` // what to do next
+	// RunLocally (run sessions, FrameError): nothing of the job ran or
+	// can still run anywhere, so kran run may run it itself. After a
+	// remote decision kran run falls back only on such an error.
+	RunLocally bool `json:"run_locally,omitempty"`
 }
 
 // QueueEvent is the Data of an EventQueue event.

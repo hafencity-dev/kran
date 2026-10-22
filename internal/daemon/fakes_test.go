@@ -689,17 +689,38 @@ func startFakeProc(spec proto.JobSpec, dir string, lease time.Duration, onPhase 
 	if setup > 0 {
 		onPhase(proto.Phase{State: proto.JobSetup, Message: "running setup: fake"})
 		go func() {
-			select {
-			case <-time.After(setup):
-			case <-p.setupCancel:
+			endBeforeStart := func(x proto.Exit) {
 				p.mu.Lock()
-				p.exit = proto.Exit{JobID: p.id, Code: 143, Signal: "TERM", State: proto.JobCanceled, BeforeStart: true, Reason: "canceled during setup"}
+				x.JobID, x.BeforeStart = p.id, true
+				p.exit = x
 				p.done = true
 				close(p.notify)
 				p.notify = make(chan struct{})
 				close(p.doneCh)
 				p.mu.Unlock()
-				return
+			}
+			canceled := proto.Exit{Code: 143, Signal: "TERM", State: proto.JobCanceled, Reason: "canceled during setup"}
+			lost := proto.Exit{Code: proto.ExitInfra, State: proto.JobLost, Reason: "lease expired during setup"}
+			setupEnd := time.Now().Add(setup)
+			// Like the supervisor: the lease runs during the setup, and the
+			// command starts only after a renewal newer than the setup.
+			for {
+				p.mu.Lock()
+				renewed, expired := p.lastRenew.After(setupEnd), time.Since(p.lastRenew) > p.leaseTTL
+				p.mu.Unlock()
+				if renewed {
+					break
+				}
+				if expired {
+					endBeforeStart(lost)
+					return
+				}
+				select {
+				case <-time.After(10 * time.Millisecond):
+				case <-p.setupCancel:
+					endBeforeStart(canceled)
+					return
+				}
 			}
 			onPhase(proto.Phase{State: proto.JobRunning})
 			p.mu.Lock()
