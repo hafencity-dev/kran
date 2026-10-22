@@ -245,3 +245,42 @@ func TestIsOurCommand(t *testing.T) {
 		}
 	}
 }
+
+// Shell syntax the lexer does not model must never be wrapped: the wrapped
+// string is a single `kran run --sh '…'` word, so a misread would hide an
+// arbitrary command from the user's permission rules (e.g. an allowed
+// `Bash(kran run:*)`). bash and zsh run --sh strings (shellName).
+func TestWrapRejectsHiddenExpansions(t *testing.T) {
+	keep := []string{
+		`go test $'\'' ; rm -rf ~ #'`,             // bash ANSI-C quote: the lexer saw one word
+		`go test $"x" ./...`,                      // bash locale string
+		`export y=a\[\$\(id\)\]; go test ${z[y]}`, // arithmetic subscript runs $(id)
+		`export x=\$\(id\); go test "${x@P}"`,     // bash prompt expansion runs $(id)
+		`export x=\$\(id\); go test "${(e)x}"`,    // zsh (e) flag runs $(id)
+		`go test ${x:-y} ./...`,
+		`go test $[1+1] ./...`,
+		`go test "$((1+1))" ./...`,
+		"go\r test ./...",
+		`go test ./... >/dev/null'x'`,
+		`go test ./... >/dev/null"/../x"`,
+		`go test ./... 2>/dev/null\x`,
+	}
+	for _, c := range keep {
+		if got, ok := WrapCommand(c); ok {
+			t.Errorf("must not wrap %q (got %q)", c, got)
+		}
+	}
+	wrap := []string{
+		`go test -run Test\$ ./...`,
+		`echo $HOME && go test ./...`,
+		`go test "$PKG" ${PKG2} $1 ./...`,
+		`go test -run '^$' ./...`,
+		`go test -run "Foo$" ./...`,
+		`go test ./... >/dev/null 2>&1; echo $?`,
+	}
+	for _, c := range wrap {
+		if _, ok := WrapCommand(c); !ok {
+			t.Errorf("should wrap %q", c)
+		}
+	}
+}

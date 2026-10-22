@@ -10,21 +10,41 @@ RUN apt-get update \
       bash zsh procps openssh-client gnupg \
  && rm -rf /var/lib/apt/lists/*
 
-# mise provisions Go, Node, Python, … per job pin.
-RUN curl -fsSL https://mise.run | MISE_INSTALL_PATH=/usr/local/bin/mise sh \
- && mise --version
-
-# Docker CLI + compose plugin, so tests using `docker`, `docker compose` or
+# mise provisions Go, Node, Python, … per job pin. The Docker CLI and the
+# compose plugin let tests using `docker`, `docker compose` or
 # testcontainers reach the node's Docker through the mounted socket.
+# Every download is pinned by version and sha256 (mise and compose: the
+# release's published sums; docker: the static archive as published at
+# download.docker.com, which has no sums file). Bump version and sums
+# together.
+ARG MISE_VERSION=v2026.9.18
+ARG MISE_SHA256_X86_64=d24fe0bf7e613824ad99f7b8dac3f2b381a37b9f75f84dd250855217095a8de4
+ARG MISE_SHA256_AARCH64=2142433ae70decffc5fa24bd160e47931e33f55eb031d128beb97cbae634d168
 ARG DOCKER_VERSION=27.5.1
+ARG DOCKER_SHA256_X86_64=4f798b3ee1e0140eab5bf30b0edc4e84f4cdb53255a429dc3bbae9524845d640
+ARG DOCKER_SHA256_AARCH64=e6b53725a73763ab3f988c73f8772eaed429754c1a579db5ff11f21990fd1817
 ARG COMPOSE_VERSION=v2.32.4
-RUN arch="$(uname -m)" \
- && curl -fsSL "https://download.docker.com/linux/static/stable/${arch}/docker-${DOCKER_VERSION}.tgz" \
-    | tar -xz --strip-components=1 -C /usr/local/bin docker/docker \
- && mkdir -p /usr/local/lib/docker/cli-plugins \
- && curl -fsSL -o /usr/local/lib/docker/cli-plugins/docker-compose \
-    "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-${arch}" \
- && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+ARG COMPOSE_SHA256_X86_64=ed1917fb54db184192ea9d0717bcd59e3662ea79db48bff36d3475516c480a6b
+ARG COMPOSE_SHA256_AARCH64=0c4591cf3b1ed039adcd803dbbeddf757375fc08c11245b0154135f838495a2f
+RUN set -eu; arch="$(uname -m)"; \
+    case "$arch" in \
+      x86_64)  mise_arch=x64;   mise_sum=$MISE_SHA256_X86_64;  docker_sum=$DOCKER_SHA256_X86_64;  compose_sum=$COMPOSE_SHA256_X86_64 ;; \
+      aarch64) mise_arch=arm64; mise_sum=$MISE_SHA256_AARCH64; docker_sum=$DOCKER_SHA256_AARCH64; compose_sum=$COMPOSE_SHA256_AARCH64 ;; \
+      *) echo "kran-runner: unsupported architecture $arch" >&2; exit 1 ;; \
+    esac; \
+    cd /tmp; \
+    curl -fsSL -o mise "https://github.com/jdx/mise/releases/download/${MISE_VERSION}/mise-${MISE_VERSION}-linux-${mise_arch}"; \
+    echo "$mise_sum  mise" | sha256sum -c -; \
+    install -m 0755 mise /usr/local/bin/mise; \
+    curl -fsSL -o docker.tgz "https://download.docker.com/linux/static/stable/${arch}/docker-${DOCKER_VERSION}.tgz"; \
+    echo "$docker_sum  docker.tgz" | sha256sum -c -; \
+    tar -xzf docker.tgz --strip-components=1 -C /usr/local/bin docker/docker; \
+    curl -fsSL -o docker-compose "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-${arch}"; \
+    echo "$compose_sum  docker-compose" | sha256sum -c -; \
+    mkdir -p /usr/local/lib/docker/cli-plugins; \
+    install -m 0755 docker-compose /usr/local/lib/docker/cli-plugins/docker-compose; \
+    rm -f mise docker.tgz docker-compose; \
+    mise --version; docker --version; docker compose version
 
 ENV MISE_DATA_DIR=/kran/tools/mise \
     MISE_CACHE_DIR=/kran/cache/mise \

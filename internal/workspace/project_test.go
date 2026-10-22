@@ -142,3 +142,12 @@ priority = "high"
 		}
 	}
 }
+
+func TestLoadProjectConfigDocker(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, ".kran.toml", "docker = false\n")
+	cfg, err := LoadProjectConfig(root)
+	if err != nil || cfg.Docker == nil || *cfg.Docker {
+		t.Fatalf("%+v %v", cfg, err)
+	}
+}

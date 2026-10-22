@@ -8,11 +8,48 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
+
+// Linux delivers the parent-death signal when the *thread* that forked the
+// child exits, and the Go runtime may retire threads. So children that must
+// die with kran run are forked by one goroutine locked to its thread for
+// the life of the process (it never returns and never unlocks).
+var (
+	forkOnce sync.Once
+	forkReqs chan forkReq
+)
+
+type forkReq struct {
+	cmd  *exec.Cmd
+	done chan error
+}
+
+// startWithDeathSignal starts cmd so that it gets SIGKILL when this process
+// dies (covers the job's leader even before the watcher runs).
+func startWithDeathSignal(cmd *exec.Cmd) error {
+	forkOnce.Do(func() {
+		forkReqs = make(chan forkReq)
+		go func() {
+			runtime.LockOSThread()
+			for r := range forkReqs {
+				r.done <- r.cmd.Start()
+			}
+		}()
+	})
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Pdeathsig = syscall.SIGKILL
+	done := make(chan error, 1)
+	forkReqs <- forkReq{cmd, done}
+	return <-done
+}
 
 func maxRSSBytes(kb int64) int64 { return kb * 1024 }
 

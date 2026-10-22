@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -40,7 +41,8 @@ func (d *Daemon) handleRun(w http.ResponseWriter, r *http.Request) {
 	if err := brw.Flush(); err != nil {
 		return
 	}
-	d.serveRun(conn, brw.Reader)
+	pid, _ := strconv.Atoi(r.Header.Get("X-Kran-Client-Pid"))
+	d.serveRun(conn, brw.Reader, pid)
 }
 
 // runConn serializes writes to the CLI.
@@ -70,7 +72,7 @@ func (c *runConn) fail(msg, hint string) {
 // serveRun drives one run session: the first frame is submit or reattach;
 // afterwards the job's spool streams to the CLI while the CLI's frames
 // (stdin, resize, signals, local started/exit) flow to the job.
-func (d *Daemon) serveRun(conn net.Conn, br *bufio.Reader) {
+func (d *Daemon) serveRun(conn net.Conn, br *bufio.Reader, clientPID int) {
 	rc := &runConn{conn: conn}
 	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 	t, p, err := proto.ReadFrame(br, nil)
@@ -112,7 +114,7 @@ func (d *Daemon) serveRun(conn net.Conn, br *bufio.Reader) {
 		rc.fail("expected submit or reattach, got "+t.String(), "")
 		return
 	}
-	defer e.detach()
+	defer e.detach(clientPID)
 
 	ctx, cancel := context.WithCancel(d.lifetime())
 	defer cancel()
@@ -127,6 +129,11 @@ func (d *Daemon) serveRun(conn net.Conn, br *bufio.Reader) {
 		}
 		rd.hideLocalOutput = true
 		defer rd.Close()
+		if reattach {
+			// Input sent on the lost session may be gone: ask for it again
+			// (written after the reader's start, so this session sees it).
+			e.cliReattached()
+		}
 		for {
 			ft, fp, err := rd.Next(ctx)
 			if err != nil {
@@ -186,17 +193,21 @@ func (d *Daemon) serveRun(conn net.Conn, br *bufio.Reader) {
 func (d *Daemon) onCLIFrame(ctx context.Context, e *jobEntry, t proto.FrameType, p []byte) bool {
 	switch t {
 	case proto.FrameHeartbeat:
-	case proto.FrameStdin:
-		// Back-pressure: wait while the target is slow to take stdin.
-		for !e.outbox.put(proto.FrameStdin, p) {
+	case proto.FrameStdin, proto.FrameStdinEOF:
+		// kran run keeps to its credit, so this waits only for a target
+		// without flow control.
+		for !e.cliInput(t, p) {
 			select {
 			case <-ctx.Done():
 				return false
 			case <-time.After(50 * time.Millisecond):
 			}
 		}
-	case proto.FrameStdinEOF:
-		e.outbox.put(proto.FrameStdinEOF, nil)
+	case proto.FrameStdinResume:
+		var r proto.StdinResume
+		if json.Unmarshal(p, &r) == nil {
+			e.cliResume(r)
+		}
 	case proto.FrameStdout, proto.FrameStderr:
 		e.appendLocalOutput(t, p)
 	case proto.FrameResize:

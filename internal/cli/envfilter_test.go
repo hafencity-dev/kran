@@ -45,3 +45,25 @@ func TestFilterEnvIgnoresMalformed(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+// Credentials the SPEC §6.5 name list misses: auth blobs, passphrases,
+// passwords inside URLs, and LC_* names (used to smuggle values through
+// ssh AcceptEnv) that look like secrets.
+func TestFilterEnvMoreSecrets(t *testing.T) {
+	env := []string{
+		"npm_config__auth=dXNlcjpwYXNz", "COMPOSER_AUTH={}", "DOCKER_AUTH_CONFIG={}", "GPG_PASSPHRASE=x", "BORG_PASSPHRASE=x",
+		"DATABASE_URL=postgres://u:pw@db/x", "PIP_INDEX_URL=https://u:tok@pypi.example/simple", "REDIS_URL=redis://:pw@r:6379",
+		"LC_API_TOKEN=x",
+		// kept
+		"GIT_AUTHOR_NAME=me", "AUTHOR=me", "PLAIN_URL=postgres://db/x", "PROXY=http://proxy:3128", "LC_ALL=C",
+		"MAIL=me@example.com",
+	}
+	got := FilterEnv(env, nil)
+	want := map[string]string{"GIT_AUTHOR_NAME": "me", "AUTHOR": "me", "PLAIN_URL": "postgres://db/x", "PROXY": "http://proxy:3128", "LC_ALL": "C", "MAIL": "me@example.com"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got  %v\nwant %v", got, want)
+	}
+	if got := FilterEnv([]string{"DATABASE_URL=postgres://u:pw@db/x"}, []string{"DATABASE_URL"}); got["DATABASE_URL"] == "" {
+		t.Fatal("an explicitly forwarded URL with a password must pass")
+	}
+}

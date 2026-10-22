@@ -13,6 +13,7 @@ import (
 
 	"github.com/hafencity-dev/kran/internal/config"
 	"github.com/hafencity-dev/kran/internal/proto"
+	"github.com/hafencity-dev/kran/internal/workspace"
 )
 
 func (a *App) runCommand() *cobra.Command {
@@ -68,6 +69,7 @@ found; 128+n killed by signal n; 2 usage error.`,
 	fs.StringVar(&f.Priority, "priority", "", "high, normal or low (default: high on a terminal, else normal)")
 	fs.StringArrayVar(&f.Labels, "label", nil, "label the job, key=value (repeatable)")
 	fs.BoolVar(&f.NoFallback, "no-fallback", false, "exit 125 instead of running here when kran cannot place the job")
+	fs.BoolVar(&f.NoDocker, "no-docker", false, "do not give a container job the Docker socket (root-equivalent on rootful Docker)")
 	fs.StringArrayVar(&f.ExtraEnv, "env", nil, "also forward this environment variable, even if it looks secret (repeatable)")
 	fs.StringVar(&f.Sh, "sh", "", "run this string with your shell instead of a command")
 	return cmd
@@ -102,10 +104,19 @@ func (a *App) doRun(ctx context.Context, f RunFlags, args []string) int {
 		d := config.Defaults()
 		cfg = &d
 	}
+	var envSet map[string]string
 	spec, err := BuildSpec(ctx, SpecInput{
+		Project: func(root string) (*workspace.ProjectConfig, error) {
+			pc, err := workspace.LoadProjectConfig(root)
+			if pc != nil {
+				envSet = pc.Env.Set
+			}
+			return pc, err
+		},
 		Flags: f, Argv: args, Cwd: cwd, Env: env, Home: home, TTY: tty, Now: time.Now(), PID: os.Getpid(),
 		Owner:  DetectOwner(OwnerInput{Env: envMap(env), PID: os.Getpid(), User: userName(), TTY: ttyName(), Procs: newProcReader()}),
 		Config: cfg,
+		Notice: func(msg string) { a.errorf("%s", msg) },
 	})
 	if err != nil {
 		var ue *UsageError
@@ -129,7 +140,7 @@ func (a *App) doRun(ctx context.Context, f RunFlags, args []string) int {
 	defer signal.Stop(winch)
 
 	r := &runner{
-		spec: spec, flags: f, env: env, dial: a.Dial, stdin: a.In, stdout: a.Out,
+		spec: spec, flags: f, env: env, envSet: envSet, dial: a.Dial, stdin: a.In, stdout: a.Out,
 		stderr: &lineWriter{w: a.Err}, stdio: localStdio{In: a.In, Out: asFile(a.Out, os.Stdout), Err: asFile(a.Err, os.Stderr)},
 		signals: sigs, winch: winch, tm: defaultTiming(), start: startLocal, color: a.styleErr(),
 		size: termSize,

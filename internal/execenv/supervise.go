@@ -113,6 +113,10 @@ func (s *supervisor) run() int {
 		return 1
 	}
 	s.lockF = f // held until the process exits
+	// The env now lives in this process only; a reattach needs none of it.
+	if err := writeJSONAtomic(filepath.Join(s.dir, fileSpec), s.spec.redacted()); err != nil {
+		s.logf("redact spec: %v", err)
+	}
 
 	signal.Ignore(syscall.SIGHUP)
 	sigs := make(chan os.Signal, 2)
@@ -196,10 +200,10 @@ func (s *supervisor) open() error {
 		return fmt.Errorf("events: %w", err)
 	}
 	if s.spec.CtlPath != "" {
-		os.Remove(s.spec.CtlPath)
-		if err := os.MkdirAll(filepath.Dir(s.spec.CtlPath), 0o700); err != nil {
+		if err := privateDir(filepath.Dir(s.spec.CtlPath)); err != nil {
 			return fmt.Errorf("control socket dir: %w", err)
 		}
+		os.Remove(s.spec.CtlPath)
 		if s.ln, err = net.Listen("unix", s.spec.CtlPath); err != nil {
 			return fmt.Errorf("control socket: %w", err)
 		}
@@ -1003,3 +1007,24 @@ func envGet(env []string, key string) string {
 }
 
 var _ io.Writer = streamWriter{}
+
+// privateDir makes dir (and its parents) and insists that dir itself is a
+// real directory of ours that nobody else can enter: the control socket may
+// fall back to a shared /tmp, where another account could pre-create it.
+func privateDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	st, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	sys, ok := st.Sys().(*syscall.Stat_t)
+	if !st.IsDir() || !ok || int(sys.Uid) != os.Getuid() {
+		return fmt.Errorf("%s is not a directory owned by this user; remove it", dir)
+	}
+	if st.Mode().Perm()&0o077 != 0 {
+		return os.Chmod(dir, 0o700)
+	}
+	return nil
+}

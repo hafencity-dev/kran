@@ -119,12 +119,12 @@ func TestLinkEndToEnd(t *testing.T) {
 	// keys: each side authorizes the other's kran key with a forced command and the tag
 	ours, _ := config.PublicKey()
 	ra := w.readFile(w.remoteAuthKeys())
-	if !strings.Contains(ra, `command="`+filepath.Join(w.remoteHome, "bin", "kran")+` serve --stdio",restrict `) ||
+	if !strings.Contains(ra, `command="`+filepath.Join(w.remoteHome, "bin", "kran")+` serve --stdio --peer gx-local",restrict `) ||
 		!strings.Contains(ra, keyBlob(ours)) || !strings.HasSuffix(strings.TrimSpace(ra), "kran@gx-local kran-dev") {
 		t.Fatalf("remote authorized_keys:\n%s", ra)
 	}
 	la := w.readFile(w.localAuthKeys())
-	if !strings.Contains(la, `command="`+w.self+` serve --stdio",restrict `) || !strings.HasSuffix(strings.TrimSpace(la), "kran@devbox kran-dev") {
+	if !strings.Contains(la, `command="`+w.self+` serve --stdio --peer devbox",restrict `) || !strings.HasSuffix(strings.TrimSpace(la), "kran@devbox kran-dev") {
 		t.Fatalf("local authorized_keys:\n%s", la)
 	}
 	// peers.toml on both sides
@@ -311,9 +311,42 @@ func TestPickHostKeyOrder(t *testing.T) {
 	if k := pickHostKey(context.Background(), c, g, &Info{}); k != "ssh-ed25519 FROMKNOWN" || scanned {
 		t.Fatal(k)
 	}
+	// ssh-keyscan is unauthenticated: a man in the middle would get pinned.
 	g.Hostname = "h2.example"
-	if k := pickHostKey(context.Background(), c, g, &Info{}); k != "ssh-ed25519 FROMSCAN" || !scanned {
-		t.Fatal(k)
+	if k := pickHostKey(context.Background(), c, g, &Info{}); k != "" || scanned {
+		t.Fatal(k, scanned)
+	}
+}
+
+// Without a host key learned over the verified ssh channel (or known_hosts),
+// link must stop before touching any authorized_keys instead of pinning
+// whatever the first kran handshake presents.
+func TestLinkRefusesWithoutVerifiedHostKey(t *testing.T) {
+	w := newWorld(t)
+	w.start(true)
+	w.remoteEnv["KRAN_SSHD_HOSTKEY"] = filepath.Join(t.TempDir(), "none")
+	_, err := Link(context.Background(), w.opts)
+	if err == nil || !strings.Contains(err.Error(), "host key") {
+		t.Fatalf("%v", err)
+	}
+	if b, _ := os.ReadFile(w.remoteAuthKeys()); len(b) != 0 {
+		t.Fatalf("remote authorized_keys touched: %q", b)
+	}
+	if b, _ := os.ReadFile(w.localAuthKeys()); len(b) != 0 {
+		t.Fatalf("local authorized_keys touched: %q", b)
+	}
+}
+
+func TestLocalHostKeyTypes(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "ssh_host_rsa_key.pub"), []byte("ssh-rsa RSA root@h\n"), 0o644)
+	if k := hostKeyFrom(dir); k != "ssh-rsa RSA" {
+		t.Fatalf("rsa-only sshd: %q", k)
+	}
+	os.WriteFile(filepath.Join(dir, "ssh_host_ecdsa_key.pub"), []byte("ecdsa-sha2-nistp256 EC root@h\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "ssh_host_ed25519_key.pub"), []byte("ssh-ed25519 ED root@h\n"), 0o644)
+	if k := hostKeyFrom(dir); k != "ssh-ed25519 ED" {
+		t.Fatalf("prefer ed25519: %q", k)
 	}
 }
 

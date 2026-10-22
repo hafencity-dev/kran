@@ -123,6 +123,19 @@ func TestPeersUpsertRemoveValidate(t *testing.T) {
 	if !ps.Remove("a2") || ps.Remove("a2") {
 		t.Fatal("remove semantics")
 	}
+	// User and addresses end up as ssh destinations: never an option.
+	for _, p := range []Peer{
+		{Name: "a", Addresses: []string{"a:22"}, Direction: "both", User: "-oProxyCommand=sh -c x"},
+		{Name: "a", Addresses: []string{"a:22"}, Direction: "both", User: "me\nx"},
+		{Name: "a", Addresses: []string{"-oProxyCommand=x:22"}, Direction: "both"},
+	} {
+		if p.Validate() == nil {
+			t.Errorf("accepted %+v", p)
+		}
+	}
+	if err := (&Peer{Name: "a", Addresses: []string{"a:22"}, Direction: "both", User: "first.last"}).Validate(); err != nil {
+		t.Fatal(err)
+	}
 	bad := Peer{Name: "X", Direction: "sideways"}
 	err := bad.Validate()
 	if err == nil || !strings.Contains(err.Error(), "no addresses") || !strings.Contains(err.Error(), "direction") {

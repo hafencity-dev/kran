@@ -38,8 +38,11 @@ func Toolchains(root string) map[string]string { return toolchains(root) }
 
 // ProjectConfig is `.kran.toml` (all fields optional).
 type ProjectConfig struct {
-	OS   proto.OSPolicy `toml:"os"`
-	Sync struct {
+	OS proto.OSPolicy `toml:"os"`
+	// Docker = false keeps the Docker socket out of container jobs (it is
+	// root-equivalent on rootful Docker). Default: mounted.
+	Docker *bool `toml:"docker"`
+	Sync   struct {
 		Include []string `toml:"include"`
 		Exclude []string `toml:"exclude"`
 	} `toml:"sync"`

@@ -337,6 +337,20 @@ func fileExists(p string) bool {
 }
 
 // currentUserGroup fills in the login name and primary group name.
+// refuseRoot keeps the daemon, and so every job, from running as root
+// (SPEC §9), which `sudo kran service install` would otherwise set up. A
+// system LaunchDaemon may be installed by root as long as it runs as a user.
+func refuseRoot(o Options) error {
+	asRoot := o.UID == 0
+	if o.GOOS == "darwin" && o.System {
+		asRoot = o.User == "" || o.User == "root"
+	}
+	if asRoot {
+		return errors.New("the kran daemon must not run as root: run this as your user, without sudo (kran asks for sudo itself where it needs it)")
+	}
+	return nil
+}
+
 func currentUserGroup(user, group string) (string, string) {
 	u, err := osuser.Current()
 	if err != nil {

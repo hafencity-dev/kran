@@ -40,6 +40,7 @@ type tjob struct {
 	Argv       []string
 	Slot       *proto.SlotRef
 	manifest   *proto.Manifest
+	blobs      map[string]int64  // manifest file hash → size: what blob.put takes
 	sess       transport.Session // session that admitted it
 	reservedAt time.Time
 	busy       int // in-flight prestart operations (holds the reservation)
@@ -58,7 +59,11 @@ type tjob struct {
 
 	phase   proto.Phase
 	phaseCh chan struct{}
-	live    *proto.Resources // sampled every MetricsEvery
+	// in holds the job's input across streams (created by the first one);
+	// startedHere: this daemon started the job, so it saw all its input.
+	in          *stdinPump
+	startedHere bool
+	live        *proto.Resources // sampled every MetricsEvery
 }
 
 type tjobRecord struct {
@@ -206,6 +211,9 @@ func (t *targetSide) admit(id, origin string, b admitBody, sess transport.Sessio
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if j := t.jobs[id]; j != nil && !j.ended {
+		if j.Origin != origin { // IDs are not secret; never follow another origin's job
+			return &admitError{codeBusy, fmt.Sprintf("job id %s is already in use on %s by another node; run the job again", id, d.self)}
+		}
 		if j.started {
 			return &admitError{codeJobStarted, fmt.Sprintf("job %s already started on %s", id, d.self)}
 		}
@@ -467,6 +475,9 @@ func (t *targetSide) watch(ctx context.Context, j *tjob) {
 	t.mu.Lock()
 	j.ended = true
 	j.endedAt = t.d.now()
+	if j.in != nil {
+		j.in.close()
+	}
 	slot := j.Slot
 	t.persistLocked()
 	t.mu.Unlock()
@@ -508,4 +519,28 @@ func humanBytes(n int64) string {
 		}
 	}
 	return fmt.Sprintf("%.0f PiB", f/unit)
+}
+
+// inputPump returns the job's input queue, starting its writer on first use.
+func (t *targetSide) inputPump(j *tjob, proc execenv.Process) *stdinPump {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if j.in != nil {
+		return j.in
+	}
+	q := newStdinPump(t.d.t.StdinQueue, j.startedHere)
+	j.in = q
+	if j.ended {
+		q.close()
+		return q
+	}
+	t.d.goLoop(func(ctx context.Context) {
+		w := proc.Stdin()
+		if w == nil {
+			q.close()
+			return
+		}
+		q.run(ctx, w)
+	})
+	return q
 }

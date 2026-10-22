@@ -195,6 +195,12 @@ func (s *sched) Submit(job *proto.Job) Ticket {
 	}
 	if j.queuedAt.IsZero() {
 		j.queuedAt = now
+	} else {
+		// QueuedAt is wall time (persisted across restarts). Re-anchor it on
+		// now, which carries the monotonic clock in production, so queue age
+		// is immune to wall-clock steps from here on; a QueuedAt in the
+		// future (the clock went back) counts as age zero.
+		j.queuedAt = now.Add(-max(0, now.Sub(j.queuedAt)))
 	}
 	if _, ok := prioWeight[j.prio]; !ok {
 		// Interactive jobs have someone watching the terminal (SPEC §6.3).

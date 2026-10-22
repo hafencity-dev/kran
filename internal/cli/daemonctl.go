@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -33,14 +35,24 @@ func (a *App) withClient(ctx context.Context, fn func(client.Client) error) erro
 	return fn(cl)
 }
 
+// getuid is a variable so tests can pretend to be root.
+var getuid = os.Getuid
+
 func (a *App) daemonCommand() *cobra.Command {
-	return &cobra.Command{
+	var allowRoot bool
+	cmd := &cobra.Command{
 		Use:   "daemon",
 		Short: "Run the kran daemon in the foreground (normally started by the service)",
 		Long: `Run the kran daemon: scheduler, peer connections, local API and web UI.
 Normally the service manager runs this for you (kran service install).`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// The daemon runs the jobs linked machines send, and its state
+			// lives in the home of whoever runs it: as root, every peer
+			// job would run as root (SPEC §9).
+			if getuid() == 0 && !allowRoot {
+				return &ExitError{Code: 1, Msg: "the kran daemon must not run as root: it runs the jobs linked machines send, and they would run as root too. Run it as your user (kran service install, without sudo); if this machine really has only root, use kran daemon --allow-root"}
+			}
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 			opts := daemon.Options{Logf: func(format string, args ...any) {
@@ -52,10 +64,13 @@ Normally the service manager runs this for you (kran service install).`,
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&allowRoot, "allow-root", false, "run as root anyway (every job, including those of linked machines, then runs as root)")
+	return cmd
 }
 
 func (a *App) serveCommand() *cobra.Command {
 	var stdio bool
+	var peer string
 	cmd := &cobra.Command{
 		Use:    "serve --stdio",
 		Short:  "Serve the peer protocol on stdin/stdout (used by linked machines over SSH)",
@@ -67,13 +82,14 @@ func (a *App) serveCommand() *cobra.Command {
 			}
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
-			if code := transport.ServeStdio(ctx); code != 0 {
+			if code := transport.ServeStdioAs(ctx, peer); code != 0 {
 				return &ExitError{Code: code}
 			}
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&stdio, "stdio", false, "bridge stdin/stdout to the local daemon's peer socket")
+	cmd.Flags().StringVar(&peer, "peer", "", "the linked name of the machine this key belongs to (written by kran link)")
 	return cmd
 }
 
@@ -100,6 +116,22 @@ func (a *App) internalCommand() *cobra.Command {
 			// Runs inside the kran-sync container (container runtime on
 			// macOS): applies a slot update streamed on stdin.
 			if code := execenv.Apply(args); code != 0 {
+				return &ExitError{Code: code}
+			}
+			return nil
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:    "watch-parent <pgid>",
+		Hidden: true,
+		Args:   cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			// Started by kran run without a daemon (lifeline.go).
+			pgid, err := strconv.Atoi(args[0])
+			if err != nil {
+				return usagef("watch-parent needs a process group id")
+			}
+			if code := watchParent(os.Stdin, pgid, 5*time.Second); code != 0 {
 				return &ExitError{Code: code}
 			}
 			return nil

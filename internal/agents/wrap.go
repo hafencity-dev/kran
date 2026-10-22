@@ -53,6 +53,7 @@ func wrapWith(kranPath, cmd string) (string, bool) {
 type shellCmd struct {
 	words []string
 	op    string // operator joining this command to the previous one ("" first)
+	raw   string // the command's text as written (for permission rules)
 }
 
 func shouldWrap(cmd string) bool {
@@ -502,6 +503,7 @@ func jsToolName(s string) bool { return in(s, "vitest", "jest", "playwright", "t
 // redirects, output redirects other than /dev/null).
 
 func lexShell(s string) ([]shellCmd, bool) {
+	rs := []rune(s)
 	var (
 		cmds      []shellCmd
 		words     []string
@@ -509,6 +511,9 @@ func lexShell(s string) ([]shellCmd, bool) {
 		inWord    bool
 		pendingOp string
 		unq       = true // current word has only unquoted characters so far
+		segStart  int    // rune index where the current command's text starts
+		opAt      int    // rune index of the operator being handled
+		newSeg    bool   // the next rune starts a new command's text
 	)
 	endWord := func() {
 		if inWord {
@@ -520,11 +525,13 @@ func lexShell(s string) ([]shellCmd, bool) {
 	sep := func(op string) bool {
 		endWord()
 		if len(words) > 0 {
-			cmds = append(cmds, shellCmd{words: words, op: pendingOp})
+			cmds = append(cmds, shellCmd{words: words, op: pendingOp, raw: strings.TrimSpace(string(rs[segStart:opAt]))})
 			words = nil
 			pendingOp = op
+			newSeg = true
 			return true
 		}
+		newSeg = true
 		if (op == "\n" || op == ";") && (len(cmds) == 0 || pendingOp == "\n" || pendingOp == ";") {
 			if len(cmds) > 0 {
 				pendingOp = op
@@ -533,8 +540,11 @@ func lexShell(s string) ([]shellCmd, bool) {
 		}
 		return false
 	}
-	rs := []rune(s)
 	for i := 0; i < len(rs); i++ {
+		if newSeg {
+			segStart, newSeg = i, false
+		}
+		opAt = i
 		r := rs[i]
 		switch r {
 		case '\'':
@@ -569,6 +579,9 @@ func lexShell(s string) ([]shellCmd, bool) {
 						continue
 					}
 				}
+				if c == '$' && !plainDollar(rs, j, true) {
+					return nil, false
+				}
 				cur.WriteRune(c)
 				j++
 			}
@@ -587,8 +600,16 @@ func lexShell(s string) ([]shellCmd, bool) {
 			}
 			cur.WriteRune(rs[i])
 			inWord, unq = true, false
-		case ' ', '\t', '\r':
+		case ' ', '\t':
 			endWord()
+		case '\r': // a word character to the shell, a separator to a reader
+			return nil, false
+		case '$':
+			if !plainDollar(rs, i, false) {
+				return nil, false
+			}
+			cur.WriteRune(r)
+			inWord = true
 		case '\n':
 			if !sep("\n") {
 				return nil, false
@@ -649,8 +670,11 @@ func lexShell(s string) ([]shellCmd, bool) {
 		}
 	}
 	endWord()
+	if newSeg {
+		segStart = len(rs)
+	}
 	if len(words) > 0 {
-		cmds = append(cmds, shellCmd{words: words, op: pendingOp})
+		cmds = append(cmds, shellCmd{words: words, op: pendingOp, raw: strings.TrimSpace(string(rs[segStart:]))})
 	} else if pendingOp == "&&" || pendingOp == "||" || pendingOp == "|" {
 		return nil, false
 	}
@@ -696,5 +720,34 @@ func redirect(rs []rune, i int) (int, bool) {
 	if string(rs[i:j]) != "/dev/null" {
 		return 0, false
 	}
+	if j < len(rs) && strings.ContainsRune("'\"\\", rs[j]) { // >/dev/null'x' names another file
+		return 0, false
+	}
 	return j - 1, true
+}
+
+var bracedName = regexp.MustCompile(`^\{[A-Za-z_][A-Za-z0-9_]*\}`)
+
+// plainDollar reports whether the '$' at rs[i] is a literal or a plain
+// parameter ($NAME, ${NAME}, $1, $?). Everything else — $'…', $"…", $[…],
+// ${x@P}, ${(e)x}, ${a[i]} — can run code or quote in ways the lexer does
+// not model, in bash or zsh.
+func plainDollar(rs []rune, i int, inDQ bool) bool {
+	if i+1 >= len(rs) {
+		return true
+	}
+	n := rs[i+1]
+	switch {
+	case n == '_' || n >= 'A' && n <= 'Z' || n >= 'a' && n <= 'z' || n >= '0' && n <= '9':
+		return true
+	case strings.ContainsRune("?$!#@*-", n):
+		return true
+	case n == ' ' || n == '\t' || n == '\n':
+		return true
+	case n == '"':
+		return inDQ
+	case n == '{':
+		return bracedName.MatchString(string(rs[i+1:]))
+	}
+	return false
 }

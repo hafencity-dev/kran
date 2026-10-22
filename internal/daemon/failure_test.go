@@ -560,7 +560,7 @@ func TestIncompatibleOriginRefused(t *testing.T) {
 }
 
 func TestReservationExpires(t *testing.T) {
-	c := newCluster(t, "b")
+	c := newCluster(t, "a", "b")
 	b := c.nodes["b"]
 	b.timing.ReservationTTL = 600 * time.Millisecond
 	b.start()

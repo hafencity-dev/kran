@@ -277,14 +277,18 @@ func (m *manager) prepareVolumes(ctx context.Context, dk *dockerEnv) error {
 }
 
 // ensureSync keeps the long-lived helper container that writes slots into
-// the kran-slots volume (macOS: the volume lives inside the Docker VM).
+// the kran-slots volume (macOS: the volume lives inside the Docker VM). The
+// helper binary lives in that container's own root-owned file system, not
+// in a volume: job containers mount the volumes, and a job that replaced the
+// helper would write every repo's slots. (A job given the Docker socket can
+// still reach it; SPEC §9.)
 func (m *manager) ensureSync(ctx context.Context, dk *dockerEnv) error {
 	name := m.syncName()
 	sum, err := fileHash(m.opts.LinuxBinary)
 	if err != nil {
 		return fmt.Errorf("%w: Linux kran binary: %v", ErrRuntimeUnavailable, err)
 	}
-	bin := fmt.Sprintf("%s/bin/kran-%s", ctrTools, sum[:16])
+	bin := "/usr/local/bin/kran-sync-" + sum[:16]
 	out, err := dk.run(ctx, nil, "inspect", "--format", `{{.State.Running}} {{.Config.Image}}`, name)
 	running := err == nil && strings.HasPrefix(string(out), "true ") && strings.TrimSpace(strings.TrimPrefix(string(out), "true ")) == m.imageTag()
 	if !running {
@@ -293,7 +297,6 @@ func (m *manager) ensureSync(ctx context.Context, dk *dockerEnv) error {
 			"--restart", "unless-stopped", "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
 			"--network", "none",
 			"--mount", "type=volume,src="+m.volume("slots")+",dst="+ctrSlots,
-			"--mount", "type=volume,src="+m.volume("tools")+",dst="+ctrTools,
 			"--entrypoint", "/bin/sh", m.imageTag(), "-c", "trap 'exit 0' TERM INT; while :; do sleep 3600 & wait $!; done")
 		if err != nil {
 			return fmt.Errorf("%w: starting the sync helper: %v", ErrRuntimeUnavailable, err)
@@ -306,6 +309,9 @@ func (m *manager) ensureSync(ctx context.Context, dk *dockerEnv) error {
 	if _, err := dk.run(ctx, nil, "exec", name, "test", "-x", bin); err != nil {
 		if _, err := dk.run(ctx, nil, "cp", m.opts.LinuxBinary, name+":"+bin); err != nil {
 			return fmt.Errorf("%w: copying the Linux kran binary: %v", ErrRuntimeUnavailable, err)
+		}
+		if _, err := dk.run(ctx, nil, "exec", "--user", "0", name, "chown", "0:0", bin); err != nil {
+			return fmt.Errorf("%w: installing the Linux kran binary: %v", ErrRuntimeUnavailable, err)
 		}
 		dk.run(ctx, nil, "exec", "--user", "0", name, "chmod", "0755", bin)
 	}
@@ -362,7 +368,8 @@ func (m *manager) volumeApply(ctx context.Context, req applyReq, open blobOpener
 
 // reservedMount reports container paths a workspace must not shadow.
 func reservedMount(root string) bool {
-	if root == "/" || !path.IsAbs(root) {
+	// docker reads --mount as CSV, later keys winning: ",src=/" would add one.
+	if root == "/" || !path.IsAbs(root) || strings.ContainsAny(root, ",\"\n\r\x00") {
 		return true
 	}
 	for _, p := range []string{"/bin", "/boot", "/dev", "/etc", "/lib", "/lib64", "/proc", "/sbin", "/sys", "/usr", "/kran", "/var/run", "/run"} {
@@ -469,13 +476,18 @@ func (m *manager) containerSpec(ctx context.Context, spec *superSpec, req *Start
 		a := []string{"run", "--name", name, "--label", "kran.job=" + req.Spec.ID, "--label", "kran.ns=" + m.ns,
 			"--init", "--network", "host",
 			"--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
-			"-v", "/var/run/docker.sock:/var/run/docker.sock",
 			"--mount", slotMount,
 			"--mount", "type=volume,src=" + m.volume("cache") + ",dst=" + ctrCache,
 			"--mount", "type=volume,src=" + m.volume("tools") + ",dst=" + ctrTools,
 		}
-		if dk.sockGID > 0 {
-			a = append(a, "--group-add", strconv.Itoa(dk.sockGID))
+		// The Docker socket lets testcontainers and docker compose work in
+		// jobs; it is root-equivalent on rootful Docker (SPEC §9), so a
+		// project can opt out.
+		if !req.Spec.Req.NoDocker {
+			a = append(a, "-v", "/var/run/docker.sock:/var/run/docker.sock")
+			if dk.sockGID > 0 {
+				a = append(a, "--group-add", strconv.Itoa(dk.sockGID))
+			}
 		}
 		if spec.MemMax > 0 {
 			a = append(a, "--memory", strconv.FormatInt(spec.MemMax, 10), "--memory-swap", strconv.FormatInt(spec.MemMax, 10))

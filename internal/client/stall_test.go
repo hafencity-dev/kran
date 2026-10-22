@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -104,4 +105,36 @@ func (l *lockedBuf) String() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.b.String()
+}
+
+// A frame write that fails half way (the daemon stopped reading for longer
+// than the write deadline) must end the session: another frame written
+// after the torn one would be parsed out of step by the daemon.
+func TestTornWriteEndsSession(t *testing.T) {
+	sock := filepath.Join(shortDir(t), "t.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer, err := ln.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close() // reads only after the torn write
+	s := newRunSession(conn, bufio.NewReader(conn))
+	s.recvTimeout = 200 * time.Millisecond
+	defer s.Close()
+	big := make([]byte, proto.MaxFramePayload)
+	if err := s.Send(proto.FrameStdin, big); err == nil {
+		t.Skip("the socket buffer took a whole frame")
+	}
+	go io.Copy(io.Discard, peer) // the daemon reads again
+	if err := s.Send(proto.FrameSignal, []byte(`{"name":"INT"}`)); err == nil {
+		t.Fatal("a frame was written after a torn one")
+	}
 }

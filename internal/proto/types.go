@@ -231,6 +231,10 @@ type Requirements struct {
 	OriginOnlyReason string `json:"origin_only_reason,omitempty"`
 	// Toolchains required by the workspace, e.g. {"go":"1.25.10","node":"24"}.
 	Toolchains map[string]string `json:"toolchains,omitempty"`
+	// NoDocker keeps the Docker socket out of a container job (.kran.toml
+	// docker = false, --no-docker). // added by R2 (security review): the
+	// socket is root-equivalent on rootful Docker.
+	NoDocker bool `json:"no_docker,omitempty"`
 }
 
 type Workspace struct {

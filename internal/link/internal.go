@@ -237,7 +237,7 @@ func doAccept(req AcceptRequest) (*AcceptResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	changed, err := EnsureAuthorizedKey(ak, AuthorizedKeysLine(exe, p.PubKey, req.Tag))
+	changed, err := EnsureAuthorizedKey(ak, PeerKeyLine(exe, p.Name, p.PubKey, req.Tag))
 	if err != nil {
 		return nil, err
 	}

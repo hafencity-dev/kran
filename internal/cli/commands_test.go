@@ -162,8 +162,8 @@ func TestUIURL(t *testing.T) {
 	tok := func() string { return "sekret" }
 	ts := func() string { return "100.64.0.1" }
 	for listen, want := range map[string]string{
-		"127.0.0.1:7270": "http://127.0.0.1:7270/",
-		"localhost:9000": "http://localhost:9000/",
+		"127.0.0.1:7270": "http://127.0.0.1:7270/#token=sekret",
+		"localhost:9000": "http://localhost:9000/#token=sekret",
 		"tailscale":      "http://100.64.0.1:7270/#token=sekret",
 		"0.0.0.0:7270":   "http://0.0.0.0:7270/#token=sekret",
 	} {
@@ -243,5 +243,58 @@ func TestNoGUIMessageNamesTheCommand(t *testing.T) {
 		if !strings.Contains(noGUIMessage, want) {
 			t.Errorf("message lacks %q", want)
 		}
+	}
+}
+
+func TestParseKVNames(t *testing.T) {
+	if m, err := parseKV([]string{"KRAN_CONFIG_DIR=/a b"}); err != nil || m["KRAN_CONFIG_DIR"] != "/a b" {
+		t.Fatal(m, err)
+	}
+	for _, bad := range []string{"=x", "A;rm -rf ~;B=x", "A B=x", "1A=x"} {
+		if _, err := parseKV([]string{bad}); err == nil {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+}
+
+// The token must not travel on the browser's command line (visible to every
+// user in ps): kran ui opens a private file that redirects to the URL.
+func TestOpenUIKeepsTokenOffTheCommandLine(t *testing.T) {
+	url := "http://127.0.0.1:7270/#token=" + strings.Repeat("ab", 32)
+	var opened string
+	var mode os.FileMode
+	var content []byte
+	open := func(target string) error {
+		opened = target
+		st, err := os.Stat(strings.TrimPrefix(target, "file://"))
+		if err != nil {
+			return err
+		}
+		mode = st.Mode().Perm()
+		content, _ = os.ReadFile(strings.TrimPrefix(target, "file://"))
+		return nil
+	}
+	if err := openUI(url, open, func() {}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(opened, "token") || strings.Contains(opened, "abab") {
+		t.Fatalf("token on the command line: %q", opened)
+	}
+	if mode != 0o600 || !strings.Contains(string(content), url) || !strings.Contains(string(content), "no-referrer") {
+		t.Fatalf("mode %v content %s", mode, content)
+	}
+	if _, err := os.Stat(strings.TrimPrefix(opened, "file://")); !os.IsNotExist(err) {
+		t.Fatal("redirect file not removed")
+	}
+}
+
+// SPEC §9: jobs never run as root, and the daemon runs every job.
+func TestDaemonRefusesRoot(t *testing.T) {
+	old := getuid
+	getuid = func() int { return 0 }
+	defer func() { getuid = old }()
+	a, _, errb := testApp(nil)
+	if code := a.Execute(context.Background(), []string{"daemon"}); code != 1 || !strings.Contains(errb.String(), "--allow-root") {
+		t.Fatalf("code %d: %s", code, errb.String())
 	}
 }

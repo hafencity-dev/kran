@@ -84,6 +84,7 @@ func (d *Daemon) loadToken() error {
 		return fmt.Errorf("create %s: %w", filepath.Dir(path), err)
 	}
 	tmp := path + ".tmp"
+	os.Remove(tmp) // WriteFile keeps the mode of a leftover file
 	if err := os.WriteFile(tmp, []byte(tok+"\n"), 0o600); err != nil {
 		return fmt.Errorf("write UI token: %w", err)
 	}
@@ -105,13 +106,17 @@ func (d *Daemon) tokenOK(r *http.Request, allowQuery bool) bool {
 	return got != "" && subtle.ConstantTimeCompare([]byte(got), []byte(d.token)) == 1
 }
 
-// tcpAuth guards the UI listener. Loopback: reads are open (the browser UI
-// loads without ceremony), mutations need X-Kran-Token, and the Host header
-// must be a loopback name (DNS rebinding). Non-loopback: every API call
-// needs the token (header, or ?token= for GETs such as SSE); static UI
-// assets stay public because they carry no data.
+// tcpAuth guards the UI listener. Every API call needs the token (header,
+// or ?token= for GETs such as SSE; mutations only the header), loopback
+// included: loopback TCP is open to every account on the machine, and job
+// output and argv are the owner's. Static UI assets stay public because
+// they carry no data. On loopback the Host header must be a loopback name
+// (DNS rebinding).
 func (d *Daemon) tcpAuth(next http.Handler, loopback bool, bindHost string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// No cross-origin embedding (<script src=…/log>) of API output.
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 		if loopback && !loopbackHost(r.Host) {
 			writeAPIError(w, http.StatusForbidden, "unexpected Host header", "open the UI through 127.0.0.1 or localhost")
 			return
@@ -126,7 +131,7 @@ func (d *Daemon) tcpAuth(next http.Handler, loopback bool, bindHost string) http
 		case !read && !d.tokenOK(r, false):
 			writeAPIError(w, http.StatusUnauthorized, "this action needs the kran token (header X-Kran-Token)", "open the UI with kran ui")
 			return
-		case read && isAPI && !loopback && !d.tokenOK(r, true):
+		case read && isAPI && !d.tokenOK(r, true):
 			writeAPIError(w, http.StatusUnauthorized, "this listener needs the kran token", "open the UI with kran ui --print-url")
 			return
 		}

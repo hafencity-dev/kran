@@ -36,6 +36,10 @@ type localJob struct {
 	// Tee receives a copy of the output for the job history; nil lets the
 	// child inherit the descriptors directly.
 	Tee func(proto.FrameType, []byte)
+	// Watcher, when set, guards a job no daemon looks after: the job dies
+	// with kran run, even by SIGKILL (lifeline.go; on Linux the leader
+	// also gets a parent-death signal).
+	Watcher func(pgid int) *exec.Cmd
 }
 
 // localProc is a running local job.
@@ -46,6 +50,7 @@ type localProc struct {
 	scope    string
 	fgTTY    *os.File // terminal we handed to the child; reclaimed after Wait
 	capture  *outputCapture
+	life     *lifeline
 	resultCh chan proto.Exit
 }
 
@@ -188,7 +193,11 @@ func startLocal(j localJob) (*localProc, *localError) {
 		fg = j.Stdio.In
 	}
 	start := time.Now()
-	if err := cmd.Start(); err != nil {
+	startCmd := cmd.Start
+	if j.Watcher != nil {
+		startCmd = func() error { return startWithDeathSignal(cmd) }
+	}
+	if err := startCmd(); err != nil {
 		if capture != nil {
 			capture.abort()
 		}
@@ -205,7 +214,7 @@ func startLocal(j localJob) (*localProc, *localError) {
 		capture.started()
 	}
 	p := &localProc{
-		cmd: cmd, start: start, scope: scope, fgTTY: fg, capture: capture,
+		cmd: cmd, start: start, scope: scope, fgTTY: fg, capture: capture, life: startLifeline(cmd.Process.Pid, j.Watcher),
 		Started:  proto.Started{JobID: j.JobID, PID: cmd.Process.Pid, PGID: cmd.Process.Pid, Scope: scope},
 		resultCh: make(chan proto.Exit, 1),
 	}
@@ -243,6 +252,7 @@ func (p *localProc) wait() {
 	if p.capture != nil {
 		p.capture.finish(captureGrace)
 	}
+	p.life.release()
 	if p.fgTTY != nil {
 		reclaimTerminal(p.fgTTY)
 	}

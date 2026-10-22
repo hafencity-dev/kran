@@ -25,6 +25,9 @@ type peerSession struct {
 	mu      sync.Mutex
 	remote  string
 	inbound bool
+	// bound is the name the peer's key was linked as, from the forced
+	// command ("" for links made by an older kran).
+	bound string
 }
 
 func (ps *peerSession) name() string {
@@ -40,14 +43,22 @@ func (d *Daemon) ServePeerConn(c net.Conn) {
 		c.Close()
 		return
 	}
-	s, err := transport.Server(c, d.deps.Session, "peer")
+	c.SetReadDeadline(time.Now().Add(30 * time.Second))
+	bound, rc, err := transport.ReadPeerName(c)
+	if err != nil {
+		d.logf("peer: %v", err)
+		c.Close()
+		return
+	}
+	c.SetReadDeadline(time.Time{})
+	s, err := transport.Server(rc, d.deps.Session, "peer")
 	if err != nil {
 		d.logf("peer: %v", err)
 		return
 	}
 	untrack := d.trackSession(s)
 	defer untrack()
-	ps := &peerSession{s: s, inbound: true}
+	ps := &peerSession{s: s, inbound: true, bound: bound}
 	d.acceptStreams(ps)
 }
 
@@ -58,12 +69,22 @@ func (d *Daemon) servePeerSession(s transport.Session, remote string) {
 
 func (d *Daemon) acceptStreams(ps *peerSession) {
 	defer d.target.sessionClosed(ps.s)
+	slots := make(chan struct{}, maxPeerStreams)
 	for {
 		c, err := ps.s.Accept()
 		if err != nil {
 			return
 		}
-		go d.servePeerStream(ps, c)
+		select {
+		case slots <- struct{}{}:
+		default:
+			c.Close() // the peer holds too many streams open
+			continue
+		}
+		go func() {
+			defer func() { <-slots }()
+			d.servePeerStream(ps, c)
+		}()
 	}
 }
 
@@ -72,7 +93,7 @@ func (d *Daemon) servePeerStream(ps *peerSession, c net.Conn) {
 	pc := newPeerConn(c)
 	c.SetReadDeadline(time.Now().Add(30 * time.Second))
 	var req rawPeerRequest
-	if err := pc.readJSON(&req); err != nil {
+	if err := pc.readJSONLimit(&req, maxRequestLine); err != nil {
 		return
 	}
 	c.SetReadDeadline(time.Time{})
@@ -95,21 +116,21 @@ func (d *Daemon) servePeerStream(ps *peerSession, c net.Conn) {
 	case proto.PeerAdmit:
 		t.handleAdmit(ps, pc, req)
 	case proto.PeerSlotAcquire:
-		t.handleSlotAcquire(pc, req)
+		t.handleSlotAcquire(ps, pc, req)
 	case proto.PeerSlotDiff:
-		t.handleSlotDiff(pc, req)
+		t.handleSlotDiff(ps, pc, req)
 	case proto.PeerBlobPut:
-		t.handleBlobPut(pc, req)
+		t.handleBlobPut(ps, pc, req)
 	case proto.PeerSlotCommit:
-		t.handleSlotCommit(pc, req)
+		t.handleSlotCommit(ps, pc, req)
 	case proto.PeerSlotRelease:
-		t.handleSlotRelease(pc, req)
+		t.handleSlotRelease(ps, pc, req)
 	case proto.PeerJobStart:
 		t.handleJobStart(ps, pc, req)
 	case proto.PeerJobAttach:
 		t.handleJobAttach(ps, pc, req)
 	case proto.PeerJobHeartbeat, proto.PeerJobSignal, proto.PeerJobResize, proto.PeerJobCancel:
-		t.handleJobControl(pc, req)
+		t.handleJobControl(ps, pc, req)
 	default:
 		pc.fail(codeBadRequest, "unknown method %q (the other node runs a newer kran; run kran upgrade)", req.Method)
 	}
@@ -126,18 +147,33 @@ func (d *Daemon) handleHello(ps *peerSession, pc *peerConn, req rawPeerRequest) 
 			h.Node.Name, h.Node.Version, h.Protocol, d.self, d.nodeInfo().Version, protocolString())
 		return
 	}
+	// Only linked nodes get served, under the name they are linked as (the
+	// same name an outbound session to them carries), so jobs stay bound
+	// to their origin whichever session it uses.
+	name := h.Node.Name
+	if ps.inbound && ps.bound != "" { // the key's linked name, whatever hello says
+		if name = d.peers.linkedName(ps.bound, ""); name == "" {
+			pc.fail(codeNotLinked, "%s is not linked with %s any more; run kran link", ps.bound, d.self)
+			return
+		}
+	} else if ps.inbound {
+		if name = d.peers.linkedName(h.Node.Name, h.Node.ID); name == "" {
+			pc.fail(codeNotLinked, "%s is not linked with %s; run kran link", h.Node.Name, d.self)
+			return
+		}
+	}
 	ps.mu.Lock()
 	first := ps.remote == ""
 	if first {
-		ps.remote = h.Node.Name
+		ps.remote = name
 	}
 	ps.mu.Unlock()
 	if err := pc.respond(d.helloBody()); err != nil {
 		return
 	}
 	if first && ps.inbound {
-		d.logf("peer: %s connected", h.Node.Name)
-		d.peers.attachInbound(h.Node.Name, ps.s)
+		d.logf("peer: %s connected", name)
+		d.peers.attachInbound(name, ps.s)
 	}
 }
 
@@ -201,11 +237,12 @@ func (t *targetSide) handleAdmit(ps *peerSession, pc *peerConn, req rawPeerReque
 // usesSlot marks operations that work in the job's slot (all but blob.put,
 // which writes only the shared blob store): a cancel releases the slot only
 // once none of them is in flight.
-func (t *targetSide) begin(id string, usesSlot bool) (*tjob, error) {
+// Only the origin that admitted the job may act on it.
+func (t *targetSide) begin(id, origin string, usesSlot bool) (*tjob, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	j := t.jobs[id]
-	if j == nil || j.ended {
+	if j == nil || j.ended || j.Origin != origin {
 		return nil, &peerError{Code: codeUnknownJob, Msg: fmt.Sprintf("%s holds no reservation for job %s (it expired or was released)", t.d.self, id)}
 	}
 	if j.started {
@@ -243,13 +280,13 @@ func failPeer(pc *peerConn, err error) {
 	pc.fail(codeInternal, "%v", err)
 }
 
-func (t *targetSide) handleSlotAcquire(pc *peerConn, req rawPeerRequest) {
+func (t *targetSide) handleSlotAcquire(ps *peerSession, pc *peerConn, req rawPeerRequest) {
 	var b slotAcquireBody
 	if err := json.Unmarshal(req.Body, &b); err != nil || b.RepoID == "" {
 		pc.fail(codeBadRequest, "malformed slot.acquire")
 		return
 	}
-	j, err := t.begin(req.JobID, true)
+	j, err := t.begin(req.JobID, ps.name(), true)
 	if err != nil {
 		failPeer(pc, err)
 		return
@@ -290,13 +327,27 @@ func (t *targetSide) handleSlotAcquire(pc *peerConn, req rawPeerRequest) {
 	}
 }
 
+// newZstdDecoder bounds what a peer's stream can make us allocate: our
+// encoders use windows of at most 8 MiB.
 func newZstdDecoder() (*zstd.Decoder, error) {
 	return zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderLowmem(true),
-		zstd.WithDecoderMaxMemory(1<<30))
+		zstd.WithDecoderMaxMemory(1<<30), zstd.WithDecoderMaxWindow(32<<20))
 }
 
-func (t *targetSide) handleSlotDiff(pc *peerConn, req rawPeerRequest) {
-	j, err := t.begin(req.JobID, true)
+// maxManifest caps a decompressed manifest (a few MB for 30k files).
+var maxManifest int64 = 256 << 20
+
+func decodeManifest(r io.Reader, m *proto.Manifest) error {
+	lr := &io.LimitedReader{R: r, N: maxManifest + 1}
+	err := json.NewDecoder(lr).Decode(m)
+	if lr.N <= 0 {
+		return fmt.Errorf("manifest larger than %d MiB", maxManifest>>20)
+	}
+	return err
+}
+
+func (t *targetSide) handleSlotDiff(ps *peerSession, pc *peerConn, req rawPeerRequest) {
+	j, err := t.begin(req.JobID, ps.name(), true)
 	if err != nil {
 		failPeer(pc, err)
 		return
@@ -324,7 +375,7 @@ func (t *targetSide) handleSlotDiff(pc *peerConn, req rawPeerRequest) {
 		return
 	}
 	var m proto.Manifest
-	if err := json.NewDecoder(dec).Decode(&m); err != nil {
+	if err := decodeManifest(dec, &m); err != nil {
 		fr.drain()
 		pc.fail(codeBadRequest, "read manifest: %v", err)
 		return
@@ -339,22 +390,29 @@ func (t *targetSide) handleSlotDiff(pc *peerConn, req rawPeerRequest) {
 		pc.fail(codeInternal, "diff on %s: %v", t.d.self, err)
 		return
 	}
+	blobs := make(map[string]int64, len(m.Entries))
+	for _, e := range m.Entries {
+		if e.Kind == proto.EntryFile && e.Hash != "" {
+			blobs[e.Hash] = e.Size
+		}
+	}
 	t.mu.Lock()
-	j.manifest = &m
+	j.manifest, j.blobs = &m, blobs
 	t.mu.Unlock()
 	pc.respond(plan)
 }
 
-func (t *targetSide) handleBlobPut(pc *peerConn, req rawPeerRequest) {
-	var j *tjob
-	if req.JobID != "" {
-		var err error
-		if j, err = t.begin(req.JobID, false); err != nil {
-			failPeer(pc, err)
-			return
-		}
-		defer t.end(j, false)
+func (t *targetSide) handleBlobPut(ps *peerSession, pc *peerConn, req rawPeerRequest) {
+	if req.JobID == "" { // blobs land on disk: only for a live reservation
+		pc.fail(codeBadRequest, "blob.put needs a job")
+		return
 	}
+	j, err := t.begin(req.JobID, ps.name(), false)
+	if err != nil {
+		failPeer(pc, err)
+		return
+	}
+	defer t.end(j, false)
 	if err := pc.respond(nil); err != nil {
 		return
 	}
@@ -378,6 +436,12 @@ func (t *targetSide) handleBlobPut(pc *peerConn, req rawPeerRequest) {
 			if err := json.Unmarshal(p, &h); err != nil {
 				return
 			}
+			t.mu.Lock()
+			size, ok := j.blobs[h.Hash]
+			t.mu.Unlock()
+			if !ok || h.Size != size { // only the job's files, at their size
+				return
+			}
 			res := t.putBlob(ctx, pc, dec, h)
 			ack := blobAck{Hash: h.Hash}
 			if res != nil {
@@ -386,11 +450,9 @@ func (t *targetSide) handleBlobPut(pc *peerConn, req rawPeerRequest) {
 			if err := pc.writeJSONFrame(pfAck, ack); err != nil {
 				return
 			}
-			if j != nil {
-				t.mu.Lock()
-				j.reservedAt = t.d.now()
-				t.mu.Unlock()
-			}
+			t.mu.Lock()
+			j.reservedAt = t.d.now()
+			t.mu.Unlock()
 		default:
 			return
 		}
@@ -452,8 +514,8 @@ func (t *targetSide) putBlob(ctx context.Context, pc *peerConn, dec *zstd.Decode
 	return err
 }
 
-func (t *targetSide) handleSlotCommit(pc *peerConn, req rawPeerRequest) {
-	j, err := t.begin(req.JobID, true)
+func (t *targetSide) handleSlotCommit(ps *peerSession, pc *peerConn, req rawPeerRequest) {
+	j, err := t.begin(req.JobID, ps.name(), true)
 	if err != nil {
 		failPeer(pc, err)
 		return
@@ -475,9 +537,9 @@ func (t *targetSide) handleSlotCommit(pc *peerConn, req rawPeerRequest) {
 	pc.respond(nil)
 }
 
-func (t *targetSide) handleSlotRelease(pc *peerConn, req rawPeerRequest) {
+func (t *targetSide) handleSlotRelease(ps *peerSession, pc *peerConn, req rawPeerRequest) {
 	t.mu.Lock()
-	if j := t.jobs[req.JobID]; j != nil {
+	if j := t.jobs[req.JobID]; j != nil && j.Origin == ps.name() {
 		t.cancelLocked(j, "released by origin")
 	}
 	t.mu.Unlock()
@@ -491,7 +553,7 @@ func (t *targetSide) handleJobStart(ps *peerSession, pc *peerConn, req rawPeerRe
 		pc.fail(codeBadRequest, "malformed job.start")
 		return
 	}
-	j, err := t.begin(req.JobID, true)
+	j, err := t.begin(req.JobID, ps.name(), true)
 	if err != nil {
 		failPeer(pc, err)
 		return
@@ -526,6 +588,7 @@ func (t *targetSide) handleJobStart(ps *peerSession, pc *peerConn, req rawPeerRe
 	j.busy--
 	j.slotOps--
 	j.started = true
+	j.startedHere = true
 	canceled := j.canceled
 	t.persistLocked()
 	// From here watch owns the slot and the allocation, also for a job the
@@ -540,7 +603,7 @@ func (t *targetSide) handleJobStart(ps *peerSession, pc *peerConn, req rawPeerRe
 	}
 	t.d.logf("target: started job %s from %s", j.ID, j.Origin)
 	t.d.publishSelf()
-	if err := pc.respond(nil); err != nil {
+	if err := pc.respond(jobStreamInfo{StdinWindow: t.d.t.StdinQueue}); err != nil {
 		return // the origin reattaches
 	}
 	t.streamJob(pc, j, proc, 0)
@@ -555,6 +618,12 @@ func (t *targetSide) handleJobAttach(ps *peerSession, pc *peerConn, req rawPeerR
 	}
 	t.mu.Lock()
 	j := t.jobs[req.JobID]
+	if j != nil && j.Origin != ps.name() {
+		j = nil
+		t.mu.Unlock()
+		pc.fail(codeUnknownJob, "%s has no job %s", t.d.self, req.JobID)
+		return
+	}
 	if j == nil {
 		// Not in memory (e.g. finished long ago or lost on restart without
 		// a record): execenv may still know it.
@@ -578,17 +647,17 @@ func (t *targetSide) handleJobAttach(ps *peerSession, pc *peerConn, req rawPeerR
 		t.startWatchLocked(j)
 	}
 	t.mu.Unlock()
-	if err := pc.respond(nil); err != nil {
+	if err := pc.respond(jobStreamInfo{StdinWindow: t.d.t.StdinQueue}); err != nil {
 		return
 	}
 	t.streamJob(pc, j, proc, b.Offset)
 }
 
-func (t *targetSide) handleJobControl(pc *peerConn, req rawPeerRequest) {
+func (t *targetSide) handleJobControl(ps *peerSession, pc *peerConn, req rawPeerRequest) {
 	t.mu.Lock()
 	j := t.jobs[req.JobID]
 	t.mu.Unlock()
-	if j == nil {
+	if j == nil || j.Origin != ps.name() {
 		pc.fail(codeUnknownJob, "%s has no job %s", t.d.self, req.JobID)
 		return
 	}
@@ -751,27 +820,13 @@ func (t *targetSide) streamJob(pc *peerConn, j *tjob, proc execenv.Process, offs
 		}
 	}()
 
-	// Stdin goes through its own goroutine: a job that does not read its
-	// stdin must never block heartbeat (lease) processing.
-	stdin := newByteQueue(64 << 20)
-	defer stdin.close()
+	// Input goes to the job's queue, written by its own goroutine: a job
+	// that does not read its stdin never blocks heartbeats or signals. The
+	// origin learns from the reports how much the job took.
+	in := t.inputPump(j, proc)
 	go func() {
-		w := proc.Stdin()
-		if w == nil {
-			return
-		}
-		for {
-			b, eof, ok := stdin.pop(ctx)
-			if !ok {
-				return
-			}
-			if eof {
-				w.Close()
-				return
-			}
-			if _, err := w.Write(b); err != nil {
-				return
-			}
+		if in.sendReports(ctx, pc) != nil {
+			cancel()
 		}
 	}()
 
@@ -787,11 +842,14 @@ func (t *targetSide) streamJob(pc *peerConn, j *tjob, proc execenv.Process, offs
 				d.logf("target: renew lease of %s: %v", j.ID, err)
 			}
 		case proto.FrameStdin:
-			if !stdin.push(p) {
-				d.logf("target: job %s: stdin backlog over 64 MiB, dropping input", j.ID)
+			if !in.push(p) {
+				// Only an origin without flow control overruns the queue;
+				// never drop input silently: end it here.
+				d.logf("target: job %s: its origin sent more than %s of input ahead of the job; closing the job's input", j.ID, humanBytes(d.t.StdinQueue))
+				in.pushEOF()
 			}
 		case proto.FrameStdinEOF:
-			stdin.pushEOF()
+			in.pushEOF()
 		case proto.FrameResize:
 			var tty proto.TTY
 			if json.Unmarshal(p, &tty) == nil {
@@ -804,83 +862,6 @@ func (t *targetSide) streamJob(pc *peerConn, j *tjob, proc execenv.Process, offs
 					d.logf("target: signal %s to %s: %v", s.Name, j.ID, err)
 				}
 			}
-		}
-	}
-}
-
-// byteQueue is a bounded FIFO of byte chunks with an EOF marker.
-type byteQueue struct {
-	mu     sync.Mutex
-	chunks [][]byte
-	size   int
-	max    int
-	eof    bool
-	closed bool
-	notify chan struct{}
-}
-
-func newByteQueue(max int) *byteQueue {
-	return &byteQueue{max: max, notify: make(chan struct{}, 1)}
-}
-
-func (q *byteQueue) wake() {
-	select {
-	case q.notify <- struct{}{}:
-	default:
-	}
-}
-
-func (q *byteQueue) push(b []byte) bool {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if q.eof || q.closed || q.size+len(b) > q.max {
-		return false
-	}
-	q.chunks = append(q.chunks, append([]byte(nil), b...))
-	q.size += len(b)
-	q.wake()
-	return true
-}
-
-func (q *byteQueue) pushEOF() {
-	q.mu.Lock()
-	q.eof = true
-	q.mu.Unlock()
-	q.wake()
-}
-
-func (q *byteQueue) close() {
-	q.mu.Lock()
-	q.closed = true
-	q.mu.Unlock()
-	q.wake()
-}
-
-// pop returns the next chunk, or eof once drained; ok is false when the
-// queue was closed or ctx ended.
-func (q *byteQueue) pop(ctx context.Context) (b []byte, eof bool, ok bool) {
-	for {
-		q.mu.Lock()
-		if len(q.chunks) > 0 {
-			b = q.chunks[0]
-			q.chunks = q.chunks[1:]
-			q.size -= len(b)
-			q.mu.Unlock()
-			return b, false, true
-		}
-		if q.eof {
-			q.mu.Unlock()
-			return nil, true, true
-		}
-		if q.closed {
-			q.mu.Unlock()
-			return nil, false, false
-		}
-		q.mu.Unlock()
-		select {
-		case <-q.notify:
-		case <-ctx.Done():
-			return nil, false, false
 		}
 	}
 }

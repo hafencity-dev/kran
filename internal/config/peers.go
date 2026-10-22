@@ -71,6 +71,12 @@ func (p *Peers) Remove(name string) bool {
 	return false
 }
 
+// sshWord reports whether s can be part of an ssh destination: no leading
+// "-" (ssh would read an option), no whitespace or control characters.
+func sshWord(s string) bool {
+	return !strings.HasPrefix(s, "-") && strings.IndexFunc(s, func(r rune) bool { return r <= ' ' || r == 0x7f }) < 0
+}
+
 // Validate checks a peer entry.
 func (n *Peer) Validate() error {
 	var errs []error
@@ -81,9 +87,12 @@ func (n *Peer) Validate() error {
 		errs = append(errs, fmt.Errorf("peer %s has no addresses; run `kran link %s` again", n.Name, n.Name))
 	}
 	for _, a := range n.Addresses {
-		if strings.TrimSpace(a) == "" || !strings.Contains(a, ":") && !strings.HasPrefix(a, "[") {
+		if strings.TrimSpace(a) == "" || !strings.Contains(a, ":") && !strings.HasPrefix(a, "[") || !sshWord(a) {
 			errs = append(errs, fmt.Errorf("peer %s: address %q must be host:port", n.Name, a))
 		}
+	}
+	if n.User != "" && !sshWord(n.User) {
+		errs = append(errs, fmt.Errorf("peer %s: user %q is not a valid user name", n.Name, n.User))
 	}
 	switch n.Direction {
 	case "both", "outbound", "inbound":

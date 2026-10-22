@@ -339,18 +339,60 @@ func (s *slotFS) remove(rel string) error {
 	return fmt.Errorf("remove %s: %w", rel, err)
 }
 
-// removeTree deletes a directory and everything below it.
+// beforeRemoveTree lets a test swap a parent directory mid-removal.
+var beforeRemoveTree func()
+
+// removeTree deletes a directory and everything below it, relative to the
+// parent's file descriptor: a parent swapped for a symlink after the check
+// cannot redirect the removal.
 func (s *slotFS) removeTree(rel string) error {
-	dir, _ := splitRel(rel)
+	dir, name := splitRel(rel)
 	fd, err := s.openDir(dir, false)
 	if err != nil {
 		return nil
 	}
-	s.closeDir(fd)
-	// The parent chain is verified symlink-free above; os.RemoveAll itself
-	// never follows symlinks below its argument.
-	if err := os.RemoveAll(filepath.Join(s.root, filepath.FromSlash(rel))); err != nil {
+	defer s.closeDir(fd)
+	if beforeRemoveTree != nil {
+		beforeRemoveTree()
+	}
+	if err := removeAllAt(fd, name); err != nil {
 		return fmt.Errorf("remove %s: %w", rel, err)
+	}
+	return nil
+}
+
+// removeAllAt removes name below dirfd like os.RemoveAll, through file
+// descriptors only (never following a symlink), making directories it must
+// empty writable first.
+func removeAllAt(dirfd int, name string) error {
+	err := unix.Unlinkat(dirfd, name, 0)
+	if err == nil || errors.Is(err, unix.ENOENT) {
+		return nil
+	}
+	if !errors.Is(err, unix.EISDIR) && !errors.Is(err, unix.EPERM) {
+		return err
+	}
+	fd, err := unix.Openat(dirfd, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return nil
+		}
+		return err
+	}
+	d := os.NewFile(uintptr(fd), name)
+	defer d.Close()
+	names, err := d.Readdirnames(-1)
+	if err != nil {
+		return err
+	}
+	unix.Fchmod(fd, 0o700) // a read-only dir (0555) could not be emptied
+	for _, n := range names {
+		if err := removeAllAt(fd, n); err != nil {
+			return err
+		}
+	}
+	if err := unix.Unlinkat(dirfd, name, unix.AT_REMOVEDIR); err != nil && !errors.Is(err, unix.ENOENT) {
+		return err
 	}
 	return nil
 }
@@ -358,7 +400,7 @@ func (s *slotFS) removeTree(rel string) error {
 // finish sets mode and mtime on a freshly written temp file and renames it
 // into place.
 func finishFile(dirfd int, tmp, name string, mode uint32, mtime int64) error {
-	if err := unix.Fchmodat(dirfd, tmp, mode&0o777, 0); err != nil {
+	if err := chmodAt(dirfd, tmp, mode&0o777); err != nil {
 		return fmt.Errorf("chmod: %w", err)
 	}
 	if err := setMtimeAt(dirfd, tmp, mtime); err != nil {
@@ -420,9 +462,7 @@ func (s *slotFS) chmod(e *proto.ManifestEntry) error {
 		return err
 	}
 	defer s.closeDir(fd)
-	// The plan saw a regular file here (no symlink), and the slot is held
-	// exclusively, so following is not a concern for this one call.
-	if err := unix.Fchmodat(fd, name, e.Mode&0o777, 0); err != nil {
+	if err := chmodAt(fd, name, e.Mode&0o777); err != nil {
 		return fmt.Errorf("chmod %s: %w", e.Path, err)
 	}
 	return nil
@@ -595,4 +635,37 @@ func diffLocal(root string, m *proto.Manifest, caseInsensitive bool) (*plan, err
 		return nil, err
 	}
 	return computePlan(m, state), nil
+}
+
+// chmodAt sets the mode of name below dirfd without following a symlink
+// (a process left from an earlier job could swap the file for one).
+// fchmodat2's AT_SYMLINK_NOFOLLOW (Linux 6.6+, macOS) does it in one call;
+// otherwise the file is opened O_NOFOLLOW and fchmod'ed. Residual: on older
+// Linux kernels a file its owner cannot read or write is checked with
+// fstatat and then chmod'ed by name, a window only a racing process of the
+// same user can use.
+func chmodAt(dirfd int, name string, mode uint32) error {
+	err := unix.Fchmodat(dirfd, name, mode, unix.AT_SYMLINK_NOFOLLOW)
+	if err == nil || !errors.Is(err, unix.EOPNOTSUPP) && !errors.Is(err, unix.ENOTSUP) {
+		return err
+	}
+	for _, flag := range []int{unix.O_RDONLY, unix.O_WRONLY} {
+		fd, err := unix.Openat(dirfd, name, flag|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC|unix.O_NOCTTY, 0)
+		if err == nil {
+			err = unix.Fchmod(fd, mode)
+			unix.Close(fd)
+			return err
+		}
+		if !errors.Is(err, unix.EACCES) {
+			return err // ELOOP: a symlink
+		}
+	}
+	var st unix.Stat_t
+	if err := unix.Fstatat(dirfd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return err
+	}
+	if st.Mode&unix.S_IFMT == unix.S_IFLNK {
+		return unix.ELOOP
+	}
+	return unix.Fchmodat(dirfd, name, mode, 0)
 }

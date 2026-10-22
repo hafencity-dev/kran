@@ -186,6 +186,22 @@ func (m *peerManager) get(name string) *peer {
 	return m.peers[name]
 }
 
+// linkedName maps a hello's node name or ID to the name the peer is linked
+// under in peers.toml ("" when it is not linked).
+func (m *peerManager) linkedName(name, id string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if p := m.peers[name]; p != nil {
+		return p.cfg.Name
+	}
+	for _, p := range m.peers {
+		if id != "" && p.cfg.ID == id {
+			return p.cfg.Name
+		}
+	}
+	return ""
+}
+
 func (m *peerManager) list() []*peer {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -271,7 +287,9 @@ func (m *peerManager) attachInbound(name string, s transport.Session) {
 			p.notifyLocked()
 		}
 		p.mu.Unlock()
-		p.push(true)
+		if p.ctx.Err() == nil { // an unlinked peer must not reappear
+			p.push(true)
+		}
 	}()
 }
 
@@ -725,11 +743,15 @@ func (d *Daemon) applyRemoteLive(node string, allocs []allocInfo) {
 			continue
 		}
 		live := *a.Live
-		d.deps.Sched.UpdateJobUsage(a.JobID, live)
 		e.mu.Lock()
 		same := e.job.Live != nil && *e.job.Live == live
-		running := e.job.State == proto.JobRunning && e.job.Node == node
+		onNode := e.job.Node == node
+		running := e.job.State == proto.JobRunning && onNode
 		e.mu.Unlock()
+		if !onNode { // only the job's own node reports its usage
+			continue
+		}
+		d.deps.Sched.UpdateJobUsage(a.JobID, live)
 		if running && !same {
 			e.update(func(j *proto.Job) { j.Live = &live })
 		}

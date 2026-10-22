@@ -10,7 +10,17 @@
 
 ## The hook
 
-Claude Code passes each Bash tool call to `kran hook claude`. For a long-running test, check, lint or build that is safe to move, the hook returns `updatedInput` with the command replaced by `kran run --sh '<original>'` (correctly quoted; other fields such as `description` and `timeout` are preserved) and a one-sentence note telling the agent the output is the command's own and that files a remote run writes stay there. The permission decision is left alone: your normal prompts and allow rules apply to the wrapped command.
+Claude Code passes each Bash tool call to `kran hook claude`. For a long-running test, check, lint or build that is safe to move, the hook returns `updatedInput` with the command replaced by `kran run --sh '<original>'` (correctly quoted; other fields such as `description` and `timeout` are preserved) and a one-sentence note telling the agent the output is the command's own and that files a remote run writes stay there.
+
+Your Claude Code permission rules keep working as if the command had not been wrapped. The hook reads them (managed policy, `~/.claude/settings.json` or `$CLAUDE_CONFIG_DIR/settings.json`, and the project's `.claude/settings.json` and `.claude/settings.local.json`) and checks the original command:
+
+- a `deny` or `ask` rule matches the command or any part of it: the command is left alone, so Claude Code applies that rule;
+- your `allow` rules cover the command (every part of it; output filters like `| tail` need none): it is wrapped and approved, as it would have been;
+- no rule matches: it is wrapped and Claude Code asks you, as it would have.
+
+If a settings file cannot be read or parsed, the hook leaves commands alone.
+
+**Never add an allow rule for kran itself** (`Bash(kran run:*)` or similar). It would approve every command the hook wraps, including ones you never allowed. The hook refuses to wrap a command such a rule would approve.
 
 The rule: move what benefits, leave the rest.
 
