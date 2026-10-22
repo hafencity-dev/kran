@@ -233,9 +233,9 @@ func oneArg(what, hint string) cobra.PositionalArgs {
 	return func(cmd *cobra.Command, args []string) error {
 		switch {
 		case len(args) == 0:
-			return usagef("%s needs a %s (%s)", cmd.CommandPath(), what, hint)
+			return usagef("%s needs a %s (%s)", cmd.Name(), what, hint)
 		case len(args) > 1:
-			return usagef("%s takes one %s, got %d (see `%s --help`)", cmd.CommandPath(), what, len(args), cmd.CommandPath())
+			return usagef("%s takes one %s, got %d (see `%s --help`)", cmd.Name(), what, len(args), cmd.CommandPath())
 		}
 		return nil
 	}

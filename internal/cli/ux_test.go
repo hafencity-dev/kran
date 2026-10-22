@@ -114,9 +114,9 @@ func TestStatusDoesNotSayWaitingTwice(t *testing.T) {
 func TestArgumentErrorsSayWhatIsNeeded(t *testing.T) {
 	a, _, errb := testApp(nil)
 	for args, want := range map[string]string{
-		"cancel": "kran cancel needs a job (list jobs with `kran jobs`)",
-		"drain":  "kran drain needs a machine",
-		"unlink": "kran unlink needs a machine",
+		"cancel": "cancel needs a job (list jobs with `kran jobs`)",
+		"drain":  "drain needs a machine",
+		"unlink": "unlink needs a machine",
 	} {
 		errb.Reset()
 		if code := a.Execute(context.Background(), []string{args}); code != 2 || !strings.Contains(errb.String(), want) || strings.Contains(errb.String(), "arg(s)") {
