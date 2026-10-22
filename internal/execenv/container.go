@@ -535,13 +535,18 @@ func (m *manager) containerSpec(ctx context.Context, spec *superSpec, req *Start
 		a := []string{"run", "--name", name, "--label", "kran.job=" + req.Spec.ID, "--label", "kran.ns=" + m.ns,
 			"--init", "--network", "host",
 			"--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
-			"-v", "/var/run/docker.sock:/var/run/docker.sock",
 			"--mount", slotMount,
 			"--mount", "type=volume,src=" + m.volume("cache") + ",dst=" + ctrCache,
 			"--mount", "type=volume,src=" + m.volume("tools") + ",dst=" + ctrTools,
 		}
-		if dk.sockGID > 0 {
-			a = append(a, "--group-add", strconv.Itoa(dk.sockGID))
+		// The Docker socket lets testcontainers and docker compose work in
+		// jobs; it is root-equivalent on rootful Docker (SPEC §9), so a
+		// project can opt out.
+		if !req.Spec.Req.NoDocker {
+			a = append(a, "-v", "/var/run/docker.sock:/var/run/docker.sock")
+			if dk.sockGID > 0 {
+				a = append(a, "--group-add", strconv.Itoa(dk.sockGID))
+			}
 		}
 		if spec.MemMax > 0 {
 			a = append(a, "--memory", strconv.FormatInt(spec.MemMax, 10), "--memory-swap", strconv.FormatInt(spec.MemMax, 10))

@@ -30,6 +30,7 @@ Written by `kran link` and `kran unlink`; do not edit by hand. Each `[[peer]]` h
 
 ```toml
 os = "same"                    # same | any ("any" lets Linux jobs run natively on a Mac)
+docker = true                  # false: container jobs get no Docker socket (it is root-equivalent with rootful Docker)
 [sync]
 include = ["vendor-bin/"]      # extra untracked/ignored paths to send
 exclude = ["testdata/huge/"]

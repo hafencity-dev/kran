@@ -155,6 +155,7 @@ linked_at = 2026-10-22T12:00:00Z
 ### `.kran.toml` in a repo (optional; auto-detection covers the common case)
 ```toml
 os = "same"                   # same | any — "any" lets Linux jobs run natively on macOS
+docker = true                 # false: container jobs get no Docker socket (SPEC §9)
 [sync]
 include = ["vendor-bin/"]      # extra untracked/ignored paths to send
 exclude = ["testdata/huge/"]
@@ -370,8 +371,10 @@ process tree RSS + CPU time).
   `docker run --rm --init --network host --name kran-job-<id> --label
   kran.job=<id> --memory <cap> --cpus <n> -v /var/run/docker.sock:… -e …
   -w <origin cwd> --user <uid>:<gid>`. The Docker socket is available so
-  testcontainers / `docker compose` in tests work; host networking makes
-  `localhost:<published port>` work as on Linux.
+  testcontainers / `docker compose` in tests work (not with `.kran.toml
+  docker = false` or `kran run --no-docker`); host networking makes
+  `localhost:<published port>` work as on Linux. The slot sync helper lives
+  in its own container's file system, never in a volume jobs mount.
 * Resource caps: memory cap = admitted estimate × 2, at least 2 GiB, at most
   free memory at start; on cap breach the job is OOM-killed and the exit
   reason says so (`kran: job hit its 6 GiB memory cap on devmac — rerun with
@@ -433,7 +436,17 @@ target side delegates to `execenv.Manager` (§10). Methods: `hello`,
 * Peer auth = SSH with dedicated key + forced command + pinned host key.
   `restrict` disables forwarding/pty/agent.
 * Secrets never synced (§6.7) nor forwarded (§6.5) by default.
-* Jobs run as the node's user, never root.
+* Jobs run as the node's user, never root; the daemon refuses to run as
+  root (`kran daemon --allow-root` overrides) and `kran service install`
+  never installs one that would.
+* **Container jobs get the Docker socket by default**, so testcontainers and
+  `docker compose` work. With rootful Docker (Linux without rootless mode)
+  that is root-equivalent on the node: a job can start a privileged
+  container and own the host or the Docker VM, including other repos'
+  slots. Only run code you would run as root there, or opt out per repo
+  (`.kran.toml docker = false`) or per run (`kran run --no-docker`). Native
+  jobs run as the node user, who can reach Docker anyway if they are in the
+  `docker` group.
 
 ## 10. Internal Go interfaces
 

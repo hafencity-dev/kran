@@ -16,10 +16,10 @@ import (
 
 // RunFlags are the parsed flags of `kran run`.
 type RunFlags struct {
-	Local, Remote, AnyOS, Stdin, Quiet, JSONEvents, NoFallback, GPU bool
-	Node, Mem, Priority, Sh                                         string
-	CPUs                                                            float64
-	Labels, ExtraEnv                                                []string
+	Local, Remote, AnyOS, Stdin, Quiet, JSONEvents, NoFallback, GPU, NoDocker bool
+	Node, Mem, Priority, Sh                                                   string
+	CPUs                                                                      float64
+	Labels, ExtraEnv                                                          []string
 }
 
 // SpecInput is everything BuildSpec needs, injectable for tests.
@@ -140,6 +140,7 @@ func BuildSpec(ctx context.Context, in SpecInput) (proto.JobSpec, error) {
 		req.Node = f.Node
 	}
 	req.Toolchains = workspace.Toolchains(ws.Root)
+	req.NoDocker = f.NoDocker || pc.Docker != nil && !*pc.Docker
 	if reason := originOnlyReason(spec, ws, wsErr, in.Home); reason != "" && !req.OriginOnly {
 		req.OriginOnly, req.OriginOnlyReason = true, reason
 	}

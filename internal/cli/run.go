@@ -68,6 +68,7 @@ found; 128+n killed by signal n; 2 usage error.`,
 	fs.StringVar(&f.Priority, "priority", "", "high, normal or low (default: high on a terminal, else normal)")
 	fs.StringArrayVar(&f.Labels, "label", nil, "label the job, key=value (repeatable)")
 	fs.BoolVar(&f.NoFallback, "no-fallback", false, "exit 125 instead of running here when kran cannot place the job")
+	fs.BoolVar(&f.NoDocker, "no-docker", false, "do not give a container job the Docker socket (root-equivalent on rootful Docker)")
 	fs.StringArrayVar(&f.ExtraEnv, "env", nil, "also forward this environment variable, even if it looks secret (repeatable)")
 	fs.StringVar(&f.Sh, "sh", "", "run this string with your shell instead of a command")
 	return cmd

@@ -176,3 +176,20 @@ func TestShellName(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildSpecNoDocker(t *testing.T) {
+	in := testInput("go", "test", "./...")
+	if spec, _ := BuildSpec(context.Background(), in); spec.Req.NoDocker {
+		t.Fatal("docker socket is on by default")
+	}
+	in.Flags.NoDocker = true
+	if spec, _ := BuildSpec(context.Background(), in); !spec.Req.NoDocker {
+		t.Fatal("--no-docker ignored")
+	}
+	off := false
+	in = testInput("go", "test", "./...")
+	in.Project = func(string) (*workspace.ProjectConfig, error) { return &workspace.ProjectConfig{Docker: &off}, nil }
+	if spec, _ := BuildSpec(context.Background(), in); !spec.Req.NoDocker {
+		t.Fatal(".kran.toml docker = false ignored")
+	}
+}

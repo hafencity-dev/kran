@@ -227,6 +227,21 @@ func testContainerRuntime(t *testing.T, volume bool) {
 		})
 	}
 
+	// .kran.toml docker = false / --no-docker: no Docker socket in the job.
+	t.Run("no-docker", func(t *testing.T) {
+		probe := sh(`if [ -e /var/run/docker.sock ]; then echo sock; else echo nosock; fi`)
+		p := te.startCtr(ref, probe)
+		waitExit(t, p, 120*time.Second)
+		if out, _ := output(t, p); !strings.Contains(out, "sock") || strings.Contains(out, "nosock") {
+			t.Fatalf("default job: %q", out)
+		}
+		p = te.startCtr(ref, probe, func(r *StartRequest) { r.Spec.Req.NoDocker = true })
+		waitExit(t, p, 120*time.Second)
+		if out, _ := output(t, p); !strings.Contains(out, "nosock") {
+			t.Fatalf("NoDocker job: %q", out)
+		}
+	})
+
 	t.Run("signal-stdin-tty", func(t *testing.T) {
 		p := te.startCtr(ref, sh("kill -TERM $$"))
 		if exit := waitExit(t, p, 60*time.Second); exit.Code != 143 || exit.Signal != "TERM" {
