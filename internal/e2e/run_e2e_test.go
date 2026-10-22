@@ -137,3 +137,24 @@ func counter(n int, sleep string) (script, want string) {
 }
 
 var _ = os.Getpid
+
+// TestE2ELocalRecordsMatchExit: a local job's record always gets the exit
+// its kran run reported, also when the CLI quits right after a burst of
+// output (the run session must read the exit before treating the closed
+// connection as a cancel).
+func TestE2ELocalRecordsMatchExit(t *testing.T) {
+	c := newCluster(t, []string{"a"}, nil)
+	a := c.node("a")
+	repo := makeRepo(t, filepath.Join(c.base, "repo"), map[string]string{"f": "x"})
+	for i := 0; i < 40; i++ {
+		r := a.kran(runOpts{dir: repo}, "run", "--json-events", "--local", "--", "sh", "-c", "sleep 1.9; seq 1 400000; exit 3")
+		id, _ := event(r.events(), "decision")["job_id"].(string)
+		if r.code != 3 || id == "" {
+			t.Fatalf("run %d: %s", i, r)
+		}
+		j := a.waitJob(id, 30*time.Second, func(j proto.Job) bool { return j.State.Terminal() })
+		if j.State != proto.JobFailed || j.ExitCode == nil || *j.ExitCode != 3 {
+			t.Fatalf("run %d: record %s %v (%s), the CLI reported exit 3", i, j.State, j.ExitCode, j.Reason)
+		}
+	}
+}
