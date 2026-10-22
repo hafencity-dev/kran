@@ -711,3 +711,29 @@ func TestSetupOutputIsNotAStart(t *testing.T) {
 		t.Fatalf("code %d: %s", code, h.stderr.String())
 	}
 }
+
+// After the daemon restarted, it no longer knows the local child's process
+// group: the reattaching CLI must report it again, or a later CLI death
+// would leave the child running (SPEC §6.1 step 5).
+func TestLocalReattachReportsStartedAgain(t *testing.T) {
+	s1, s2 := newFakeSession(), newFakeSession()
+	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s1, s2}}, "sh", "-c", "sleep 0.5")
+	go func() {
+		s1.push(proto.FrameDecision, proto.Decision{JobID: "jl", Mode: "local", Envelope: &proto.LocalEnvelope{}})
+		waitFor(t, func() bool { return s1.count(proto.FrameStarted) == 1 })
+		s1.drop()
+	}()
+	if code := h.run(t); code != 0 {
+		t.Fatal(code, h.stderr.String())
+	}
+	types := s2.sentTypes()
+	if len(types) < 2 || types[0] != proto.FrameReattach || types[1] != proto.FrameStarted {
+		t.Fatalf("after reattach sent %v", types)
+	}
+	f, _ := s2.find(proto.FrameStarted)
+	var st proto.Started
+	json.Unmarshal(f.payload, &st)
+	if st.PGID == 0 || st.JobID != "jl" {
+		t.Fatalf("%+v", st)
+	}
+}

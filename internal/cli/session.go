@@ -616,6 +616,11 @@ func (r *runner) onReconnect(ctx context.Context, rr reconnectResult) (int, bool
 	r.cl = rr.cl
 	r.attach(rr.sess)
 	r.sendJSON(proto.FrameReattach, proto.Reattach{JobID: r.jobID, Offset: r.offset})
+	if r.local != nil {
+		// A restarted daemon lost the child's process group: without it, it
+		// could not kill the child if this kran run dies later.
+		r.sendJSON(proto.FrameStarted, r.local.Started)
+	}
 	return 0, false
 }
 
