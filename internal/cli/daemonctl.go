@@ -33,14 +33,24 @@ func (a *App) withClient(ctx context.Context, fn func(client.Client) error) erro
 	return fn(cl)
 }
 
+// getuid is a variable so tests can pretend to be root.
+var getuid = os.Getuid
+
 func (a *App) daemonCommand() *cobra.Command {
-	return &cobra.Command{
+	var allowRoot bool
+	cmd := &cobra.Command{
 		Use:   "daemon",
 		Short: "Run the kran daemon in the foreground (normally started by the service)",
 		Long: `Run the kran daemon: scheduler, peer connections, local API and web UI.
 Normally the service manager runs this for you (kran service install).`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// The daemon runs the jobs linked machines send, and its state
+			// lives in the home of whoever runs it: as root, every peer
+			// job would run as root (SPEC §9).
+			if getuid() == 0 && !allowRoot {
+				return &ExitError{Code: 1, Msg: "the kran daemon must not run as root: it runs the jobs linked machines send, and they would run as root too. Run it as your user (kran service install, without sudo); if this machine really has only root, use kran daemon --allow-root"}
+			}
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 			opts := daemon.Options{Logf: func(format string, args ...any) {
@@ -52,6 +62,8 @@ Normally the service manager runs this for you (kran service install).`,
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&allowRoot, "allow-root", false, "run as root anyway (every job, including those of linked machines, then runs as root)")
+	return cmd
 }
 
 func (a *App) serveCommand() *cobra.Command {

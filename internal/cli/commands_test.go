@@ -287,3 +287,14 @@ func TestOpenUIKeepsTokenOffTheCommandLine(t *testing.T) {
 		t.Fatal("redirect file not removed")
 	}
 }
+
+// SPEC §9: jobs never run as root, and the daemon runs every job.
+func TestDaemonRefusesRoot(t *testing.T) {
+	old := getuid
+	getuid = func() int { return 0 }
+	defer func() { getuid = old }()
+	a, _, errb := testApp(nil)
+	if code := a.Execute(context.Background(), []string{"daemon"}); code != 1 || !strings.Contains(errb.String(), "--allow-root") {
+		t.Fatalf("code %d: %s", code, errb.String())
+	}
+}
