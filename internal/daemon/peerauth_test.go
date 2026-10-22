@@ -111,7 +111,10 @@ func dialAs(t *testing.T, n *testNode, bound string) transport.Session {
 	cli, srv := net.Pipe()
 	go n.daemon().ServePeerConn(srv)
 	if bound != "" {
-		go cli.Write([]byte("kran-peer " + bound + "\n"))
+		// Synchronous: the preamble must precede the session's own bytes.
+		if _, err := cli.Write([]byte("kran-peer " + bound + "\n")); err != nil {
+			t.Fatal(err)
+		}
 	}
 	s, err := transport.Client(cli, testSessionConfig(), "pipe")
 	if err != nil {
