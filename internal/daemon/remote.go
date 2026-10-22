@@ -267,6 +267,10 @@ func (d *Daemon) followRemote(ctx context.Context, e *jobEntry, p scheduler.Plac
 							continue // it started after all: follow it
 						}
 					}
+					if c, _, _ := e.canceled(); c {
+						d.finishCanceledBeforeStart(e)
+						return nil
+					}
 					e.finish(proto.Exit{Code: proto.ExitInfra, State: proto.JobInfraErr, Node: node,
 						Reason: fmt.Sprintf("%v; the job may have started on %s before contact was lost, so kran did not run it here too (check: kran logs %s)", err, node, e.id)})
 					return nil

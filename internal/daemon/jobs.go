@@ -382,7 +382,7 @@ func (e *jobEntry) detach(clientPID int) {
 	e.attached--
 	left := e.attached
 	fin := e.finished || e.exitReported
-	placed := e.started || e.placed
+	placed := e.started || e.placed || e.job.Node != "" // Node: also a restored placement
 	e.mu.Unlock()
 	if left > 0 || fin || e.d.stopping.Load() {
 		return
