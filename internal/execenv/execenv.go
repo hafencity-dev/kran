@@ -92,6 +92,15 @@ type Options struct {
 	BlobCap     int64  // bytes; 0 = default
 	DiskFloor   int64  // bytes; 0 = default max(10 GiB, 5%)
 	Logf        func(format string, args ...any)
+
+	// Container is config runtime.container.enabled: "auto" (default:
+	// offered when Docker is reachable), "true"/"on" or "false"/"off".
+	Container string
+	// Namespace prefixes every system resource kran creates: systemd slice
+	// and scopes, Docker containers, volumes and the runner image. Default
+	// "kran". Tests and side-by-side installs use their own (e.g.
+	// "kran-test") so reapers never touch each other's resources.
+	Namespace string
 }
 
 // New returns the production Manager.

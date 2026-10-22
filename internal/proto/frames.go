@@ -123,6 +123,10 @@ type Exit struct {
 	Usage    Usage    `json:"usage"`
 	Node     string   `json:"node"`
 	Fallback bool     `json:"fallback,omitempty"`
+	// added by B: set when the job ended before the user's command started
+	// (setup failed, toolchain missing, runtime not ready). Nothing of the
+	// command ran, so the origin may still fall back to running it locally.
+	BeforeStart bool `json:"before_start,omitempty"`
 }
 
 type Reattach struct {
@@ -132,11 +136,11 @@ type Reattach struct {
 
 // Exit codes owned by kran (SPEC §11).
 const (
-	ExitInfra       = 125
-	ExitUsage       = 2
-	ExitNotExec     = 126
-	ExitNotFound    = 127
-	ExitSignalBase  = 128
+	ExitInfra      = 125
+	ExitUsage      = 2
+	ExitNotExec    = 126
+	ExitNotFound   = 127
+	ExitSignalBase = 128
 )
 
 // ErrFrameTooLarge is returned for frames above MaxFramePayload.
