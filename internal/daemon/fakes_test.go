@@ -415,6 +415,9 @@ type fakeExec struct {
 	acquireGate chan struct{} // AcquireSlot blocks until closed (nil = no wait)
 	putBlobGate chan struct{}
 	startGate   chan struct{} // Start blocks until closed (nil = no wait); starting counts entries
+	// endBeforeStart: Start succeeds but the job ends with this exit
+	// without running the command (setup failed, command not found …).
+	endBeforeStart *proto.Exit
 	starting    int
 	putBlobs    int
 	acquires    int
@@ -558,10 +561,19 @@ func (x *fakeExec) Start(ctx context.Context, req execenv.StartRequest) (execenv
 		<-gate
 	}
 	x.mu.Lock()
-	err := x.startErr
+	err, ended := x.startErr, x.endBeforeStart
 	x.mu.Unlock()
 	if err != nil {
 		return nil, err
+	}
+	if ended != nil {
+		p := &fakeProc{id: req.Spec.ID, notify: make(chan struct{}), doneCh: make(chan struct{}), done: true, exit: *ended}
+		p.exit.JobID = req.Spec.ID
+		close(p.doneCh)
+		x.mu.Lock()
+		x.procs[req.Spec.ID] = p
+		x.mu.Unlock()
+		return p, nil
 	}
 	dir := filepath.Join(req.Slot.Path, filepath.FromSlash(req.Spec.Workspace.Rel))
 	p, err := startFakeProc(req.Spec, dir, x.leaseTTL, req.OnPhase)
@@ -799,6 +811,9 @@ func (p *fakeProc) Signal(name string) error {
 	sig := map[string]syscall.Signal{"INT": syscall.SIGINT, "TERM": syscall.SIGTERM, "KILL": syscall.SIGKILL, "HUP": syscall.SIGHUP, "QUIT": syscall.SIGQUIT}[name]
 	if sig == 0 {
 		return fmt.Errorf("unknown signal %s", name)
+	}
+	if p.cmd == nil {
+		return nil
 	}
 	return syscall.Kill(-p.cmd.Process.Pid, sig)
 }

@@ -227,9 +227,16 @@ func (d *Daemon) followRemote(ctx context.Context, e *jobEntry, p scheduler.Plac
 		switch {
 		case res.exit != nil:
 			x := *res.exit
-			if c, reason, _ := e.canceled(); c {
+			canceled, reason, _ := e.canceled()
+			if canceled {
 				x.State = proto.JobCanceled
 				x.Reason = reason
+			}
+			if !canceled && x.BeforeStart && x.State != proto.JobCanceled {
+				// The target says nothing of the command ran (setup failed,
+				// command not found there, runtime not ready): a local run
+				// may still work (SPEC §6.1).
+				return &prestartError{node: node, err: errors.New(firstNonEmpty(x.Reason, "the job did not start"))}
 			}
 			if x.State == proto.JobInfraErr || x.State == proto.JobLost {
 				e.mu.Lock()
