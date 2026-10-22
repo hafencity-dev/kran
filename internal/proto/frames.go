@@ -164,11 +164,11 @@ type Reattach struct {
 
 // Exit codes owned by kran (SPEC §11).
 const (
-	ExitInfra       = 125
-	ExitUsage       = 2
-	ExitNotExec     = 126
-	ExitNotFound    = 127
-	ExitSignalBase  = 128
+	ExitInfra      = 125
+	ExitUsage      = 2
+	ExitNotExec    = 126
+	ExitNotFound   = 127
+	ExitSignalBase = 128
 )
 
 // ErrFrameTooLarge is returned for frames above MaxFramePayload.
