@@ -4,14 +4,13 @@ kran moves heavy dev jobs (tests, builds, type checks, docker builds, GPU runs) 
 
 ## Quick start (60 seconds)
 
-You need: macOS or Linux (arm64 or amd64) on both machines, and `ssh <other-machine>` working from this one. The repository is private, so the installer downloads with the GitHub CLI (`gh auth login`) or a `GITHUB_TOKEN`.
+You need: macOS or Linux (arm64 or amd64) on both machines, and `ssh <other-machine>` working from this one. The installer downloads from GitHub without a login.
 
 ```sh
 # 1. Install on this machine. Puts kran in ~/.local/bin and runs `kran setup`.
-gh api repos/hafencity-dev/kran/contents/install.sh -H 'Accept: application/vnd.github.raw' | sh
-#    No gh? Same thing with a token:
-#    curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" -H 'Accept: application/vnd.github.raw' \
-#      https://api.github.com/repos/hafencity-dev/kran/contents/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/hafencity-dev/kran/main/install.sh | sh
+#    Alternative with a Go toolchain: go install github.com/hafencity-dev/kran/cmd/kran@latest
+#    then run `kran setup`.
 
 # 2. Link a second machine (kran installs itself there).
 kran link devmac          # or just `kran link` and pick from a list

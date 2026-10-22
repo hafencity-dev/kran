@@ -42,14 +42,15 @@ type Options struct {
 	// Force makes Upgrade restart the remote service without waiting for idle.
 	Force bool
 	// SourceDir is a kran source checkout for cross-compiling (default: found from SelfPath/cwd).
-	SourceDir   string
-	GitHubToken string       // default $GITHUB_TOKEN / $GH_TOKEN
-	APIBase     string       // GitHub API base (tests)
-	HTTPClient  *http.Client // tests
-	Progress    func(step, detail string)
-	Logf        func(string, ...any)
-	Runner      Runner
-	Now         func() time.Time
+	SourceDir    string
+	GitHubToken  string       // default $GITHUB_TOKEN / $GH_TOKEN
+	APIBase      string       // GitHub API base (tests)
+	DownloadBase string       // release download host, default https://github.com (tests)
+	HTTPClient   *http.Client // tests
+	Progress     func(step, detail string)
+	Logf         func(string, ...any)
+	Runner       Runner
+	Now          func() time.Time
 }
 
 // Result describes a finished link.

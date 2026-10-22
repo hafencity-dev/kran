@@ -33,5 +33,5 @@ kran moves heavy dev jobs to whichever of your machines has room, and never make
 
 ### Install
 
-- `install.sh` (private repository: needs `gh auth login` or `GITHUB_TOKEN`) verifies checksums, installs to `~/.local/bin` and runs `kran setup`; it asks setup's questions on your terminal even when piped into `sh` (`--yes` to accept the defaults).
+- `install.sh` (anonymous download; `gh` or `GITHUB_TOKEN` are only a fallback when GitHub rate limits you) verifies checksums, installs to `~/.local/bin` and runs `kran setup`; it asks setup's questions on your terminal even when piped into `sh` (`--yes` to accept the defaults).
 - Release binaries for linux and darwin on arm64 and amd64; `make install` also fills the binary cache that `kran link` uses to install kran on a machine of another OS.

@@ -50,8 +50,7 @@ release:
   draft: false
   prerelease: auto
 
-# Homebrew tap (optional; the repo is private, so users would need
-# HOMEBREW_GITHUB_API_TOKEN). Enable after creating hafencity-dev/homebrew-tap.
+# Homebrew tap (optional). Enable after creating hafencity-dev/homebrew-tap.
 # brews:
 #   - repository:
 #       owner: hafencity-dev

@@ -25,6 +25,12 @@ const (
 	modulePath = "github.com/hafencity-dev/kran"
 )
 
+// Variables so tests can keep the default paths off the network.
+var (
+	defaultDownloadBase = "https://github.com"
+	defaultAPIBase      = "https://api.github.com"
+)
+
 func assetName(ver, goos, goarch string) string {
 	return fmt.Sprintf("kran_%s_%s_%s.tar.gz", strings.TrimPrefix(ver, "v"), goos, goarch)
 }
@@ -37,7 +43,7 @@ type binarySource struct {
 
 // acquire returns a local file holding the kran binary for goos/goarch at
 // the link's version. Order for releases: this process (same platform), the
-// binary cache, a GitHub release download (gh, then GITHUB_TOKEN), a source
+// binary cache, a GitHub release download (anonymous HTTPS, then gh, then GITHUB_TOKEN), a source
 // build. Development builds prefer the source build, since the cache and
 // releases cannot contain the code being developed.
 func (b binarySource) acquire(ctx context.Context, goos, goarch string) (string, error) {
@@ -71,7 +77,7 @@ func (b binarySource) acquire(ctx context.Context, goos, goarch string) (string,
 		}
 		why = append(why, fmt.Sprintf("%s: %v", s.name, err))
 	}
-	return "", fmt.Errorf("no kran %s binary for %s/%s (%s). Options: `make install` on a machine with the source (fills the binary cache), `gh auth login` so kran can download the release, or set GITHUB_TOKEN", ver, goos, goarch, strings.Join(why, "; "))
+	return "", fmt.Errorf("no kran %s binary for %s/%s (%s). Options: `make install` on a machine with the source (fills the binary cache), check your network access to github.com (or `gh auth login` / set GITHUB_TOKEN)", ver, goos, goarch, strings.Join(why, "; "))
 }
 
 func (b binarySource) download(ctx context.Context, goos, goarch, dest string) (string, error) {
@@ -102,8 +108,15 @@ func (b binarySource) fetch(ctx context.Context, version, goos, goarch string) (
 	tgz, sums := filepath.Join(tmp, asset), filepath.Join(tmp, "checksums.txt")
 	haveSums := false
 	got := false
-	// 1. gh, when installed and authenticated (the repo is private).
-	if b.ghReady(ctx) {
+	// 1. Anonymous HTTPS from the public release page.
+	var anonErr error
+	if anonErr = b.anonDownload(ctx, ver, asset, tgz); anonErr == nil {
+		if anonErr = b.anonDownload(ctx, ver, "checksums.txt", sums); anonErr == nil {
+			got, haveSums = true, true
+		}
+	}
+	// 2. gh, when installed and authenticated (higher rate limits).
+	if !got && b.ghReady(ctx) {
 		tag := "v" + ver
 		if _, err := b.r.Run(ctx, Cmd{Name: "gh", Args: []string{"release", "download", tag, "-R", repoSlug, "-p", asset, "-D", tmp, "--clobber"}}); err == nil {
 			got = true
@@ -112,11 +125,11 @@ func (b binarySource) fetch(ctx context.Context, version, goos, goarch string) (
 			}
 		}
 	}
-	// 2. GitHub API with a token.
+	// 3. GitHub API with a token.
 	if !got {
 		tok := b.token()
 		if tok == "" {
-			return "", errors.New("gh is not installed or not logged in, and GITHUB_TOKEN is not set")
+			return "", fmt.Errorf("anonymous download failed (%v), and gh is not logged in and GITHUB_TOKEN is not set", anonErr)
 		}
 		if err := b.apiDownload(ctx, tok, "v"+ver, asset, tgz); err != nil {
 			return "", err
@@ -138,6 +151,41 @@ func (b binarySource) fetch(ctx context.Context, version, goos, goarch string) (
 }
 
 var releaseVersion = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$`)
+
+// anonDownload fetches a release asset from the public download URL without
+// credentials and writes it to out.
+func (b binarySource) anonDownload(ctx context.Context, ver, asset, out string) error {
+	base := b.o.DownloadBase
+	if base == "" {
+		base = defaultDownloadBase
+	}
+	hc := b.o.HTTPClient
+	if hc == nil {
+		hc = &http.Client{Timeout: 5 * time.Minute}
+	}
+	url := fmt.Sprintf("%s/%s/releases/download/v%s/%s", base, repoSlug, ver, asset)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("GitHub answered %s for %s", resp.Status, asset)
+	}
+	f, err := os.Create(out)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
 
 func (b binarySource) token() string {
 	if b.o.GitHubToken != "" {
@@ -184,7 +232,7 @@ func firstEnv(keys ...string) string {
 func (b binarySource) apiClient() (*http.Client, string) {
 	base := b.o.APIBase
 	if base == "" {
-		base = "https://api.github.com"
+		base = defaultAPIBase
 	}
 	hc := b.o.HTTPClient
 	if hc == nil {
@@ -198,7 +246,9 @@ func apiGet(ctx context.Context, hc *http.Client, token, url, accept string) (*h
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	req.Header.Set("Accept", accept)
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	return hc.Do(req)

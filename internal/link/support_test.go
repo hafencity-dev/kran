@@ -9,6 +9,8 @@ import (
 	"flag"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,7 +30,12 @@ func TestMain(m *testing.M) {
 	if filepath.Base(os.Args[0]) == "kran" {
 		os.Exit(fakeKran(os.Args[1:]))
 	}
-	os.Exit(m.Run())
+	// Unless a test sets its own bases, the default GitHub hosts answer 404.
+	dead := httptest.NewServer(http.NotFoundHandler())
+	defaultDownloadBase, defaultAPIBase = dead.URL, dead.URL
+	code := m.Run()
+	dead.Close()
+	os.Exit(code)
 }
 
 func fakeKran(args []string) int {

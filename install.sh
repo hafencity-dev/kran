@@ -2,11 +2,11 @@
 # kran installer: downloads the release for this machine into ~/.local/bin and
 # runs `kran setup`. No sudo. Safe to run again (it upgrades in place).
 #
-# The repository hafencity-dev/kran is private, so the download needs either
+# Downloads are anonymous. If GitHub rate limits you, the script falls back to
 # the GitHub CLI (`gh auth login`) or a token in GITHUB_TOKEN / GH_TOKEN.
 #
-#   gh api repos/hafencity-dev/kran/contents/install.sh -H 'Accept: application/vnd.github.raw' | sh
-#   gh api repos/hafencity-dev/kran/contents/install.sh -H 'Accept: application/vnd.github.raw' | sh -s -- --version 0.3.0
+#   curl -fsSL https://raw.githubusercontent.com/hafencity-dev/kran/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/hafencity-dev/kran/main/install.sh | sh -s -- --version 0.3.0
 #
 # Options (or environment): --version X (VERSION), --no-setup (KRAN_NO_SETUP=1),
 # --yes (accept setup's defaults without asking; also the default when there is
@@ -64,12 +64,47 @@ gh_curl() {
 	printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" | curl -K - "$@"
 }
 
+# api_get URL OUT: GitHub API request, authenticated only when a token is set.
+api_get() {
+	if [ -n "$TOKEN" ]; then
+		gh_curl -sSL -H "Accept: application/vnd.github+json" -w '%{http_code}' "$1" -o "$2"
+	else
+		curl -sSL -H "Accept: application/vnd.github+json" -w '%{http_code}' "$1" -o "$2"
+	fi
+}
+
+latest_version() {
+	code="$(api_get "https://api.github.com/repos/$REPO/releases/latest" "$TMP/latest.json")" ||
+		die "could not reach api.github.com; check your network"
+	case "$code" in
+	200) ;;
+	404) die "no kran release has been published yet ($REPO has no releases)" ;;
+	403 | 429) die "GitHub rate limited this request (HTTP $code). Wait a bit, set GITHUB_TOKEN, or pass --version X to skip the lookup." ;;
+	*) die "GitHub answered HTTP $code looking up the latest release" ;;
+	esac
+	tag="$(sed -n 's/.*"tag_name"[ \t]*:[ \t]*"\([^"]*\)".*/\1/p' "$TMP/latest.json" | head -n 1)"
+	[ -n "$tag" ] || die "could not read the latest release tag from GitHub"
+	VERSION="${tag#v}"
+}
+
+download_anon() {
+	have curl || return 1
+	if [ -z "$VERSION" ]; then latest_version; fi
+	case "$VERSION" in
+	*[!0-9A-Za-z.-]* | "") die "invalid version $VERSION" ;;
+	esac
+	ARCHIVE_NAME="kran_${VERSION}_${OS}_${ARCH}.tar.gz"
+	base="https://github.com/$REPO/releases/download/v$VERSION"
+	curl -fsSL "$base/$ARCHIVE_NAME" -o "$TMP/$ARCHIVE_NAME" &&
+		curl -fsSL "$base/checksums.txt" -o "$TMP/checksums.txt"
+}
+
 download_token() {
 	have curl || die "curl is required to download with a token"
 	api="https://api.github.com/repos/$REPO/releases"
 	if [ -n "$VERSION" ]; then api="$api/tags/v$VERSION"; else api="$api/latest"; fi
 	gh_curl -fsSL -H "Accept: application/vnd.github+json" "$api" -o "$TMP/release.json" ||
-		die "could not read the release ($api); check the version and that your token can read $REPO"
+		die "could not read the release ($api); check the version and your token"
 	for pattern in "kran_[^\"]*_${OS}_${ARCH}.tar.gz" "checksums.txt"; do
 		# In the API JSON an asset's "url" precedes its "name".
 		asset="$(awk -v pat="^\"?($pattern)\"?\$" '
@@ -83,14 +118,20 @@ download_token() {
 }
 
 TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
-if have gh && gh auth status >/dev/null 2>&1; then
-	say "Downloading kran for $OS/$ARCH with the GitHub CLI..."
-	download_gh || die "gh could not download the release; check the version and your access to $REPO"
-elif [ -n "$TOKEN" ]; then
-	say "Downloading kran for $OS/$ARCH with your token..."
-	download_token
+say "Downloading kran for $OS/$ARCH..."
+if download_anon; then
+	:
 else
-	die "$REPO is private, so I need GitHub access. Either run 'gh auth login' (https://cli.github.com) and re-run this script, or set GITHUB_TOKEN to a token that can read $REPO."
+	rm -f "$TMP"/kran_*.tar.gz "$TMP/checksums.txt"
+	if have gh && gh auth status >/dev/null 2>&1; then
+		say "Anonymous download failed; trying the GitHub CLI..."
+		download_gh || die "could not download the release; check that ${VERSION:+v$VERSION exists and }$REPO has a published release for $OS/$ARCH"
+	elif [ -n "$TOKEN" ]; then
+		say "Anonymous download failed; trying your token..."
+		download_token
+	else
+		die "could not download the release from github.com/$REPO${VERSION:+ (version $VERSION)}. Check the version and your network; if GitHub is rate limiting you, run 'gh auth login' or set GITHUB_TOKEN and re-run."
+	fi
 fi
 
 ARCHIVE="$(find "$TMP" -maxdepth 1 -name "kran_*_${OS}_${ARCH}.tar.gz" | head -n 1)"
