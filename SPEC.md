@@ -237,7 +237,10 @@ Flags: `-l/--local`, `-r/--remote`, `-n/--node NAME`, `--gpu`, `--cpus N`,
 * Reaper (every 30 s, and at daemon start): kills scopes/containers/process
   groups labelled kran whose job is not active; deletes job dirs older than
   7 days; trims blob cache (LRU, cap default 20 GiB or 10% of disk) and
-  slots unused for 3 days; enforces disk floor (refuse new remote jobs below
+  slots unused for 3 days (last use = last acquisition or release; a slot
+  whose metadata has none, e.g. written by an older kran, counts from the
+  latest change of its metadata or directory, never as unused since
+  year one); enforces disk floor (refuse new remote jobs below
   max(10 GiB, 5%) free with reason `disk`).
 * Process-tree kill: Linux = scope stop (cgroup kill); macOS native = kill
   process group, then sweep descendants by ppid walk; container =
@@ -335,7 +338,7 @@ process tree RSS + CPU time).
   Symlinks preserved as symlinks (never followed out of the workspace).
   Without git: walk with the same hard excludes + `.gitignore` parsing.
 * Manifest entry: path, mode, size, mtime (ns), sha256 (hash cache keyed by
-  dev+inode+size+mtime+ctime in sqlite, so a re-scan of an unchanged 30k-file
+  dev+inode+size+mtime+ctime in a per-worktree cache file, so a re-scan of an unchanged 30k-file
   repo is < 300 ms).
 * Target: `blobs/<sha[:2]>/<sha>` content-addressed store (shared by all
   repos), `slots/<repoID>/<n>/` working dirs. A job takes a free slot of its
@@ -346,6 +349,16 @@ process tree RSS + CPU time).
   the manifest, except dependency and cache dirs that setup or the tools
   maintain themselves (`keep`, default: `node_modules/`, `.next/cache/`,
   `target/`, `.venv/`, `.turbo/`, `.pnpm-store/`). Then set modes + mtimes.
+* Unchanged syncs are cheap (30k files: well under a second): the target
+  scans the slot once per sync (directories listed in parallel, only
+  manifest paths stat'ed) and, when its blob store already holds every
+  file the slot lacks, updates the slot during `slot.diff` and answers
+  `committed` (the origin then skips `slot.commit`). Slots in the Docker
+  volume take one sync-helper run for that (`docker exec`, op `sync`).
+  The manifest travels in a compact binary encoding (`proto.EncodeManifest`;
+  its SHA-256 names it), and once the target holds the manifest this
+  origin last synced from the same worktree, only as a delta against it,
+  or not at all when unchanged (§8.3).
 * Container runtime: slots live in Docker volume `kran-slots` and are
   mounted into the job container **at the origin's absolute path** (volume
   subpath mount), so absolute paths in tests behave identically. Native
@@ -450,6 +463,19 @@ target side delegates to `execenv.Manager` (§10). Methods: `hello`,
 `job.start`, `job.attach`, `job.heartbeat`, `job.signal`, `job.resize`,
 `job.cancel`, `slot.release`, `mesh.peers`. Version negotiation in `hello`
 (major must match; minor may differ).
+
+Workspace sync (protocol 1.1, `internal/daemon/syncproto.go`): a 1.1
+target adds `"sync": 1` to its `slot.acquire` answer. The origin then
+sends a `slot.diff` body `{format, hash, base}`: `kmf1` (the compact
+manifest, zstd), `kmd1` (a delta against manifest `base`, zstd) or `same`
+(no data; `base` = `hash`). The target keeps recent manifests by origin
+and hash (it hashes them itself; an origin can only refer to its own) and
+answers code `manifest_base` when it lacks the base or the result does not
+hash to `hash`; the origin then sends `kmf1`. `SyncPlan.committed` tells
+the origin the slot is already up to date. A 1.0 target (no `sync`) gets
+zstd JSON and `slot.commit` as before; a 1.0 origin's body-less
+`slot.diff` is read as JSON and its `slot.commit` after a committing diff
+is a no-op.
 
 ## 9. Security
 

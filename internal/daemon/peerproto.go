@@ -7,14 +7,18 @@ package daemon
 //   hello              nothing; both sides exchange proto.Hello
 //   metrics.subscribe  target writes one peerStatus JSON line every 2 s
 //   admit              nothing (reserve resources for job_id, 30 s TTL)
-//   slot.acquire       nothing (response body: proto.SlotRef)
-//   slot.diff          origin sends the manifest as zstd-compressed JSON in
-//                      pfData frames ending with pfEnd; then the response
-//                      line (body: proto.SyncPlan) follows
+//   slot.acquire       nothing (response body: proto.SlotRef plus "sync": 1
+//                      from a 1.1 target, see syncproto.go)
+//   slot.diff          request body {format, hash, base} (1.1; absent =
+//                      JSON); origin sends the manifest zstd-compressed in
+//                      pfData frames ending with pfEnd (nothing for format
+//                      "same"); then the response line (body:
+//                      proto.SyncPlan) follows
 //   blob.put           origin sends, per blob, pfBlob{hash,size} + pfData
 //                      (zstd) frames + pfEnd; target acks each blob with a
 //                      pfAck frame; pfDone ends the stream
-//   slot.commit        nothing (commits the manifest of the last diff)
+//   slot.commit        nothing (commits the manifest of the last diff;
+//                      skipped when the plan said committed)
 //   slot.release       nothing
 //   job.start          after the OK the stream becomes the job stream
 //   job.attach         job stream from body.offset
