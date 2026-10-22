@@ -935,3 +935,23 @@ func TestBusySlots(t *testing.T) {
 		t.Fatalf("busy after release: %v", b)
 	}
 }
+
+func TestProcessRunning(t *testing.T) {
+	te := newTestEnv(t)
+	ref := te.slot(testRepo, map[string]string{"lock": "v1"}, proto.RuntimeNative)
+	p := te.start(ref, sh("echo ready; sleep 1"), withSetup("sleep 0.5", "lock"))
+	r := p.(interface{ Running() bool })
+	if r.Running() {
+		t.Fatal("running during setup")
+	}
+	waitFor(t, p, "ready", 10*time.Second)
+	// The supervisor's events are polled; the phase lands shortly.
+	deadline := time.Now().Add(5 * time.Second)
+	for !r.Running() && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !r.Running() {
+		t.Fatal("not running after the command printed")
+	}
+	waitExit(t, p, 10*time.Second)
+}

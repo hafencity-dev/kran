@@ -232,6 +232,14 @@ func (p *process) Output(offset int64) io.ReadCloser {
 
 func (p *process) Stdin() io.WriteCloser { return &stdinWriter{js: p.js} }
 
+// Running reports whether the user's command has started. A daemon that
+// re-attached after a restart has no OnPhase callback and asks this.
+func (p *process) Running() bool {
+	p.js.mu.Lock()
+	defer p.js.mu.Unlock()
+	return p.js.running
+}
+
 func (p *process) Resize(t proto.TTY) error {
 	b, _ := json.Marshal(t)
 	return p.js.sendCtl(proto.FrameResize, b)

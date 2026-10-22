@@ -507,3 +507,27 @@ func TestE2ELocalJobEndsWhileDaemonDown(t *testing.T) {
 		t.Errorf("record %s exit %v (%s), want failed 3", j.State, j.ExitCode, j.Reason)
 	}
 }
+
+// TestE2ETargetRestartDuringSetup: the target daemon restarts while the
+// job is in setup; the command starts after the reattach and the origin
+// must learn that (stdin flows, the result is the command's).
+func TestE2ETargetRestartDuringSetup(t *testing.T) {
+	c := newCluster(t, []string{"a", "b"}, nil)
+	a, b := c.node("a"), c.node("b")
+	repo := slowSetupRepo(t, c, "3")
+	in := strings.Repeat("x", 1000)
+	p := a.startKran(runOpts{dir: repo, stdin: strings.NewReader(in), timeout: 90 * time.Second}, "run", "--json-events", "-i", "-n", "b", "--",
+		"sh", "-c", `wc -c | tr -d ' '; exit 4`)
+	if waitPhase(p, "setup", 60*time.Second) == nil {
+		t.Fatalf("no setup phase: %s", p.wait())
+	}
+	b.crash()
+	time.Sleep(time.Second)
+	b.start()
+	r := p.wait()
+	if r.code != 4 || strings.TrimSpace(string(r.stdout)) != "1000" {
+		t.Errorf("job across a target restart during setup: %s", r)
+	}
+	a.waitIdle(30 * time.Second)
+	b.waitIdle(30 * time.Second)
+}
