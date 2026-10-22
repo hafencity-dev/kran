@@ -40,7 +40,7 @@ func TestMain(m *testing.M) {
 
 type staticPeers []daemon.PeerConfig
 
-func (p staticPeers) Stamp() string                     { return "1" }
+func (p staticPeers) Stamp() string                      { return "1" }
 func (p staticPeers) Load() ([]daemon.PeerConfig, error) { return p, nil }
 
 type memDialer struct {
