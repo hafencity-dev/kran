@@ -2,7 +2,7 @@
 
 All notable changes to kran. Versions follow [semantic versioning](https://semver.org/).
 
-## Unreleased
+## 0.1.1
 
 ### Linux container runtime
 
