@@ -91,3 +91,22 @@ func TestSpoolMemoryTail(t *testing.T) {
 		}
 	}
 }
+
+// Signals and resizes for the target overtake queued input (Ctrl-C must not
+// wait behind megabytes of stdin); input keeps its own order, EOF last.
+func TestOutboxControlBeforeInput(t *testing.T) {
+	o := newOutbox()
+	o.put(proto.FrameStdin, []byte("a"))
+	o.put(proto.FrameStdin, []byte("b"))
+	o.put(proto.FrameStdinEOF, nil)
+	o.put(proto.FrameSignal, []byte(`{"name":"INT"}`))
+	o.put(proto.FrameResize, []byte(`{}`))
+	var got []string
+	for f, ok := o.next(true); ok; f, ok = o.next(true) {
+		got = append(got, f.t.String()+":"+string(f.p))
+	}
+	want := `signal:{"name":"INT"} resize:{} stdin:a stdin:b stdin_eof:`
+	if strings.Join(got, " ") != want {
+		t.Fatalf("got  %s\nwant %s", strings.Join(got, " "), want)
+	}
+}

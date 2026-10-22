@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"regexp"
 	"sort"
 	"strings"
@@ -48,6 +49,8 @@ type runner struct {
 	size    func() *proto.TTY
 	tm      timing
 	start   func(localJob) (*localProc, *localError)
+	// watcher builds `kran internal watch-parent <pgid>` (nil: the real one).
+	watcher func(pgid int) *exec.Cmd
 	probe   func(int64) bool
 	color   style
 
@@ -75,7 +78,7 @@ type runner struct {
 	noteC     <-chan time.Time
 
 	stdinCh     chan []byte
-	stdinOnce   bool
+	in          inputState
 	reconnectCh chan reconnectResult
 	reconnectOn bool
 	quit        chan struct{}
@@ -268,7 +271,13 @@ func (r *runner) localJob(env *proto.LocalEnvelope) localJob {
 
 // standalone runs the command locally with no daemon involvement.
 func (r *runner) standalone(ctx context.Context) int {
-	p, lerr := r.start(r.localJob(defaultEnvelope()))
+	job := r.localJob(defaultEnvelope())
+	// No daemon will kill the job if kran run dies: it must die with us.
+	job.Watcher = r.watcher
+	if job.Watcher == nil {
+		job.Watcher = defaultWatcher
+	}
+	p, lerr := r.start(job)
 	if lerr != nil {
 		return r.launchFailed(lerr)
 	}
@@ -383,12 +392,7 @@ func (r *runner) loop(ctx context.Context) int {
 				}
 			}
 		case b := <-r.stdinCh:
-			if b == nil {
-				r.send(proto.FrameStdinEOF, nil)
-				r.stdinCh = nil
-			} else {
-				r.send(proto.FrameStdin, b)
-			}
+			r.onInput(b)
 		case ex := <-r.localCh:
 			return r.onLocalDone(ex)
 		case <-r.noteC:
@@ -455,6 +459,10 @@ func (r *runner) onFrame(ctx context.Context, m frameMsg) (int, bool) {
 		var e proto.APIError
 		_ = json.Unmarshal(m.payload, &e)
 		return r.onErrorFrame(ctx, e)
+	case proto.FrameStdinCredit:
+		if c, err := decodeCredit(m.payload); err == nil {
+			r.onCredit(c)
+		}
 	}
 	return 0, false
 }
@@ -487,6 +495,7 @@ func (r *runner) onPhase(p proto.Phase) {
 	case proto.JobRunning:
 		r.started = true
 		r.clearNote()
+		r.pumpInput() // input is read once the command runs
 	}
 }
 
@@ -508,14 +517,7 @@ func (r *runner) onDecision(ctx context.Context, d proto.Decision) (int, bool) {
 		if !r.flags.JSONEvents {
 			r.say("%s", line)
 		}
-		r.startStdin()
-		if r.spec.TTY != nil && !r.flags.Stdin && !r.stdinOnce {
-			// The job reads its remote terminal, where nothing typed here
-			// arrives without -i: end its input instead of letting a
-			// prompt wait forever.
-			r.stdinOnce = true
-			r.send(proto.FrameStdinEOF, nil)
-		}
+		r.startInput(d)
 		return 0, false
 	}
 	// Local placement (or a fallback after a failed remote attempt).
@@ -699,38 +701,6 @@ func sigName(s os.Signal) string {
 }
 
 func sigNum(name string) int { return int(signalNames[name]) }
-
-// startStdin forwards stdin to a remote job (-i). It starts only once the job
-// is known to be remote so a local placement keeps the terminal's stdin.
-func (r *runner) startStdin() {
-	if !r.flags.Stdin || r.stdinOnce || r.stdin == nil {
-		return
-	}
-	r.stdinOnce = true
-	ch := make(chan []byte)
-	r.stdinCh = ch
-	in, quit := r.stdin, r.quit
-	go func() {
-		buf := make([]byte, 32<<10)
-		for {
-			n, err := in.Read(buf)
-			if n > 0 {
-				select {
-				case ch <- append([]byte(nil), buf[:n]...):
-				case <-quit:
-					return
-				}
-			}
-			if err != nil {
-				select {
-				case ch <- nil:
-				case <-quit:
-				}
-				return
-			}
-		}
-	}()
-}
 
 // withEnvSet applies .kran.toml env.set to a local environment, as the
 // target does for remote runs.

@@ -29,6 +29,11 @@ const (
 	FrameReattach  FrameType = 13 // client→daemon  JSON Reattach
 	FrameError     FrameType = 14 // daemon→client  JSON APIError; session ends
 	FramePhase     FrameType = 15 // daemon→client  JSON Phase (syncing/setup/running + progress)
+	// added by A: stdin flow control. kran run forwards input only below
+	// the credit's limit and keeps what the job has not consumed, so input
+	// lost on a broken connection is sent again from Resume.
+	FrameStdinCredit FrameType = 16 // daemon→client  JSON StdinCredit
+	FrameStdinResume FrameType = 17 // client→daemon  JSON StdinResume (answers a credit with Resume)
 )
 
 func (t FrameType) String() string {
@@ -63,6 +68,10 @@ func (t FrameType) String() string {
 		return "error"
 	case FramePhase:
 		return "phase"
+	case FrameStdinCredit:
+		return "stdin_credit"
+	case FrameStdinResume:
+		return "stdin_resume"
 	}
 	return fmt.Sprintf("frame(%d)", uint8(t))
 }
@@ -85,6 +94,26 @@ type Decision struct {
 	// Envelope applies to local execution by the CLI.
 	Envelope *LocalEnvelope `json:"envelope,omitempty"`
 	Estimate Estimate       `json:"estimate"`
+	// added by A: for a remote job, input may be forwarded below this offset
+	// until a FrameStdinCredit says more (0: no flow control, old daemon).
+	StdinLimit int64 `json:"stdin_limit,omitempty"`
+}
+
+// StdinCredit (added by A) tells kran run how much input it may forward.
+// Offsets count input bytes from the start of the job.
+type StdinCredit struct {
+	Consumed int64 `json:"consumed"` // the job has taken input up to here; earlier bytes may be forgotten
+	Limit    int64 `json:"limit"`    // forward input only below this offset; -1: no limit
+	// Resume asks kran run to send its input again from this offset (what
+	// came after it was lost) and to answer with FrameStdinResume.
+	Resume *int64 `json:"resume,omitempty"`
+}
+
+// StdinResume (added by A) answers a credit's Resume: input follows from
+// Offset. Lost means kran run no longer has that input.
+type StdinResume struct {
+	Offset int64 `json:"offset"`
+	Lost   bool  `json:"lost,omitempty"`
 }
 
 type LocalEnvelope struct {
@@ -136,11 +165,11 @@ type Reattach struct {
 
 // Exit codes owned by kran (SPEC §11).
 const (
-	ExitInfra       = 125
-	ExitUsage       = 2
-	ExitNotExec     = 126
-	ExitNotFound    = 127
-	ExitSignalBase  = 128
+	ExitInfra      = 125
+	ExitUsage      = 2
+	ExitNotExec    = 126
+	ExitNotFound   = 127
+	ExitSignalBase = 128
 )
 
 // ErrFrameTooLarge is returned for frames above MaxFramePayload.

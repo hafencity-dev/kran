@@ -588,6 +588,7 @@ func (t *targetSide) handleJobStart(ps *peerSession, pc *peerConn, req rawPeerRe
 	j.busy--
 	j.slotOps--
 	j.started = true
+	j.startedHere = true
 	canceled := j.canceled
 	t.persistLocked()
 	// From here watch owns the slot and the allocation, also for a job the
@@ -602,7 +603,7 @@ func (t *targetSide) handleJobStart(ps *peerSession, pc *peerConn, req rawPeerRe
 	}
 	t.d.logf("target: started job %s from %s", j.ID, j.Origin)
 	t.d.publishSelf()
-	if err := pc.respond(nil); err != nil {
+	if err := pc.respond(jobStreamInfo{StdinWindow: t.d.t.StdinQueue}); err != nil {
 		return // the origin reattaches
 	}
 	t.streamJob(pc, j, proc, 0)
@@ -646,7 +647,7 @@ func (t *targetSide) handleJobAttach(ps *peerSession, pc *peerConn, req rawPeerR
 		t.startWatchLocked(j)
 	}
 	t.mu.Unlock()
-	if err := pc.respond(nil); err != nil {
+	if err := pc.respond(jobStreamInfo{StdinWindow: t.d.t.StdinQueue}); err != nil {
 		return
 	}
 	t.streamJob(pc, j, proc, b.Offset)
@@ -819,27 +820,13 @@ func (t *targetSide) streamJob(pc *peerConn, j *tjob, proc execenv.Process, offs
 		}
 	}()
 
-	// Stdin goes through its own goroutine: a job that does not read its
-	// stdin must never block heartbeat (lease) processing.
-	stdin := newByteQueue(64 << 20)
-	defer stdin.close()
+	// Input goes to the job's queue, written by its own goroutine: a job
+	// that does not read its stdin never blocks heartbeats or signals. The
+	// origin learns from the reports how much the job took.
+	in := t.inputPump(j, proc)
 	go func() {
-		w := proc.Stdin()
-		if w == nil {
-			return
-		}
-		for {
-			b, eof, ok := stdin.pop(ctx)
-			if !ok {
-				return
-			}
-			if eof {
-				w.Close()
-				return
-			}
-			if _, err := w.Write(b); err != nil {
-				return
-			}
+		if in.sendReports(ctx, pc) != nil {
+			cancel()
 		}
 	}()
 
@@ -855,11 +842,14 @@ func (t *targetSide) streamJob(pc *peerConn, j *tjob, proc execenv.Process, offs
 				d.logf("target: renew lease of %s: %v", j.ID, err)
 			}
 		case proto.FrameStdin:
-			if !stdin.push(p) {
-				d.logf("target: job %s: stdin backlog over 64 MiB, dropping input", j.ID)
+			if !in.push(p) {
+				// Only an origin without flow control overruns the queue;
+				// never drop input silently: end it here.
+				d.logf("target: job %s: its origin sent more than %s of input ahead of the job; closing the job's input", j.ID, humanBytes(d.t.StdinQueue))
+				in.pushEOF()
 			}
 		case proto.FrameStdinEOF:
-			stdin.pushEOF()
+			in.pushEOF()
 		case proto.FrameResize:
 			var tty proto.TTY
 			if json.Unmarshal(p, &tty) == nil {
@@ -872,83 +862,6 @@ func (t *targetSide) streamJob(pc *peerConn, j *tjob, proc execenv.Process, offs
 					d.logf("target: signal %s to %s: %v", s.Name, j.ID, err)
 				}
 			}
-		}
-	}
-}
-
-// byteQueue is a bounded FIFO of byte chunks with an EOF marker.
-type byteQueue struct {
-	mu     sync.Mutex
-	chunks [][]byte
-	size   int
-	max    int
-	eof    bool
-	closed bool
-	notify chan struct{}
-}
-
-func newByteQueue(max int) *byteQueue {
-	return &byteQueue{max: max, notify: make(chan struct{}, 1)}
-}
-
-func (q *byteQueue) wake() {
-	select {
-	case q.notify <- struct{}{}:
-	default:
-	}
-}
-
-func (q *byteQueue) push(b []byte) bool {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if q.eof || q.closed || q.size+len(b) > q.max {
-		return false
-	}
-	q.chunks = append(q.chunks, append([]byte(nil), b...))
-	q.size += len(b)
-	q.wake()
-	return true
-}
-
-func (q *byteQueue) pushEOF() {
-	q.mu.Lock()
-	q.eof = true
-	q.mu.Unlock()
-	q.wake()
-}
-
-func (q *byteQueue) close() {
-	q.mu.Lock()
-	q.closed = true
-	q.mu.Unlock()
-	q.wake()
-}
-
-// pop returns the next chunk, or eof once drained; ok is false when the
-// queue was closed or ctx ended.
-func (q *byteQueue) pop(ctx context.Context) (b []byte, eof bool, ok bool) {
-	for {
-		q.mu.Lock()
-		if len(q.chunks) > 0 {
-			b = q.chunks[0]
-			q.chunks = q.chunks[1:]
-			q.size -= len(b)
-			q.mu.Unlock()
-			return b, false, true
-		}
-		if q.eof {
-			q.mu.Unlock()
-			return nil, true, true
-		}
-		if q.closed {
-			q.mu.Unlock()
-			return nil, false, false
-		}
-		q.mu.Unlock()
-		select {
-		case <-q.notify:
-		case <-ctx.Done():
-			return nil, false, false
 		}
 	}
 }

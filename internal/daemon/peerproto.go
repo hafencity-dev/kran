@@ -184,6 +184,9 @@ type peerConn struct {
 	r   *bufio.Reader
 	wmu sync.Mutex
 	buf []byte
+	// stdinWindow is what the target announced for a job stream (0: no
+	// input flow control).
+	stdinWindow int64
 }
 
 func newPeerConn(c net.Conn) *peerConn {
