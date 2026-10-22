@@ -772,3 +772,22 @@ func TestLocalReattachReportsStartedAgain(t *testing.T) {
 		t.Fatalf("%+v", st)
 	}
 }
+
+// .kran.toml env.set applies wherever the job runs (same result as remote).
+func TestLocalJobGetsEnvSet(t *testing.T) {
+	r := &runner{env: []string{"CI=0", "A=1"}, envSet: map[string]string{"CI": "1", "B": "2"}}
+	got := r.localJob(nil).Env
+	want := map[string]int{"CI=1": 1, "A=1": 1, "B=2": 1}
+	seen := map[string]int{}
+	for _, kv := range got {
+		seen[kv]++
+		if strings.HasPrefix(kv, "CI=") && kv != "CI=1" {
+			t.Fatalf("stale %s in %v", kv, got)
+		}
+	}
+	for k, n := range want {
+		if seen[k] != n {
+			t.Fatalf("env %v", got)
+		}
+	}
+}
