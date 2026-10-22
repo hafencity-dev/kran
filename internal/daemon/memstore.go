@@ -145,6 +145,11 @@ func cloneJob(j proto.Job) proto.Job {
 		t := *j.Spec.TTY
 		j.Spec.TTY = &t
 	}
+	if j.Spec.OriginEnv != nil {
+		o := *j.Spec.OriginEnv
+		o.Toolchains = cloneMap(o.Toolchains)
+		j.Spec.OriginEnv = &o
+	}
 	if j.ExitCode != nil {
 		c := *j.ExitCode
 		j.ExitCode = &c

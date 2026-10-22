@@ -278,6 +278,19 @@ type JobSpec struct {
 	SyncExclude []string  `json:"sync_exclude,omitempty"`
 	SubmittedAt time.Time `json:"submitted_at"`
 	ClientPID   int       `json:"client_pid"`
+	// OriginEnv describes the origin's user and tools so a container job
+	// can match them (SPEC §6.8). Filled by the origin daemon.
+	OriginEnv *OriginEnv `json:"origin_env,omitempty"`
+}
+
+// OriginEnv is what a container job needs to look like the origin.
+type OriginEnv struct {
+	User string `json:"user,omitempty"` // login name
+	Home string `json:"home,omitempty"` // home directory
+	TZ   string `json:"tz,omitempty"`   // IANA time zone, e.g. "Europe/Berlin"
+	// Toolchains are the origin's native versions, e.g. {"go":"1.25.3",
+	// "node":"24.8.0"}: the defaults for tools the workspace does not pin.
+	Toolchains map[string]string `json:"toolchains,omitempty"`
 }
 
 type SetupSpec struct {
