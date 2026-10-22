@@ -52,24 +52,24 @@ func (b *blobStore) has(hash string) bool {
 	return err == nil
 }
 
-// put stores one blob. It consumes exactly size bytes from r (all of r when
-// size < 0) even when the blob already exists, so a caller streaming
-// several blobs over one connection stays in sync.
+// put stores one blob. It consumes exactly size bytes from r even when the
+// blob already exists, so a caller streaming several blobs over one
+// connection stays in sync. The size comes from a peer and bounds what
+// lands on disk, so it must be known.
 func (b *blobStore) put(ctx context.Context, hash string, size int64, r io.Reader) error {
 	if err := validHash(hash); err != nil {
 		return err
 	}
-	src := r
-	if size >= 0 {
-		src = io.LimitReader(r, size)
+	if size < 0 {
+		return fmt.Errorf("blob %s: size %d", short(hash), size)
 	}
-	src = ctxReader{ctx, src}
+	var src io.Reader = ctxReader{ctx, io.LimitReader(r, size)}
 	if b.has(hash) {
 		n, err := io.Copy(io.Discard, src)
 		if err != nil {
 			return fmt.Errorf("blob %s: %w", short(hash), err)
 		}
-		if size >= 0 && n != size {
+		if n != size {
 			return fmt.Errorf("blob %s: got %d of %d bytes: %w", short(hash), n, size, io.ErrUnexpectedEOF)
 		}
 		b.touch(hash)
@@ -91,7 +91,7 @@ func (b *blobStore) put(ctx context.Context, hash string, size int64, r io.Reade
 	if err != nil {
 		return fmt.Errorf("blob %s: %w", short(hash), err)
 	}
-	if size >= 0 && n != size {
+	if n != size {
 		return fmt.Errorf("blob %s: got %d of %d bytes: %w", short(hash), n, size, io.ErrUnexpectedEOF)
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != hash {
