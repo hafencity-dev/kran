@@ -58,12 +58,22 @@ func (d *Daemon) servePeerSession(s transport.Session, remote string) {
 
 func (d *Daemon) acceptStreams(ps *peerSession) {
 	defer d.target.sessionClosed(ps.s)
+	slots := make(chan struct{}, maxPeerStreams)
 	for {
 		c, err := ps.s.Accept()
 		if err != nil {
 			return
 		}
-		go d.servePeerStream(ps, c)
+		select {
+		case slots <- struct{}{}:
+		default:
+			c.Close() // the peer holds too many streams open
+			continue
+		}
+		go func() {
+			defer func() { <-slots }()
+			d.servePeerStream(ps, c)
+		}()
 	}
 }
 
@@ -72,7 +82,7 @@ func (d *Daemon) servePeerStream(ps *peerSession, c net.Conn) {
 	pc := newPeerConn(c)
 	c.SetReadDeadline(time.Now().Add(30 * time.Second))
 	var req rawPeerRequest
-	if err := pc.readJSON(&req); err != nil {
+	if err := pc.readJSONLimit(&req, maxRequestLine); err != nil {
 		return
 	}
 	c.SetReadDeadline(time.Time{})

@@ -102,3 +102,65 @@ func TestRemoteLiveOnlyFromTheJobsNode(t *testing.T) {
 		t.Fatal("usage of a job on b accepted from c")
 	}
 }
+
+func TestPeerRequestLineBounded(t *testing.T) {
+	c := newCluster(t, "a", "b")
+	c.nodes["b"].start()
+	s, err := c.net.Dial(context.Background(), "a", "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	st, err := s.Open(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	go func() {
+		chunk := bytes.Repeat([]byte("x"), 1<<20)
+		for i := 0; i < 2*maxRequestLine>>20; i++ {
+			if _, err := st.Write(chunk); err != nil {
+				return
+			}
+		}
+	}()
+	var b [1]byte
+	if _, err := st.Read(b[:]); err == nil {
+		t.Fatal("expected the stream to be closed")
+	}
+}
+
+// Streams a peer holds open are bounded per session.
+func TestPeerStreamsBounded(t *testing.T) {
+	c := newCluster(t, "a", "b")
+	c.nodes["b"].start()
+	s := helloAs(t, c, "a", "b")
+	var open []io.Closer
+	defer func() {
+		for _, c := range open {
+			c.Close()
+		}
+	}()
+	for i := 0; i < maxPeerStreams; i++ {
+		st, err := s.Open(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		open = append(open, st)
+		st.Write([]byte(`{"method":"metrics.subscribe"}` + "\n"))
+		var resp [1]byte
+		if _, err := st.Read(resp[:]); err != nil {
+			t.Fatalf("stream %d: %v", i, err)
+		}
+	}
+	st, err := s.Open(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	st.Write([]byte(`{"method":"metrics.subscribe"}` + "\n"))
+	var resp [64]byte
+	if n, err := st.Read(resp[:]); err == nil {
+		t.Fatalf("stream beyond the limit served: %q", resp[:n])
+	}
+}
