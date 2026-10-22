@@ -113,6 +113,10 @@ func (s *supervisor) run() int {
 		return 1
 	}
 	s.lockF = f // held until the process exits
+	// The env now lives in this process only; a reattach needs none of it.
+	if err := writeJSONAtomic(filepath.Join(s.dir, fileSpec), s.spec.redacted()); err != nil {
+		s.logf("redact spec: %v", err)
+	}
 
 	signal.Ignore(syscall.SIGHUP)
 	sigs := make(chan os.Signal, 2)

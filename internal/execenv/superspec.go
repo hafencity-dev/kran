@@ -2,6 +2,7 @@ package execenv
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/hafencity-dev/kran/internal/proto"
@@ -82,3 +83,40 @@ type liveSample struct {
 }
 
 func (s *superSpec) marshal() ([]byte, error) { return json.MarshalIndent(s, "", "  ") }
+
+// redacted is the spec as it may stay on disk once the supervisor holds it
+// in memory: without the job's environment (forwarded variables, possibly
+// credentials). Nothing but the supervisor reads env, argv values of -e,
+// or the docker CLI's env from spec.json.
+func (s superSpec) redacted() superSpec {
+	s.Env = nil
+	if s.Docker != nil {
+		d := *s.Docker
+		d.Env = nil
+		d.RunArgs = redactEnvArgs(d.RunArgs)
+		d.SetupArgs = redactEnvArgs(d.SetupArgs)
+		s.Docker = &d
+	}
+	return s
+}
+
+// redactEnvArgs drops the values of -e/--env options of a docker run argv
+// built by containerSpec (options end at --workdir; the image and the job's
+// own argv follow).
+func redactEnvArgs(args []string) []string {
+	out := append([]string(nil), args...)
+	for i := 0; i < len(out); i++ {
+		a := out[i]
+		switch {
+		case a == "--workdir":
+			return out
+		case (a == "-e" || a == "--env") && i+1 < len(out):
+			i++
+			out[i], _, _ = strings.Cut(out[i], "=")
+		case strings.HasPrefix(a, "--env="):
+			k, _, _ := strings.Cut(strings.TrimPrefix(a, "--env="), "=")
+			out[i] = "--env=" + k
+		}
+	}
+	return out
+}
