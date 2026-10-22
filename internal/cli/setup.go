@@ -227,6 +227,11 @@ func (a *App) setupService(ctx context.Context, say func(string, ...any)) error 
 	if err != nil {
 		return err
 	}
+	release, err := a.handOver(ctx, m, false)
+	if err != nil {
+		return fmt.Errorf("service: %w", err)
+	}
+	defer release()
 	changed, err := m.Install(ctx)
 	if err != nil {
 		return fmt.Errorf("service: %w", err)

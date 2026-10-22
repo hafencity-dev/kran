@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/hafencity-dev/kran/internal/client"
+	"github.com/hafencity-dev/kran/internal/service"
 )
 
 // Hooks are the entry points owned by other packages. cmd/kran fills the ones
@@ -26,16 +27,18 @@ var DefaultHooks Hooks
 
 // App carries everything commands need, so tests can inject fakes.
 type App struct {
-	In     *os.File
-	Out    io.Writer
-	Err    io.Writer
-	Env    func() []string
-	Dial   func(ctx context.Context) (client.Client, error)
-	Hooks  Hooks
-	Self   func() (string, error) // path of the running kran binary
-	Args0  string
-	outTTY bool
-	errTTY bool
+	In    *os.File
+	Out   io.Writer
+	Err   io.Writer
+	Env   func() []string
+	Dial  func(ctx context.Context) (client.Client, error)
+	Hooks Hooks
+	// ServiceManager builds the service manager (nil: the real one).
+	ServiceManager func(system bool) (service.Manager, error)
+	Self           func() (string, error) // path of the running kran binary
+	Args0          string
+	outTTY         bool
+	errTTY         bool
 }
 
 // ExitError makes a command end with a specific exit code. Msg is printed on

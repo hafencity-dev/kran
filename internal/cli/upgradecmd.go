@@ -84,8 +84,16 @@ func (a *App) newUpgrader(self string, f upgradeFlags) *upgrader {
 			}
 			st, err := m.Status(ctx)
 			if err != nil || !st.Installed {
-				return nil // no service: nothing to restart
+				// No service: a daemon started on demand still runs the old
+				// binary. Stop it (once idle); the next connection starts
+				// the new one.
+				return a.stopOnDemand(ctx, force)
 			}
+			release, err := a.handOver(ctx, m, force)
+			if err != nil {
+				return err
+			}
+			defer release()
 			return m.Restart(ctx, service.RestartOptions{Force: force, Idle: a.idleCheck})
 		},
 		Peers: func() []string {

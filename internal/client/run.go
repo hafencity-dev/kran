@@ -25,9 +25,10 @@ var (
 // UpgradeProtocol is the HTTP Upgrade token of run sessions.
 const UpgradeProtocol = "kran-run/1"
 
-// Run opens a run session. The session sends heartbeats by itself; Recv
-// never returns FrameHeartbeat and fails with ErrSessionTimeout when the
-// daemon has been silent for RecvTimeout.
+// Run opens a run session. The session sends heartbeats by itself. Recv
+// returns the daemon's heartbeats too (a caller watching for silence must
+// see them: a long pre-start phase sends nothing else) and fails with
+// ErrSessionTimeout when the daemon has been silent for RecvTimeout.
 func (c *httpClient) Run(ctx context.Context) (RunSession, error) {
 	conn, err := dialUnix(ctx, c.socket)
 	if err != nil {
@@ -182,9 +183,6 @@ func (s *runSession) Recv() (proto.FrameType, []byte, error) {
 		}
 		if cap(p) > cap(s.buf) {
 			s.buf = p[:0]
-		}
-		if t == proto.FrameHeartbeat {
-			continue
 		}
 		return t, p, nil
 	}

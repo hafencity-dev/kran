@@ -207,7 +207,7 @@ func TestStateChecks(t *testing.T) {
 		Info:    proto.NodeInfo{Name: "devmac", DiskTotal: 1 << 40},
 		Status:  proto.NodeOnline,
 		Metrics: proto.NodeMetrics{Time: now.Add(-42 * time.Second), DiskFree: 8 << 30},
-		Link:    proto.LinkInfo{BandwidthBps: 2 << 20},
+		Link:    proto.LinkInfo{BandwidthBps: 2 << 20, ClockOffsetMillis: -42000, ClockRTTMillis: 4},
 	}}}}
 	c.o.Now = func() time.Time { return now }
 	c.stateChecks("devmac")
@@ -220,6 +220,35 @@ func TestStateChecks(t *testing.T) {
 	c.stateChecks("devmac")
 	if r := find(c.results, "peer.status"); r == nil || !strings.Contains(r.Detail, "ssh timeout") {
 		t.Fatalf("%+v", c.results)
+	}
+}
+
+// The clock check uses the daemon's offset measurement over the live link
+// (midpoint of a request, the fastest of several), not the age of the last
+// metrics sample, which lags by seconds: devmac and gx10 agreed within 1 s
+// while doctor warned about 6 s.
+func TestClockSkewFromLinkMeasurement(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name string
+		link proto.LinkInfo
+		warn bool
+	}{
+		{"stale metrics, no measurement", proto.LinkInfo{}, false},
+		{"in sync", proto.LinkInfo{ClockOffsetMillis: 300, ClockRTTMillis: 5}, false},
+		{"6 s off", proto.LinkInfo{ClockOffsetMillis: 6000, ClockRTTMillis: 5}, true},
+		{"6 s off but the measurement is too coarse", proto.LinkInfo{ClockOffsetMillis: 6000, ClockRTTMillis: 3000}, false},
+	} {
+		o := baseOpts(t)
+		c := &checker{o: o, state: &proto.State{Nodes: []proto.NodeState{{
+			Info: proto.NodeInfo{Name: "devmac"}, Status: proto.NodeOnline,
+			Metrics: proto.NodeMetrics{Time: now.Add(-6 * time.Second)}, Link: tc.link,
+		}}}}
+		c.o.Now = func() time.Time { return now }
+		c.stateChecks("devmac")
+		if got := find(c.results, "clock") != nil; got != tc.warn {
+			t.Errorf("%s: warned %v, want %v (%+v)", tc.name, got, tc.warn, c.results)
+		}
 	}
 }
 

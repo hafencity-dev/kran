@@ -315,7 +315,11 @@ func TestRunSession(t *testing.T) {
 	if err := rs.SendJSON(proto.FrameSubmit, proto.JobSpec{ID: "abc"}); err != nil {
 		t.Fatal(err)
 	}
+	// Heartbeats come through: they show the daemon is alive.
 	ty, p, err := rs.Recv()
+	for err == nil && ty == proto.FrameHeartbeat {
+		ty, p, err = rs.Recv()
+	}
 	if err != nil || ty != proto.FrameSubmit {
 		t.Fatalf("recv %v %v", ty, err)
 	}
@@ -324,8 +328,15 @@ func TestRunSession(t *testing.T) {
 		t.Fatalf("payload %s", p)
 	}
 	rs.SendJSON(proto.FrameSignal, proto.Signal{Name: "INT"})
-	if _, _, err := rs.Recv(); !errors.Is(err, ErrSessionTimeout) {
-		t.Fatalf("err = %v, want ErrSessionTimeout", err)
+	for {
+		ty, _, err := rs.Recv()
+		if err == nil && ty == proto.FrameHeartbeat {
+			continue
+		}
+		if !errors.Is(err, ErrSessionTimeout) {
+			t.Fatalf("err = %v, want ErrSessionTimeout", err)
+		}
+		break
 	}
 }
 

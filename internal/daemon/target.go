@@ -544,3 +544,17 @@ func (t *targetSide) inputPump(j *tjob, proc execenv.Process) *stdinPump {
 	})
 	return q
 }
+
+// reservations counts admitted jobs that have not started yet (they would
+// not survive a daemon restart).
+func (t *targetSide) reservations() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	n := 0
+	for _, j := range t.jobs {
+		if !j.started && !j.ended {
+			n++
+		}
+	}
+	return n
+}

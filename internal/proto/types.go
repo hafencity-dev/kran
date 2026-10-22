@@ -149,6 +149,11 @@ type LinkInfo struct {
 	// BandwidthBps is the EWMA of measured upload throughput to this node.
 	BandwidthBps float64 `json:"bandwidth_bps,omitempty"`
 	Connected    bool    `json:"connected"`
+	// added by A: the node's clock minus this node's, measured over the
+	// link (midpoint of a request, fastest of several samples); the error is
+	// at most ClockRTTMillis/2. ClockRTTMillis is 0 when not measured.
+	ClockOffsetMillis float64 `json:"clock_offset_ms,omitempty"`
+	ClockRTTMillis    float64 `json:"clock_rtt_ms,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -388,6 +393,17 @@ type VersionInfo struct {
 	BuildDate string `json:"build_date"`
 	API       string `json:"api"`
 	Protocol  string `json:"protocol"` // "1.0"
+}
+
+// DaemonInfo (added by A) says which process serves the local API, so
+// `kran service` can tell a daemon its service manager runs from one started
+// on demand that must hand over (GET /api/v1/daemon).
+type DaemonInfo struct {
+	PID int `json:"pid"`
+	// Supervisor is the service manager that started it ("systemd",
+	// "launchd"), "" when started on demand or by hand.
+	Supervisor string    `json:"supervisor,omitempty"`
+	StartedAt  time.Time `json:"started_at"`
 }
 
 // APIError is the JSON body of every non-2xx API response.
