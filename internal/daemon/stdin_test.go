@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -189,5 +190,42 @@ func TestRemoteStdinTargetRestartClosesInputLoudly(t *testing.T) {
 	}
 	if len(res.out()) < len(input)+4 && !warned {
 		t.Fatalf("input was cut (%d of %d bytes) without a warning; notices %+v", len(res.out())-4, len(input), res.notices)
+	}
+}
+
+// Two Resume requests can be outstanding (kran run reattached while the
+// target stream was renewed): the answer to the older one must not count
+// as "kran run lost the input".
+func TestStaleResumeAnswerIsIgnored(t *testing.T) {
+	n := newCluster(t, "a").nodes["a"]
+	d, err := New(Deps{Config: n.cfg, Dirs: n.dirs, Store: n.store, Sched: newFakeSched("a", alwaysLocal), Est: n.est,
+		Prober: n.prober, Timing: n.timing, Logf: n.log.logf("a")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp, err := openSpool(filepath.Join(t.TempDir(), "spool"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sp.close()
+	e := d.jobs.newEntry(proto.Job{Spec: proto.JobSpec{ID: "0000000001", Stdin: true}}, sp)
+	e.stdinLimit()
+	e.targetStream(1 << 20)
+	e.cliInput(proto.FrameStdin, make([]byte, 100))
+	e.cliReattached()                                                               // asks kran run for input from 100
+	e.targetReport(stdinReport{Received: 60, Consumed: 50, Known: true}, true, "b") // and then from 60
+	e.cliResume(proto.StdinResume{Offset: 100})                                     // the answer to the first request
+	e.in.mu.Lock()
+	closed, waiting := e.in.closed, e.in.awaitResume
+	e.in.mu.Unlock()
+	if closed || !waiting {
+		t.Fatalf("closed %v, waiting %v after a stale answer", closed, waiting)
+	}
+	e.cliResume(proto.StdinResume{Offset: 60})
+	e.cliInput(proto.FrameStdin, make([]byte, 10))
+	e.in.mu.Lock()
+	defer e.in.mu.Unlock()
+	if e.in.closed || e.in.awaitResume || e.in.next != 70 {
+		t.Fatalf("closed %v waiting %v next %d", e.in.closed, e.in.awaitResume, e.in.next)
 	}
 }

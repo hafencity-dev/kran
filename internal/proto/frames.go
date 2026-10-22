@@ -109,10 +109,11 @@ type StdinCredit struct {
 	Resume *int64 `json:"resume,omitempty"`
 }
 
-// StdinResume (added by A): input follows from Offset. An Offset other than
-// the requested one means kran run no longer has that input.
+// StdinResume (added by A) answers a credit's Resume: input follows from
+// Offset. Lost means kran run no longer has that input.
 type StdinResume struct {
 	Offset int64 `json:"offset"`
+	Lost   bool  `json:"lost,omitempty"`
 }
 
 type LocalEnvelope struct {

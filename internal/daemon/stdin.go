@@ -118,12 +118,17 @@ func (e *jobEntry) cliResume(r proto.StdinResume) {
 	if !f.awaitResume {
 		return
 	}
-	f.awaitResume = false
-	if r.Offset == f.resumeAt {
+	if r.Lost {
+		// kran run no longer has the input the target is missing.
+		f.awaitResume = false
+		e.closeInputLocked("kran run could not send the job's input again after a lost connection")
 		return
 	}
-	// kran run no longer has the input the target is missing.
-	e.closeInputLocked("kran run could not send the job's input again after a lost connection")
+	if r.Offset == f.resumeAt {
+		f.awaitResume = false
+	}
+	// Otherwise it answers an older request; the answer to the latest
+	// one follows.
 }
 
 // closeInputLocked ends the job's input after a loss, loudly.

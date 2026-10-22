@@ -114,7 +114,7 @@ func (r *runner) onCredit(c proto.StdinCredit) {
 			// The input the job is missing is gone from here too. The
 			// daemon closes the job's input and says so.
 			in.gone = true
-			r.sendJSON(proto.FrameStdinResume, proto.StdinResume{Offset: in.base})
+			r.sendJSON(proto.FrameStdinResume, proto.StdinResume{Offset: in.base, Lost: true})
 			return
 		}
 		in.sent, in.eofSent = at, false

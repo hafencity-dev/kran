@@ -96,3 +96,30 @@ func TestStdinUntouchedUntilRemoteStart(t *testing.T) {
 		t.Fatalf("the local child got %q", out)
 	}
 }
+
+// Input the job consumed is forgotten; a Resume before it is answered as
+// lost (the daemon then closes the job's input and says so).
+func TestStdinResumeOfForgottenInputIsLost(t *testing.T) {
+	pr, pw, _ := os.Pipe()
+	defer pw.Close()
+	s := newFakeSession()
+	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s}}, "cat")
+	h.r.flags.Stdin = true
+	h.r.stdin = pr
+	go func() {
+		s.push(proto.FrameDecision, proto.Decision{JobID: "j", Mode: "remote", Node: "n", StdinLimit: 100})
+		s.push(proto.FramePhase, proto.Phase{State: proto.JobRunning})
+		pw.Write([]byte("0123456789"))
+		waitFor(t, func() bool { got, _, _ := sentInput(s); return got == "0123456789" })
+		s.push(proto.FrameStdinCredit, proto.StdinCredit{Consumed: 8, Limit: 108, Resume: ptr(5)})
+		waitFor(t, func() bool { return s.count(proto.FrameStdinResume) == 1 })
+		s.push(proto.FrameExit, proto.Exit{JobID: "j", Code: 0, State: proto.JobSucceeded})
+	}()
+	h.run(t)
+	f, _ := s.find(proto.FrameStdinResume)
+	var r proto.StdinResume
+	json.Unmarshal(f.payload, &r)
+	if !r.Lost {
+		t.Fatalf("%+v", r)
+	}
+}
