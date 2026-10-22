@@ -291,6 +291,13 @@ full swap)".
 Tie-break: origin first, then lowest load. Jobs with estimated duration under
 5 s or sync cost greater than estimated savings stay local.
 
+A job's record keeps the placement rationale in `place_reason`. Its
+`reason` is the wait reason while queued, may name the transient phase
+while syncing, in setup or reconnecting, and returns to the placement
+rationale once the command runs; a finished job's `reason` is why it
+failed when kran knows (infra error, memory cap, cancel), else the
+placement rationale (`kran jobs --why`).
+
 Queue: per-owner FIFO, owners served round-robin (weighted by priority:
 high 4, normal 2, low 1). Interactive (tty) jobs default to `high`. Every
 queued job carries a live `reason`. No job waits behind a job that cannot be

@@ -314,25 +314,32 @@ type Usage struct {
 
 // Job is the daemon's view of a job (live and history).
 type Job struct {
-	Spec        JobSpec     `json:"spec"`
-	State       JobState    `json:"state"`
-	Node        string      `json:"node,omitempty"` // target node name once placed
-	Runtime     RuntimeKind `json:"runtime,omitempty"`
-	Local       bool        `json:"local"`            // ran on origin
-	Fallback    bool        `json:"fallback"`         // ran locally after a remote failure
-	Reason      string      `json:"reason,omitempty"` // why queued / why it failed / placement rationale
-	Estimate    Estimate    `json:"estimate"`
-	Alloc       Resources   `json:"alloc"`
-	Usage       Usage       `json:"usage"`
-	Live        *Resources  `json:"live,omitempty"` // current cpu/mem while running
-	ExitCode    *int        `json:"exit_code,omitempty"`
-	Signal      string      `json:"signal,omitempty"`
-	Fingerprint string      `json:"fingerprint"`
-	QueuedAt    time.Time   `json:"queued_at"`
-	StartedAt   time.Time   `json:"started_at,omitempty"`
-	EndedAt     time.Time   `json:"ended_at,omitempty"`
-	Origin      string      `json:"origin"` // origin node name
-	QueuePos    int         `json:"queue_pos,omitempty"`
+	Spec     JobSpec     `json:"spec"`
+	State    JobState    `json:"state"`
+	Node     string      `json:"node,omitempty"` // target node name once placed
+	Runtime  RuntimeKind `json:"runtime,omitempty"`
+	Local    bool        `json:"local"`    // ran on origin
+	Fallback bool        `json:"fallback"` // ran locally after a remote failure
+	// Reason is why the job waits (queued), what it is doing when that
+	// says more (syncing, setup, reconnecting), and once it ended: why it
+	// failed (infra error, memory cap, canceled) or else why it ran where
+	// it ran (PlaceReason).
+	Reason string `json:"reason,omitempty"`
+	// PlaceReason is the scheduler's rationale for the placement ("devmac:
+	// 12 CPUs free, est. 1m vs 3m here"); set once placed, kept for good.
+	PlaceReason string     `json:"place_reason,omitempty"`
+	Estimate    Estimate   `json:"estimate"`
+	Alloc       Resources  `json:"alloc"`
+	Usage       Usage      `json:"usage"`
+	Live        *Resources `json:"live,omitempty"` // current cpu/mem while running
+	ExitCode    *int       `json:"exit_code,omitempty"`
+	Signal      string     `json:"signal,omitempty"`
+	Fingerprint string     `json:"fingerprint"`
+	QueuedAt    time.Time  `json:"queued_at"`
+	StartedAt   time.Time  `json:"started_at,omitempty"`
+	EndedAt     time.Time  `json:"ended_at,omitempty"`
+	Origin      string     `json:"origin"` // origin node name
+	QueuePos    int        `json:"queue_pos,omitempty"`
 	// when the job was placed, when the user's
 	// command started (same as StartedAt), and the last phase report
 	// (sync/setup progress) while it is not running yet.

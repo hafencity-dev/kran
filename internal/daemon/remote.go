@@ -244,7 +244,7 @@ func (d *Daemon) followRemote(ctx context.Context, e *jobEntry, p scheduler.Plac
 				e.finish(proto.Exit{Code: proto.ExitInfra, State: state, Node: node, Reason: err.Error()})
 				return nil
 			}
-			e.update(func(j *proto.Job) { j.Reason = "" })
+			e.update(func(j *proto.Job) { j.Reason = j.PlaceReason }) // reconnected
 		}
 		res := d.pumpJob(ctx, e, node, pc, &lastContact)
 		pc.Close()
