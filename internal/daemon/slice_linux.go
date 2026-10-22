@@ -27,7 +27,7 @@ import (
 type systemdSlice struct {
 	reserve int64
 	logf    func(string, ...any)
-	name string // "" = SliceName
+	name    string // "" = SliceName
 	// injectable for tests
 	run      func(ctx context.Context, args ...string) (string, error)
 	meminfo  func() (total, avail int64, err error)
