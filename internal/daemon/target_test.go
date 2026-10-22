@@ -2,6 +2,9 @@ package daemon
 
 import (
 	"context"
+	"errors"
+	"net"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -89,4 +92,55 @@ func TestEndedBeforeStartFallsBack(t *testing.T) {
 		t.Fatalf("decisions %+v", res.decisions)
 	}
 	waitFor(t, 3*time.Second, "slot released on b", func() bool { return b.exec.heldSlots() == 0 })
+}
+
+// failingWrites is a stream whose writes fail while reads keep working
+// (one direction of a dying connection breaks first).
+type failingWrites struct{ netConn }
+
+func (failingWrites) Write([]byte) (int, error) { return 0, errors.New("write broke") }
+
+// pumpJob must not return while its reader can still append output: the
+// caller reattaches at spool.outputBytes(), and output appended after that
+// point would be delivered twice.
+func TestPumpJobStopsReadingBeforeReturning(t *testing.T) {
+	n := newCluster(t, "a").nodes["a"]
+	d, err := New(Deps{Config: n.cfg, Dirs: n.dirs, Store: n.store, Sched: newFakeSched("a", alwaysLocal), Est: n.est,
+		Prober: n.prober, Timing: n.timing, Logf: n.log.logf("a")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp, err := openSpool(filepath.Join(t.TempDir(), "spool"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sp.close()
+	e := d.jobs.newEntry(proto.Job{Spec: proto.JobSpec{ID: "0000000001"}}, sp)
+	originSide, targetSide := net.Pipe()
+	defer targetSide.Close()
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if proto.WriteFrame(targetSide, proto.FrameStdout, []byte("0123456789")) != nil {
+				return
+			}
+		}
+	}()
+	pc := newPeerConn(failingWrites{originSide})
+	last := d.now()
+	res := d.pumpJob(context.Background(), e, "b", pc, &last)
+	if res.err == nil {
+		t.Fatalf("pump ended without the write error: %+v", res)
+	}
+	at := sp.outputBytes()
+	time.Sleep(100 * time.Millisecond)
+	if after := sp.outputBytes(); after != at {
+		t.Fatalf("output kept arriving after pumpJob returned: %d → %d bytes", at, after)
+	}
 }

@@ -326,9 +326,11 @@ func (d *Daemon) pumpJob(ctx context.Context, e *jobEntry, node string, pc *peer
 	defer cancel()
 	results := make(chan pumpResult, 2)
 	silent := make(chan struct{})
+	readerDone := make(chan struct{})
 
 	// Target → origin.
 	go func() {
+		defer close(readerDone)
 		for {
 			pc.SetReadDeadline(time.Now().Add(d.t.StreamSilence))
 			t, p, err := pc.readFrame()
@@ -426,6 +428,10 @@ func (d *Daemon) pumpJob(ctx context.Context, e *jobEntry, node string, pc *peer
 	case <-ctx.Done():
 		res = pumpResult{err: ctx.Err()}
 	}
+	// The caller reattaches at the spool's output offset: nothing may be
+	// appended from this stream once we return.
+	pc.Close()
+	<-readerDone
 	select {
 	case <-silent:
 		// Silence on a stream means the session is most likely half-open;
