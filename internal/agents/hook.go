@@ -24,7 +24,8 @@ type hookSpecific struct {
 	UpdatedInput map[string]json.RawMessage `json:"updatedInput"`
 	// No permissionDecision on purpose: kran must not approve commands on the
 	// user's behalf. The user's normal permission flow still applies, now
-	// evaluated against the wrapped command.
+	// evaluated against the wrapped command. Verified with claude 2.1.308
+	// (`claude -p --settings`): updatedInput is applied without a decision.
 	AdditionalContext string `json:"additionalContext,omitempty"`
 }
 
