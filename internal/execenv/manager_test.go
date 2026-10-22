@@ -199,6 +199,11 @@ func (te *testEnv) start(ref proto.SlotRef, argv []string, opts ...jobOpt) Proce
 	if err != nil {
 		te.t.Fatal(err)
 	}
+	// After a setup the command waits for a heartbeat; renew like the
+	// daemon does (lease tests use plain jobs or opt out).
+	if req.Spec.Setup != nil && req.Spec.Labels["test.noheartbeat"] == "" {
+		heartbeat(te.t, p)
+	}
 	return p
 }
 
@@ -661,6 +666,30 @@ func TestSetupStep(t *testing.T) {
 	st := te.m.setupFor(&StartRequest{Spec: proto.JobSpec{Argv: []string{"go", "test"}}}, sl, "")
 	if st == nil || st.Run != "go mod download" {
 		t.Fatalf("auto setup %+v", st)
+	}
+}
+
+// TestSetupWaitsForHeartbeat: when no heartbeat arrives after the setup
+// (the origin gave up, our daemon died, the link is cut), the command never
+// starts: the origin may already run the job elsewhere.
+func TestSetupWaitsForHeartbeat(t *testing.T) {
+	te := newTestEnv(t)
+	ref := te.slot(testRepo, map[string]string{"lock": "v1"}, proto.RuntimeNative)
+	marker := filepath.Join(t.TempDir(), "ran")
+	p := te.start(ref, sh("echo ran > "+marker), withSetup("sleep 0.3", "lock"),
+		func(r *StartRequest) { r.Spec.Labels = map[string]string{"test.noheartbeat": "1"} })
+	exit := waitExit(t, p, 20*time.Second)
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("the command ran without a heartbeat after setup")
+	}
+	if exit.State != proto.JobLost || !exit.BeforeStart || exit.Code != proto.ExitInfra {
+		t.Fatalf("exit %+v", exit)
+	}
+	// With heartbeats it runs (TestSetupStep covers the rest).
+	te.commit(ref, testRepo, map[string]string{"lock": "v2"})
+	p = te.start(ref, sh("echo ran > "+marker), withSetup("sleep 0.3", "lock"))
+	if exit := waitExit(t, p, 20*time.Second); exit.State != proto.JobSucceeded {
+		t.Fatalf("with heartbeats: %+v", exit)
 	}
 }
 

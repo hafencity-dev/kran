@@ -176,6 +176,17 @@ func (s *supervisor) run() int {
 			}
 		}
 		s.resetPeak()
+		// The origin may have given up on the job while the setup ran (its
+		// daemon or ours died, the link was cut) and may run it elsewhere
+		// now. Start the command only after a heartbeat newer than the
+		// setup; without one the lease expires and the job ends before
+		// its command ran, so it never runs twice.
+		if !s.awaitRenewal(time.Now()) {
+			exit = s.setupExit(stepResult{code: proto.ExitSignalBase + int(syscall.SIGTERM)})
+			exit.Usage = usage
+			s.writeStatus(exit)
+			return 0
+		}
 	}
 	t0 := time.Now()
 	res := s.runStep(false)
@@ -603,6 +614,19 @@ func waitUntil(cond func() bool, d time.Duration) bool {
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
+}
+
+// awaitRenewal waits until the lease is renewed after `after`; false when
+// the job was stopped first (lease expired or canceled).
+func (s *supervisor) awaitRenewal(after time.Time) bool {
+	path := filepath.Join(s.dir, fileLease)
+	for s.reason() == "" {
+		if fi, err := os.Stat(path); err == nil && fi.ModTime().After(after) {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
 }
 
 // watchLease ends the job when the daemon stopped renewing the lease
