@@ -1,20 +1,16 @@
 package daemon
 
-// Minimal readers for config.toml and peers.toml (SPEC §5). Package E owns
-// internal/config; until it lands this file keeps the daemon independent.
-// Swap: replace loadNodeConfig / filePeerSource with adapters over
-// internal/config — the rest of the daemon only sees NodeConfig, PeerConfig
-// and PeerSource.
+// Adapters over internal/config (owner E): the daemon only sees NodeConfig,
+// PeerConfig and PeerSource, so tests can feed them directly.
 
 import (
-	"errors"
 	"fmt"
 	"os"
-	"strconv"
+	"path/filepath"
 	"strings"
 	"time"
 
-	toml "github.com/pelletier/go-toml/v2"
+	"github.com/hafencity-dev/kran/internal/config"
 )
 
 // NodeConfig is this node's config.toml with defaults applied.
@@ -50,135 +46,36 @@ func defaultNodeConfig() NodeConfig {
 	}
 }
 
-func defaultNodeName() string {
-	h, err := os.Hostname()
-	if err != nil || h == "" {
-		return "node"
-	}
-	if i := strings.IndexByte(h, '.'); i > 0 {
-		h = h[:i]
-	}
-	return strings.ToLower(h)
-}
+func defaultNodeName() string { return config.DefaultName() }
 
-type rawConfig struct {
-	Name   *string `toml:"name"`
-	ID     *string `toml:"id"`
-	Accept struct {
-		Enabled     *bool    `toml:"enabled"`
-		ReserveCPUs *float64 `toml:"reserve_cpus"`
-		ReserveMem  any      `toml:"reserve_mem"`
-		MaxJobs     *int     `toml:"max_jobs"`
-		Nice        *int     `toml:"nice"`
-	} `toml:"accept"`
-	Submit struct {
-		Prefer *string `toml:"prefer"`
-	} `toml:"submit"`
-	UI struct {
-		Listen *string `toml:"listen"`
-	} `toml:"ui"`
-	Runtime struct {
-		Container struct {
-			Enabled any `toml:"enabled"`
-		} `toml:"container"`
-	} `toml:"runtime"`
-}
-
-// loadNodeConfig reads config.toml; a missing file yields the defaults.
-func loadNodeConfig(path string) (NodeConfig, error) {
-	cfg := defaultNodeConfig()
-	b, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return cfg, nil
-	}
+// loadNodeConfig reads config.toml (missing file = defaults) and the node
+// ID from <config dir>/node_id.
+func loadNodeConfig(dir string) (NodeConfig, error) {
+	c, err := config.Load(filepath.Join(dir, "config.toml"))
 	if err != nil {
-		return cfg, fmt.Errorf("read %s: %w", path, err)
+		return defaultNodeConfig(), err
 	}
-	var raw rawConfig
-	if err := toml.Unmarshal(b, &raw); err != nil {
-		return cfg, fmt.Errorf("parse %s: %w (fix it or remove it to use the defaults)", path, err)
+	nc := NodeConfig{
+		Name: c.Name,
+		Accept: AcceptConfig{
+			Enabled:     c.Accept.Enabled,
+			ReserveCPUs: float64(c.Accept.ReserveCPUs),
+			ReserveMem:  c.ReserveMemBytes(),
+			MaxJobs:     c.Accept.MaxJobs,
+			Nice:        c.Accept.Nice,
+		},
+		Prefer:           c.Submit.Prefer,
+		UIListen:         c.UI.Listen,
+		ContainerEnabled: c.Runtime.Container.Enabled,
 	}
-	if raw.Name != nil && strings.TrimSpace(*raw.Name) != "" {
-		cfg.Name = strings.TrimSpace(*raw.Name)
+	if b, err := os.ReadFile(filepath.Join(dir, "node_id")); err == nil {
+		nc.ID = strings.TrimSpace(string(b))
 	}
-	if raw.ID != nil {
-		cfg.ID = strings.TrimSpace(*raw.ID)
-	}
-	a := raw.Accept
-	if a.Enabled != nil {
-		cfg.Accept.Enabled = *a.Enabled
-	}
-	if a.ReserveCPUs != nil {
-		cfg.Accept.ReserveCPUs = *a.ReserveCPUs
-	}
-	if a.ReserveMem != nil {
-		n, err := parseSize(a.ReserveMem)
-		if err != nil {
-			return cfg, fmt.Errorf("%s: accept.reserve_mem: %w", path, err)
-		}
-		cfg.Accept.ReserveMem = n
-	}
-	if a.MaxJobs != nil {
-		cfg.Accept.MaxJobs = *a.MaxJobs
-	}
-	if a.Nice != nil {
-		cfg.Accept.Nice = *a.Nice
-	}
-	if raw.Submit.Prefer != nil {
-		cfg.Prefer = *raw.Submit.Prefer
-	}
-	if raw.UI.Listen != nil {
-		cfg.UIListen = strings.TrimSpace(*raw.UI.Listen)
-	}
-	switch v := raw.Runtime.Container.Enabled.(type) {
-	case bool:
-		cfg.ContainerEnabled = strconv.FormatBool(v)
-	case string:
-		cfg.ContainerEnabled = v
-	}
-	return cfg, nil
+	return nc, nil
 }
 
-// parseSize accepts integers (bytes) and strings like "8GiB", "512M", "2g".
-func parseSize(v any) (int64, error) {
-	switch x := v.(type) {
-	case int64:
-		return x, nil
-	case float64:
-		return int64(x), nil
-	case string:
-		return ParseSize(x)
-	}
-	return 0, fmt.Errorf("unsupported size %v", v)
-}
-
-// ParseSize parses "8GiB", "8G", "8gb", "512MiB", "1024" (bytes).
-func ParseSize(s string) (int64, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return 0, errors.New("empty size")
-	}
-	i := len(s)
-	for i > 0 && (s[i-1] < '0' || s[i-1] > '9') {
-		i--
-	}
-	num, unit := strings.TrimSpace(s[:i]), strings.ToLower(strings.TrimSpace(s[i:]))
-	f, err := strconv.ParseFloat(num, 64)
-	if err != nil || f < 0 {
-		return 0, fmt.Errorf("invalid size %q", s)
-	}
-	mult := map[string]float64{
-		"": 1, "b": 1,
-		"k": 1 << 10, "kb": 1 << 10, "kib": 1 << 10,
-		"m": 1 << 20, "mb": 1 << 20, "mib": 1 << 20,
-		"g": 1 << 30, "gb": 1 << 30, "gib": 1 << 30,
-		"t": 1 << 40, "tb": 1 << 40, "tib": 1 << 40,
-	}[unit]
-	if mult == 0 {
-		return 0, fmt.Errorf("invalid size unit in %q (use e.g. 8GiB)", s)
-	}
-	return int64(f * mult), nil
-}
+// ParseSize parses "8GiB", "512MiB", … (config.ParseSize).
+func ParseSize(s string) (int64, error) { return config.ParseSize(s) }
 
 // PeerConfig is one [[peer]] of peers.toml.
 type PeerConfig struct {
@@ -190,6 +87,8 @@ type PeerConfig struct {
 	KranPath  string    `toml:"kran_path"`
 	Direction string    `toml:"direction"` // both | outbound | inbound
 	LinkedAt  time.Time `toml:"linked_at"`
+	// PreferredAddress won the last address race; tried first.
+	PreferredAddress string `toml:"preferred_address"`
 }
 
 func (p PeerConfig) dials() bool { return p.Direction != "inbound" }
@@ -217,34 +116,33 @@ func (f filePeerSource) Stamp() string {
 }
 
 func (f filePeerSource) Load() ([]PeerConfig, error) {
-	b, err := os.ReadFile(f.path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
+	ps, err := config.LoadPeers(f.path)
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", f.path, err)
+		return nil, err
 	}
-	return parsePeers(b)
-}
-
-func parsePeers(b []byte) ([]PeerConfig, error) {
-	var doc struct {
-		Peer []PeerConfig `toml:"peer"`
-	}
-	if err := toml.Unmarshal(b, &doc); err != nil {
-		return nil, fmt.Errorf("parse peers.toml: %w (re-link the node: kran link <host>)", err)
-	}
+	var out []PeerConfig
 	seen := map[string]bool{}
-	out := doc.Peer[:0]
-	for _, p := range doc.Peer {
+	for _, p := range ps.Peer {
 		if p.Name == "" || seen[p.Name] {
 			continue
 		}
 		seen[p.Name] = true
-		if p.Direction == "" {
-			p.Direction = "both"
+		dir := p.Direction
+		if dir == "" {
+			dir = "both"
 		}
-		out = append(out, p)
+		out = append(out, PeerConfig{Name: p.Name, ID: p.ID, Addresses: p.Addresses, User: p.User, HostKey: p.HostKey,
+			KranPath: p.KranPath, Direction: dir, LinkedAt: p.LinkedAt, PreferredAddress: p.PreferredAddress})
 	}
 	return out, nil
+}
+
+// savePreferred records the address that won the race in peers.toml.
+func (f filePeerSource) savePreferred(name, addr string) error {
+	return config.UpdatePeers(f.path, func(ps *config.Peers) error {
+		if p, ok := ps.Find(name); ok {
+			p.PreferredAddress = addr
+		}
+		return nil
+	})
 }

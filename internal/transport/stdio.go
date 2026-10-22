@@ -16,7 +16,12 @@ import (
 )
 
 func serveStdio(ctx context.Context) int {
-	return Bridge(ctx, os.Stdin, os.Stdout, os.Stderr, paths.PeerSocket())
+	sock := paths.PeerSocket()
+	if err := autostart(ctx, sock); err != nil {
+		fmt.Fprintf(os.Stderr, "kran: the kran daemon on this machine is not running and could not be started: %v (start it: kran service start)\n", err)
+		return ExitDaemonDown
+	}
+	return Bridge(ctx, os.Stdin, os.Stdout, os.Stderr, sock)
 }
 
 // Bridge connects in/out (the SSH channel of the forced command) to the

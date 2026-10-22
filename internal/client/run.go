@@ -19,7 +19,7 @@ import (
 // RecvTimeout means it is wedged or gone.
 var (
 	HeartbeatInterval = 2 * time.Second
-	RecvTimeout       = 15 * time.Second
+	RecvTimeout       = 10 * time.Second
 )
 
 // UpgradeProtocol is the HTTP Upgrade token of run sessions.

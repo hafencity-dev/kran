@@ -48,7 +48,7 @@ func run(ctx context.Context, opts Options) error {
 	}
 	defer rot.Close()
 	lg := &logger{now: time.Now, out: []io.Writer{rot}}
-	if term.IsTerminal(int(os.Stderr.Fd())) {
+	if opts.Logf == nil && term.IsTerminal(int(os.Stderr.Fd())) {
 		lg.out = append(lg.out, os.Stderr)
 	}
 	logf := lg.Logf
@@ -60,7 +60,7 @@ func run(ctx context.Context, opts Options) error {
 		}
 	}
 
-	cfg, err := loadNodeConfig(filepath.Join(dirs.Config, "config.toml"))
+	cfg, err := loadNodeConfig(dirs.Config)
 	if err != nil {
 		logf("config: %v", err)
 		return err
@@ -101,11 +101,12 @@ func run(ctx context.Context, opts Options) error {
 		scanner = s
 		defer s.Close()
 	}
+	peerSrc := filePeerSource{path: filepath.Join(dirs.Config, "peers.toml")}
 	var dialer PeerDialer
 	if d, err := transport.NewDialer(filepath.Join(dirs.Config, "id_ed25519"), transport.SessionConfig{Logf: logf}); err != nil {
 		logf("peers: %v; not connecting to other nodes", err)
 	} else {
-		dialer = sshDialer{d}
+		dialer = sshDialer{d: d, save: peerSrc.savePreferred, logf: logf}
 	}
 
 	pctx, pcancel := context.WithCancel(context.Background())
@@ -125,7 +126,7 @@ func run(ctx context.Context, opts Options) error {
 		Prober:  prober,
 		Exec:    ex,
 		Scanner: scanner,
-		Peers:   filePeerSource{path: filepath.Join(dirs.Config, "peers.toml")},
+		Peers:   peerSrc,
 		Dialer:  dialer,
 		UI:      nil, // lead: ui.Handler() once internal/ui lands
 		Slice:   newSliceController(cfg.Accept.ReserveMem, logf),
@@ -138,9 +139,40 @@ func run(ctx context.Context, opts Options) error {
 	return d.Run(ctx)
 }
 
-// sshDialer adapts transport.Dialer to PeerDialer.
-type sshDialer struct{ d *transport.Dialer }
+// sshDialer adapts transport.Dialer to PeerDialer: the preferred address
+// goes first, and a different winner is written back to peers.toml.
+type sshDialer struct {
+	d    *transport.Dialer
+	save func(name, addr string) error
+	logf func(string, ...any)
+}
 
 func (s sshDialer) Dial(ctx context.Context, p PeerConfig) (transport.Session, error) {
-	return s.d.Dial(ctx, transport.Peer{Name: p.Name, Addresses: p.Addresses, User: p.User, HostKey: p.HostKey})
+	addrs := orderAddresses(p.Addresses, p.PreferredAddress)
+	sess, err := s.d.Dial(ctx, transport.Peer{Name: p.Name, Addresses: addrs, User: p.User, HostKey: p.HostKey})
+	if err != nil {
+		return nil, err
+	}
+	if w := s.d.Preferred(p.Name); w != "" && w != p.PreferredAddress && s.save != nil {
+		if err := s.save(p.Name, w); err != nil {
+			s.logf("peers: remember %s for %s: %v", w, p.Name, err)
+		}
+	}
+	return sess, nil
+}
+
+// orderAddresses puts preferred first (if it is one of addrs).
+func orderAddresses(addrs []string, preferred string) []string {
+	out := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		if a == preferred {
+			out = append(out, a)
+		}
+	}
+	for _, a := range addrs {
+		if a != preferred {
+			out = append(out, a)
+		}
+	}
+	return out
 }
