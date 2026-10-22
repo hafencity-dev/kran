@@ -48,6 +48,22 @@ func run(ctx context.Context, opts Options) error {
 		}
 	}
 
+	// One daemon per dirs, settled before it restores jobs, dials peers or
+	// writes a log line. Under a service manager a second one waits.
+	release, err := acquireInstance(ctx, dirs.Runtime, supervisor() != "", func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, format+"\n", args...)
+	})
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil // stopped while waiting to take over
+		}
+		return err
+	}
+	defer release()
+	// stdout/stderr (launchd's StandardErrorPath, the on-demand start's
+	// log) only get fatal errors and crash traces; keep that file small.
+	capCrashLog(os.Stderr, filepath.Join(dirs.State, CrashLogName), 1<<20, 64<<10)
+
 	rot, err := newRotator(filepath.Join(dirs.State, "daemon.log"), 10<<20, 3)
 	if err != nil {
 		return fmt.Errorf("open daemon.log: %w", err)
@@ -126,8 +142,14 @@ func run(ctx context.Context, opts Options) error {
 		defer s.Close()
 	}
 	peerSrc := filePeerSource{path: filepath.Join(dirs.Config, "peers.toml")}
+	sessCfg := transport.SessionConfig{Logf: logf}
+	if ka, err := keepaliveFromEnv(os.Getenv("KRAN_KEEPALIVE")); err != nil {
+		logf("KRAN_KEEPALIVE: %v; using the defaults", err)
+	} else if ka != nil {
+		sessCfg.Keepalive = *ka
+	}
 	var dialer PeerDialer
-	if d, err := transport.NewDialer(filepath.Join(dirs.Config, "id_ed25519"), transport.SessionConfig{Logf: logf}); err != nil {
+	if d, err := transport.NewDialer(filepath.Join(dirs.Config, "id_ed25519"), sessCfg); err != nil {
 		logf("peers: %v; not connecting to other nodes", err)
 	} else {
 		dialer = sshDialer{d: d, save: peerSrc.savePreferred, logf: logf}
@@ -154,7 +176,7 @@ func run(ctx context.Context, opts Options) error {
 		Dialer:  dialer,
 		UI:      ui.Handler(),
 		Slice:   newSliceController(slice, cfg.Accept.ReserveMem, logf),
-		Session: transport.SessionConfig{Logf: logf},
+		Session: sessCfg,
 		Logf:    logf,
 		Debug:   os.Getenv("KRAN_DEBUG") == "1",
 
@@ -166,6 +188,12 @@ func run(ctx context.Context, opts Options) error {
 	dref.Store(d)
 	return d.Run(ctx)
 }
+
+// CrashLogName is the file in the state dir that receives the daemon's
+// stdout and stderr when a service manager or the on-demand start runs it.
+// The daemon's own log is daemon.log; this one only gets what the daemon
+// could not log there (a fatal start error, a panic).
+const CrashLogName = "daemon.out.log"
 
 // sshDialer adapts transport.Dialer to PeerDialer: the preferred address
 // goes first, and a different winner is written back to peers.toml.
@@ -232,6 +260,31 @@ func supervisor() string {
 		return "launchd"
 	}
 	return ""
+}
+
+// keepaliveFromEnv parses KRAN_KEEPALIVE="<interval>,<dead after>,<max
+// dead after>" (e.g. "1s,8s,20s"): link liveness timings for tests and for
+// unusual networks. nil when unset.
+func keepaliveFromEnv(v string) (*transport.KeepaliveConfig, error) {
+	if v == "" {
+		return nil, nil
+	}
+	parts := strings.Split(v, ",")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("%q: want <interval>,<dead after>,<max dead after>", v)
+	}
+	var d [3]time.Duration
+	for i, p := range parts {
+		x, err := time.ParseDuration(strings.TrimSpace(p))
+		if err != nil || x <= 0 {
+			return nil, fmt.Errorf("%q: %q is not a positive duration", v, p)
+		}
+		d[i] = x
+	}
+	if d[2] < d[1] || d[1] < d[0] {
+		return nil, fmt.Errorf("%q: want interval <= dead after <= max dead after", v)
+	}
+	return &transport.KeepaliveConfig{Interval: d[0], DeadAfter: d[1], MaxDeadAfter: d[2]}, nil
 }
 
 var namespaceRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}$`)

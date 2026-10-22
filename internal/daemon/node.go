@@ -51,7 +51,8 @@ type Timing struct {
 	BreakerCooldown  time.Duration // degraded period (60 s)
 	PeerPoll         time.Duration // peers.toml mtime poll (2 s)
 	BackoffMin       time.Duration // reconnect backoff (1 s)
-	BackoffMax       time.Duration // (30 s)
+	BackoffMax       time.Duration // (20 s)
+	UnreachableLog   time.Duration // "still unreachable" summary while a peer keeps failing (10 min)
 	MetricsEvery     time.Duration // self/peer status (2 s)
 	SliceEvery       time.Duration // kran.slice refresh (20 s)
 	CLIReattachWait  time.Duration // restored job waits for its CLI (20 s)
@@ -77,7 +78,8 @@ func DefaultTiming() Timing {
 		BreakerCooldown:  60 * time.Second,
 		PeerPoll:         2 * time.Second,
 		BackoffMin:       time.Second,
-		BackoffMax:       30 * time.Second,
+		BackoffMax:       20 * time.Second,
+		UnreachableLog:   10 * time.Minute,
 		MetricsEvery:     2 * time.Second,
 		SliceEvery:       20 * time.Second,
 		CLIReattachWait:  20 * time.Second,
@@ -123,9 +125,12 @@ type Deps struct {
 	// NoListen skips the unix sockets and the UI listener (in-process tests
 	// that drive Handler and ServePeerConn directly).
 	NoListen bool
-	Now      func() time.Time
-	Logf     func(format string, args ...any)
-	Timing   Timing
+	// NetSignature summarizes this machine's network addresses; a change
+	// makes disconnected peers retry at once (nil: the real interfaces).
+	NetSignature func() string
+	Now          func() time.Time
+	Logf         func(format string, args ...any)
+	Timing       Timing
 }
 
 // Daemon is one node's daemon.
@@ -182,6 +187,12 @@ func New(deps Deps) (*Daemon, error) {
 	}
 	if deps.Timing.Heartbeat == 0 {
 		deps.Timing = DefaultTiming()
+	}
+	if deps.Timing.UnreachableLog <= 0 {
+		deps.Timing.UnreachableLog = DefaultTiming().UnreachableLog
+	}
+	if deps.NetSignature == nil {
+		deps.NetSignature = netSignature
 	}
 	if deps.Config.Name == "" {
 		deps.Config.Name = defaultNodeName()

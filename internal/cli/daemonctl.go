@@ -55,10 +55,11 @@ Normally the service manager runs this for you (kran service install).`,
 			}
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
-			opts := daemon.Options{Logf: func(format string, args ...any) {
-				fmt.Fprintf(a.Err, format+"\n", args...)
-			}}
-			if err := daemon.Run(ctx, opts); err != nil {
+			// The daemon logs to daemon.log (rotated) and, in a terminal,
+			// to stderr too. Under launchd or systemd stderr is a file or
+			// the journal: mirroring every line there would only keep a
+			// second, unrotated copy; it gets fatal errors and crashes.
+			if err := daemon.Run(ctx, daemon.Options{}); err != nil {
 				return &ExitError{Code: 1, Msg: "daemon stopped: " + err.Error()}
 			}
 			return nil

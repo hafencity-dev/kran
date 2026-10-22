@@ -46,7 +46,11 @@ func (d *Daemon) ServePeerConn(c net.Conn) {
 	c.SetReadDeadline(time.Now().Add(30 * time.Second))
 	bound, rc, err := transport.ReadPeerName(c)
 	if err != nil {
-		d.logf("peer: %v", err)
+		// A connection that closes without a byte is `kran serve --stdio`
+		// checking that the daemon is up before it bridges: not news.
+		if !errors.Is(err, io.EOF) {
+			d.logf("peer: %v", err)
+		}
 		c.Close()
 		return
 	}
