@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -349,7 +350,7 @@ func TestStreamApplyMatchesLocal(t *testing.T) {
 		fi, _ := fh.Stat()
 		return fh, fi.Size(), nil
 	}
-	run := func(op string, m *proto.Manifest) (applyNeed, applyResult, error) {
+	runReq := func(req applyReq, proceed func(applyNeed) bool) (applyNeed, applyResult, error) {
 		toApply, hostW := io.Pipe()
 		hostR, fromApply := io.Pipe()
 		done := make(chan error, 1)
@@ -359,12 +360,15 @@ func TestStreamApplyMatchesLocal(t *testing.T) {
 			toApply.CloseWithError(io.ErrClosedPipe)
 			done <- err
 		}()
-		need, res, err := driveApply(context.Background(), hostW, hostR, applyReq{Op: op, Slot: repo + "/0", Manifest: m}, open)
+		need, res, err := driveApply(context.Background(), hostW, hostR, req, open, proceed)
 		hostW.Close()
 		if serr := <-done; serr != nil && err == nil {
 			err = serr
 		}
 		return need, res, err
+	}
+	run := func(op string, m *proto.Manifest) (applyNeed, applyResult, error) {
+		return runReq(applyReq{Op: op, Slot: repo + "/0", Manifest: m}, nil)
 	}
 	need, _, err := run("check", m)
 	if err != nil || len(need.Needed) != 2 {
@@ -381,6 +385,25 @@ func TestStreamApplyMatchesLocal(t *testing.T) {
 	if len(need.Needed) != 0 || need.Changed != 0 {
 		t.Fatalf("after commit check wants %+v", need)
 	}
+	// Op sync with the compact manifest: stop leaves the slot alone, go
+	// repairs it in the same run.
+	sorted := *m
+	sorted.Entries = append([]proto.ManifestEntry(nil), m.Entries...)
+	sort.Slice(sorted.Entries, func(i, j int) bool { return sorted.Entries[i].Path < sorted.Entries[j].Path })
+	slotA := filepath.Join(base, repo, "0", "a.txt")
+	os.WriteFile(slotA, []byte("tampered"), 0o644)
+	syncReq := applyReq{Op: "sync", Slot: repo + "/0", Manifest: &sorted, Compact: true}
+	need, _, err = runReq(syncReq, func(applyNeed) bool { return false })
+	if err != nil || len(need.Needed) != 1 {
+		t.Fatalf("sync stop: %v %+v", err, need)
+	}
+	if b, _ := os.ReadFile(slotA); string(b) != "tampered" {
+		t.Fatal("sync changed the slot although the host said stop")
+	}
+	if _, res, err := runReq(syncReq, func(applyNeed) bool { return true }); err != nil || res.Changed != 1 {
+		t.Fatalf("sync go: %v %+v", err, res)
+	}
+	verifySlot(t, filepath.Join(base, repo, "0"), m)
 	// Host cannot provide a blob: abort with a clear error.
 	m2 := &proto.Manifest{Entries: []proto.ManifestEntry{{Path: "x", Kind: proto.EntryFile, Mode: 0o644, Size: 1, Hash: hashOf("q"), MTime: 1}}}
 	if _, _, err := run("commit", m2); err == nil || !strings.Contains(err.Error(), "no such file") {

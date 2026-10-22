@@ -43,6 +43,9 @@ type slot struct {
 	// manifest is the last manifest committed into the slot (memory only):
 	// it keys the setup step without reading files from the slot.
 	manifest *proto.Manifest
+	// synced is the manifest Diff already committed for the current
+	// holder, so its Commit has nothing left to do.
+	synced *proto.Manifest
 }
 
 // slotPool hands out slots per repo and location (SPEC §6.7).
@@ -175,6 +178,7 @@ func (p *slotPool) acquire(ctx context.Context, repo, hint string, loc slotLoc) 
 		if pick != nil {
 			pick.busy = true
 			pick.job = ""
+			pick.synced = nil
 			pick.touched = p.now()
 			// Stamped now, not only at release: a slot whose holder never
 			// releases it (daemon restart, crash) must not look unused
@@ -210,6 +214,7 @@ func (p *slotPool) release(s *slot) {
 	}
 	s.busy = false
 	s.job = ""
+	s.synced = nil
 	s.meta.LastUsed = p.now()
 	meta := s.meta
 	close(p.free)
@@ -281,6 +286,22 @@ func (p *slotPool) setManifest(s *slot, m *proto.Manifest) {
 	p.mu.Lock()
 	s.manifest = m
 	p.mu.Unlock()
+}
+
+// setSynced records (m) or clears (nil) the manifest Diff committed.
+func (p *slotPool) setSynced(s *slot, m *proto.Manifest) {
+	p.mu.Lock()
+	s.synced = m
+	if m != nil {
+		s.manifest = m
+	}
+	p.mu.Unlock()
+}
+
+func (p *slotPool) syncedTo(s *slot) *proto.Manifest {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return s.synced
 }
 
 func (p *slotPool) manifestOf(s *slot) *proto.Manifest {

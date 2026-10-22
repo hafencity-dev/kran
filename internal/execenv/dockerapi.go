@@ -79,6 +79,7 @@ type dockerVersion struct {
 }
 
 type dockerInfo struct {
+	ID            string `json:"ID"`
 	NCPU          int    `json:"NCPU"`
 	MemTotal      int64  `json:"MemTotal"`
 	OSType        string `json:"OSType"`

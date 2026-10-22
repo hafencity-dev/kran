@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -65,57 +66,73 @@ func validRel(p string) bool {
 	return true
 }
 
+// manifestIndex is what the plan needs to know about a manifest's paths.
+type manifestIndex struct {
+	kind    map[string]proto.EntryKind // every entry
+	parents map[string]bool            // directories that hold entries
+}
+
 // validateManifest rejects anything the apply engine must never do.
 func validateManifest(m *proto.Manifest, caseInsensitive bool) error {
-	seen := make(map[string]proto.EntryKind, len(m.Entries))
+	_, err := checkManifest(m, caseInsensitive)
+	return err
+}
+
+// checkManifest validates m and indexes its paths.
+func checkManifest(m *proto.Manifest, caseInsensitive bool) (*manifestIndex, error) {
+	ix := &manifestIndex{kind: make(map[string]proto.EntryKind, len(m.Entries)), parents: map[string]bool{}}
 	var folded map[string]string
 	if caseInsensitive {
 		folded = make(map[string]string, len(m.Entries))
 	}
 	for _, e := range m.Entries {
 		if !validRel(e.Path) {
-			return fmt.Errorf("%w: unsafe path %q", ErrBadManifest, e.Path)
+			return nil, fmt.Errorf("%w: unsafe path %q", ErrBadManifest, e.Path)
 		}
 		if strings.HasPrefix(path.Base(e.Path), tmpPrefix) {
-			return fmt.Errorf("%w: reserved name %q", ErrBadManifest, e.Path)
+			return nil, fmt.Errorf("%w: reserved name %q", ErrBadManifest, e.Path)
 		}
-		if _, dup := seen[e.Path]; dup {
-			return fmt.Errorf("%w: duplicate path %q", ErrBadManifest, e.Path)
+		if _, dup := ix.kind[e.Path]; dup {
+			return nil, fmt.Errorf("%w: duplicate path %q", ErrBadManifest, e.Path)
 		}
-		seen[e.Path] = e.Kind
+		ix.kind[e.Path] = e.Kind
 		switch e.Kind {
 		case proto.EntryFile:
 			if err := validHash(e.Hash); err != nil {
-				return fmt.Errorf("%w: %s: %v", ErrBadManifest, e.Path, err)
+				return nil, fmt.Errorf("%w: %s: %v", ErrBadManifest, e.Path, err)
 			}
 			if e.Size < 0 {
-				return fmt.Errorf("%w: %s: negative size", ErrBadManifest, e.Path)
+				return nil, fmt.Errorf("%w: %s: negative size", ErrBadManifest, e.Path)
 			}
 		case proto.EntrySymlink:
 			if !workspace.LinkStaysInside(e.Path, e.Target) {
-				return fmt.Errorf("%w: symlink %q points outside the workspace (%q)", ErrBadManifest, e.Path, e.Target)
+				return nil, fmt.Errorf("%w: symlink %q points outside the workspace (%q)", ErrBadManifest, e.Path, e.Target)
 			}
 		case proto.EntryDir:
 		default:
-			return fmt.Errorf("%w: %s: unknown entry kind %d", ErrBadManifest, e.Path, e.Kind)
+			return nil, fmt.Errorf("%w: %s: unknown entry kind %d", ErrBadManifest, e.Path, e.Kind)
 		}
 		if folded != nil {
 			k := strings.ToLower(e.Path)
 			if other, ok := folded[k]; ok {
-				return fmt.Errorf("%w: %q and %q differ only in case, which this node's filesystem cannot hold; run the job on a Linux node or rename one of them", ErrBadManifest, other, e.Path)
+				return nil, fmt.Errorf("%w: %q and %q differ only in case, which this node's filesystem cannot hold; run the job on a Linux node or rename one of them", ErrBadManifest, other, e.Path)
 			}
 			folded[k] = e.Path
 		}
-	}
-	// A path used as a directory by another entry must be a directory.
-	for p := range seen {
-		for d := path.Dir(p); d != "."; d = path.Dir(d) {
-			if k, ok := seen[d]; ok && k != proto.EntryDir {
-				return fmt.Errorf("%w: %q is both a file and a directory", ErrBadManifest, d)
+		for d := path.Dir(e.Path); d != "."; d = path.Dir(d) {
+			if ix.parents[d] {
+				break
 			}
+			ix.parents[d] = true
 		}
 	}
-	return nil
+	// A path used as a directory by another entry must be a directory.
+	for d := range ix.parents {
+		if k, ok := ix.kind[d]; ok && k != proto.EntryDir {
+			return nil, fmt.Errorf("%w: %q is both a file and a directory", ErrBadManifest, d)
+		}
+	}
+	return ix, nil
 }
 
 // keepMatcher compiles Manifest.Keep (gitignore-style; "node_modules/"
@@ -139,69 +156,124 @@ func keepMatcher(m *proto.Manifest) *workspace.Matcher {
 	return workspace.NewMatcher(pats)
 }
 
-// scanSlot lists what is in the slot, skipping kept dirs.
-func scanSlot(root string, keep *workspace.Matcher) (map[string]existing, error) {
-	state := map[string]existing{}
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			if p == root {
-				if errors.Is(err, fs.ErrNotExist) {
-					return filepath.SkipAll
-				}
-				return err
-			}
-			return nil
+// scanSlot lists what is in the slot, skipping kept dirs. Only paths for
+// which want returns true are stat'ed (kind, mode, size, mtime, link
+// target); for the others, extras to delete, the kind from the directory
+// listing is enough. Directories are listed in parallel: on a loaded
+// machine or APFS the per-file system calls dominate an unchanged sync.
+func scanSlot(root string, keep *workspace.Matcher, want func(rel string) bool) (map[string]existing, error) {
+	sc := &slotScan{root: root, keep: keep, want: want, state: map[string]existing{},
+		sem: make(chan struct{}, min(16, max(2, runtime.GOMAXPROCS(0))))}
+	sc.wg.Add(1)
+	sc.dir("")
+	sc.wg.Wait()
+	if sc.err != nil {
+		if errors.Is(sc.err, fs.ErrNotExist) || errors.Is(sc.err, unix.ENOTDIR) {
+			return map[string]existing{}, nil
 		}
-		if p == root {
-			return nil
-		}
-		rel := filepath.ToSlash(p[len(root)+1:])
-		isDir := d.IsDir()
-		if keep.Match(rel, isDir) {
-			if isDir {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		fi, err := d.Info()
-		if err != nil {
-			return nil
-		}
-		ex := existing{mode: uint32(fi.Mode().Perm()), size: fi.Size(), mtime: fi.ModTime().UnixNano()}
-		switch {
-		case isDir:
-			ex.kind = proto.EntryDir
-		case fi.Mode()&os.ModeSymlink != 0:
-			ex.kind = proto.EntrySymlink
-			ex.target, _ = os.Readlink(p)
-		case fi.Mode().IsRegular():
-			ex.kind = proto.EntryFile
-		default:
-			ex.kind = 255 // fifo/socket/device: always an extra
-		}
-		state[rel] = ex
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("scan slot: %w", err)
+		return nil, fmt.Errorf("scan slot: %w", sc.err)
 	}
-	return state, nil
+	return sc.state, nil
 }
 
-func computePlan(m *proto.Manifest, state map[string]existing) *plan {
-	p := &plan{m: m}
-	inManifest := make(map[string]bool, len(m.Entries))
-	parents := map[string]bool{}
-	seenHash := map[string]bool{}
-	for _, e := range m.Entries {
-		inManifest[e.Path] = true
-		for d := path.Dir(e.Path); d != "."; d = path.Dir(d) {
-			if parents[d] {
-				break
+type slotScan struct {
+	root string
+	keep *workspace.Matcher
+	want func(string) bool
+	sem  chan struct{}
+	wg   sync.WaitGroup
+
+	mu    sync.Mutex
+	state map[string]existing
+	err   error // listing the root failed
+}
+
+type scanned struct {
+	rel string
+	ex  existing
+}
+
+func (sc *slotScan) dir(rel string) {
+	defer sc.wg.Done()
+	abs := sc.root
+	if rel != "" {
+		abs = filepath.Join(sc.root, filepath.FromSlash(rel))
+	}
+	// Never through a symlink: a job may have swapped a directory for one.
+	fd, err := unix.Open(abs, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		if rel == "" {
+			sc.err = &fs.PathError{Op: "open", Path: abs, Err: err}
+		}
+		return
+	}
+	f := os.NewFile(uintptr(fd), abs)
+	ents, err := f.ReadDir(-1)
+	f.Close()
+	if err != nil && rel == "" {
+		sc.err = err
+		return
+	}
+	out := make([]scanned, 0, len(ents))
+	for _, d := range ents {
+		r := d.Name()
+		if rel != "" {
+			r = rel + "/" + r
+		}
+		isDir := d.IsDir()
+		if sc.keep.Match(r, isDir) {
+			continue
+		}
+		var ex existing
+		if sc.want(r) {
+			fi, err := d.Info()
+			if err != nil {
+				continue // vanished meanwhile
 			}
-			parents[d] = true
+			ex = existing{kind: kindOf(fi.Mode()), mode: uint32(fi.Mode().Perm()), size: fi.Size(), mtime: fi.ModTime().UnixNano()}
+			if ex.kind == proto.EntrySymlink {
+				ex.target, _ = os.Readlink(filepath.Join(abs, d.Name()))
+			}
+			isDir = ex.kind == proto.EntryDir
+		} else {
+			ex.kind = kindOf(d.Type())
+		}
+		out = append(out, scanned{r, ex})
+		if isDir {
+			sc.wg.Add(1)
+			select {
+			case sc.sem <- struct{}{}:
+				go func(r string) {
+					defer func() { <-sc.sem }()
+					sc.dir(r)
+				}(r)
+			default:
+				sc.dir(r)
+			}
 		}
 	}
+	sc.mu.Lock()
+	for _, e := range out {
+		sc.state[e.rel] = e.ex
+	}
+	sc.mu.Unlock()
+}
+
+func kindOf(m fs.FileMode) proto.EntryKind {
+	switch {
+	case m.IsDir():
+		return proto.EntryDir
+	case m&fs.ModeSymlink != 0:
+		return proto.EntrySymlink
+	case m.IsRegular():
+		return proto.EntryFile
+	}
+	return 255 // fifo/socket/device: always an extra
+}
+
+func computePlan(m *proto.Manifest, ix *manifestIndex, state map[string]existing) *plan {
+	p := &plan{m: m}
+	seenHash := map[string]bool{}
 	for i, e := range m.Entries {
 		ex, ok := state[e.Path]
 		if ok && ex.kind != e.Kind {
@@ -236,10 +308,10 @@ func computePlan(m *proto.Manifest, state map[string]existing) *plan {
 		}
 	}
 	for rel, ex := range state {
-		if inManifest[rel] {
+		if _, ok := ix.kind[rel]; ok {
 			continue
 		}
-		if parents[rel] && ex.kind == proto.EntryDir {
+		if ix.parents[rel] && ex.kind == proto.EntryDir {
 			continue // still needed as a directory
 		}
 		p.deletes = append(p.deletes, rel)
@@ -248,6 +320,23 @@ func computePlan(m *proto.Manifest, state map[string]existing) *plan {
 	sort.Sort(sort.Reverse(sort.StringSlice(p.deletes)))
 	sort.Strings(p.rmTrees)
 	return p
+}
+
+// planSlot validates m and computes what it takes to turn the slot at
+// root into it, with one scan of the slot.
+func planSlot(root string, m *proto.Manifest, caseInsensitive bool) (*plan, error) {
+	ix, err := checkManifest(m, caseInsensitive)
+	if err != nil {
+		return nil, err
+	}
+	state, err := scanSlot(root, keepMatcher(m), func(rel string) bool {
+		_, ok := ix.kind[rel]
+		return ok
+	})
+	if err != nil {
+		return nil, err
+	}
+	return computePlan(m, ix, state), nil
 }
 
 // slotFS performs fd-relative operations below a slot root.
@@ -596,45 +685,40 @@ func (s *slotFS) writeGroup(p *plan, dir string, idx []int, blobPath func(string
 // commitLocal materializes m into the host directory root using blobs from
 // bs. It returns the executed plan.
 func commitLocal(root string, m *proto.Manifest, bs *blobStore, workers int, caseInsensitive bool) (*plan, error) {
-	if err := validateManifest(m, caseInsensitive); err != nil {
-		return nil, err
-	}
-	state, err := scanSlot(root, keepMatcher(m))
+	p, err := planSlot(root, m, caseInsensitive)
 	if err != nil {
 		return nil, err
 	}
-	p := computePlan(m, state)
+	bs.trimMu.RLock()
+	defer bs.trimMu.RUnlock()
+	return p, applyPlanLocal(root, p, bs, workers)
+}
+
+// applyPlanLocal carries out p in root with content from bs. The caller
+// holds bs.trimMu (shared) so no blob vanishes meanwhile.
+func applyPlanLocal(root string, p *plan, bs *blobStore, workers int) error {
 	for _, h := range p.needed {
 		if !bs.has(h) {
-			return p, fmt.Errorf("%w: %s; upload it first", ErrMissingBlob, short(h))
+			return fmt.Errorf("%w: %s; upload it first", ErrMissingBlob, short(h))
 		}
 	}
 	s, err := openSlotFS(root)
 	if err != nil {
-		return p, err
+		return err
 	}
 	defer s.Close()
-	bs.trimMu.RLock()
-	defer bs.trimMu.RUnlock()
 	if err := s.applyLocal(p, bs.path, workers); err != nil {
-		return p, err
+		return err
 	}
 	for _, h := range p.needed {
 		bs.touch(h)
 	}
-	return p, nil
+	return nil
 }
 
 // diffLocal computes the plan for root without changing anything.
 func diffLocal(root string, m *proto.Manifest, caseInsensitive bool) (*plan, error) {
-	if err := validateManifest(m, caseInsensitive); err != nil {
-		return nil, err
-	}
-	state, err := scanSlot(root, keepMatcher(m))
-	if err != nil {
-		return nil, err
-	}
-	return computePlan(m, state), nil
+	return planSlot(root, m, caseInsensitive)
 }
 
 // chmodAt sets the mode of name below dirfd without following a symlink

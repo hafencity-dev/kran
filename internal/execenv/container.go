@@ -45,9 +45,39 @@ type dockerEnv struct {
 	cliEnv []string
 
 	mu      sync.Mutex
-	ready   bool   // volumes and image verified
-	sockGID int    // group of /var/run/docker.sock inside the Docker host
-	syncBin string // kran binary path inside the sync container
+	ready   bool      // volumes and image verified
+	sockGID int       // group of /var/run/docker.sock inside the Docker host
+	syncBin string    // kran binary path inside the sync container
+	syncAt  time.Time // when the sync helper was last seen running with syncBin
+}
+
+// syncRecheck: how long a verified sync helper is trusted without asking
+// Docker again. Each check is a docker CLI round trip (100 ms or more on a
+// Mac); a helper that vanished meanwhile makes the next run fail without
+// side effects, which re-checks and retries (volumeRun).
+const syncRecheck = time.Minute
+
+// sameDocker reports whether two probes found the same Docker daemon, so
+// what was verified on the first still holds.
+func sameDocker(a, b *dockerEnv) bool {
+	return a != nil && b != nil && a.cli == b.cli && a.host == b.host &&
+		a.info.ID == b.info.ID && a.info.ServerVersion == b.info.ServerVersion
+}
+
+// inherit carries the verified state of an earlier probe of the same
+// Docker daemon over to a fresh one (Refresh probes every few minutes;
+// without this every refresh cost the next container sync a volume setup
+// container and a helper check).
+func (dk *dockerEnv) inherit(old *dockerEnv) {
+	if !sameDocker(old, dk) {
+		return
+	}
+	old.mu.Lock()
+	ready, gid, bin, at := old.ready, old.sockGID, old.syncBin, old.syncAt
+	old.mu.Unlock()
+	dk.mu.Lock()
+	dk.ready, dk.sockGID, dk.syncBin, dk.syncAt = ready, gid, bin, at
+	dk.mu.Unlock()
 }
 
 func (m *manager) containerSetting() string {
@@ -284,14 +314,22 @@ func (m *manager) prepareVolumes(ctx context.Context, dk *dockerEnv) error {
 // still reach it; SPEC §9.)
 func (m *manager) ensureSync(ctx context.Context, dk *dockerEnv) error {
 	name := m.syncName()
-	sum, err := fileHash(m.opts.LinuxBinary)
+	sum, err := m.linuxBinaryHash()
 	if err != nil {
 		return fmt.Errorf("%w: Linux kran binary: %v", ErrRuntimeUnavailable, err)
 	}
 	bin := "/usr/local/bin/kran-sync-" + sum[:16]
+	if dk.syncBin == bin && m.now().Sub(dk.syncAt) < syncRecheck {
+		return nil
+	}
 	out, err := dk.run(ctx, nil, "inspect", "--format", `{{.State.Running}} {{.Config.Image}}`, name)
 	running := err == nil && strings.HasPrefix(string(out), "true ") && strings.TrimSpace(strings.TrimPrefix(string(out), "true ")) == m.imageTag()
 	if !running {
+		// The volumes may be gone with it (docker volume prune, a
+		// reset Docker VM): set them up again first.
+		if err := m.prepareVolumes(ctx, dk); err != nil {
+			return err
+		}
 		dk.run(ctx, nil, "rm", "--force", name)
 		_, err := dk.run(ctx, nil, "run", "--detach", "--name", name, "--label", "kran.ns="+m.ns, "--label", "kran.role=sync",
 			"--restart", "unless-stopped", "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
@@ -316,7 +354,29 @@ func (m *manager) ensureSync(ctx context.Context, dk *dockerEnv) error {
 		dk.run(ctx, nil, "exec", "--user", "0", name, "chmod", "0755", bin)
 	}
 	dk.syncBin = bin
+	dk.syncAt = m.now()
 	return nil
+}
+
+// linuxBinaryHash hashes the Linux kran binary, once per version of the
+// file (it is tens of MB; every container sync needs its name).
+func (m *manager) linuxBinaryHash() (string, error) {
+	p := m.opts.LinuxBinary
+	fi, err := os.Stat(p)
+	if err != nil {
+		return "", err
+	}
+	m.binMu.Lock()
+	defer m.binMu.Unlock()
+	if m.binKey.path == p && m.binKey.size == fi.Size() && m.binKey.mtime.Equal(fi.ModTime()) {
+		return m.binSum, nil
+	}
+	sum, err := fileHash(p)
+	if err != nil {
+		return "", err
+	}
+	m.binKey.path, m.binKey.size, m.binKey.mtime, m.binSum = p, fi.Size(), fi.ModTime(), sum
+	return sum, nil
 }
 
 func fileHash(p string) (string, error) {
@@ -329,6 +389,50 @@ func fileHash(p string) (string, error) {
 
 // volumeApply runs one apply request against a slot in the volume.
 func (m *manager) volumeApply(ctx context.Context, req applyReq, open blobOpener) (applyNeed, error) {
+	return m.volumeRun(ctx, req, open, nil)
+}
+
+// volumeSync runs op sync: one scan of the slot in the volume, then a
+// commit in the same helper run when proceed approves the need list (the
+// blob store holds everything). The caller holds blobs.trimMu (shared).
+func (m *manager) volumeSync(ctx context.Context, slot string, mf *proto.Manifest, proceed func(applyNeed) bool) (applyNeed, bool, error) {
+	committed := false
+	need, err := m.volumeRun(ctx, applyReq{Op: "sync", Slot: slot, Manifest: mf}, m.openBlob, func(n applyNeed) bool {
+		committed = proceed(n)
+		return committed
+	})
+	if err != nil {
+		return need, false, err
+	}
+	return need, committed, nil
+}
+
+// volumeRun runs one helper process for req. The manifest goes in the
+// compact encoding; a helper that answers nothing (its container was
+// gone) is retried once after the helper is checked and restarted.
+func (m *manager) volumeRun(ctx context.Context, req applyReq, open blobOpener, proceed func(applyNeed) bool) (applyNeed, error) {
+	req.Compact = req.Manifest != nil && proto.SortedByPath(req.Manifest.Entries)
+	for attempt := 0; ; attempt++ {
+		need, err := m.volumeExec(ctx, req, open, proceed)
+		switch {
+		case err == nil:
+			return need, nil
+		case attempt == 0 && errors.Is(err, errNoReply) && ctx.Err() == nil:
+			m.logf("sync helper did not answer (%v); checking it and retrying", err)
+			if dk, _ := m.docker(); dk != nil {
+				dk.mu.Lock()
+				dk.syncAt = time.Time{}
+				dk.mu.Unlock()
+			}
+		case attempt == 0 && req.Compact && strings.Contains(err.Error(), "request without manifest"):
+			req.Compact = false // a helper from an older kran: JSON it is
+		default:
+			return need, err
+		}
+	}
+}
+
+func (m *manager) volumeExec(ctx context.Context, req applyReq, open blobOpener, proceed func(applyNeed) bool) (applyNeed, error) {
 	if err := m.ensureContainerReady(ctx, nil); err != nil {
 		return applyNeed{}, err
 	}
@@ -351,7 +455,7 @@ func (m *manager) volumeApply(ctx context.Context, req applyReq, open blobOpener
 	if err := cmd.Start(); err != nil {
 		return applyNeed{}, fmt.Errorf("sync helper: %w", err)
 	}
-	need, _, derr := driveApply(ctx, stdin, stdout, req, open)
+	need, _, derr := driveApply(ctx, stdin, stdout, req, open, proceed)
 	stdin.Close()
 	werr := cmd.Wait()
 	if derr != nil {
