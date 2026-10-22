@@ -128,6 +128,13 @@ type NodeState struct {
 	Running  int         `json:"running"`            // kran jobs running here
 	Accepts  bool        `json:"accepts"`            // accept.enabled
 	LastSeen time.Time   `json:"last_seen,omitempty"`
+	// added by C: config accept.max_jobs (0 = unlimited) so origins
+	// respect a peer's job limit when placing.
+	MaxJobs int `json:"max_jobs,omitempty"`
+	// added by C: IDs of the jobs counted in Allocated (from the node's own
+	// scheduler snapshot). Lets an origin tell which of its placements a
+	// peer's report already includes, so they are not counted twice.
+	AllocatedJobs []string `json:"allocated_jobs,omitempty"`
 }
 
 type LinkInfo struct {
