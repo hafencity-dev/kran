@@ -37,6 +37,7 @@ type systemdSlice struct {
 	available bool
 	last      int64
 	failed    bool
+	cgroup    string // the slice's cgroup path, asked once (a systemctl fork)
 }
 
 const sliceStep = 64 << 20 // don't bother systemd for smaller changes
@@ -79,9 +80,16 @@ func (s *systemdSlice) compute(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	var cur int64
-	if cg, err := s.run(ctx, "show", s.Name(), "-p", "ControlGroup", "--value"); err == nil && cg != "" {
-		if b, err := s.readFile("/sys/fs/cgroup" + cg + "/memory.current"); err == nil {
+	if s.cgroup == "" {
+		if cg, err := s.run(ctx, "show", s.Name(), "-p", "ControlGroup", "--value"); err == nil {
+			s.cgroup = strings.TrimSpace(cg)
+		}
+	}
+	if s.cgroup != "" {
+		if b, err := s.readFile("/sys/fs/cgroup" + s.cgroup + "/memory.current"); err == nil {
 			cur, _ = strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+		} else {
+			s.cgroup = "" // gone (the slice was stopped): ask again next time
 		}
 	}
 	return sliceMax(cur, avail, total, s.reserve), nil

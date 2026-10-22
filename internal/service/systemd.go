@@ -53,6 +53,7 @@ func (s *systemd) Unit() string {
 	if s.o.Instance != "" {
 		desc += " (" + s.o.Instance + ")"
 	}
+	b.WriteString("# Written by kran service install (" + formatMarker + "); kran upgrade and\n# kran doctor --fix rewrite it.\n")
 	b.WriteString("[Unit]\nDescription=" + desc + "\n")
 	b.WriteString("Documentation=https://github.com/hafencity-dev/kran\n\n")
 	b.WriteString("[Service]\nType=simple\n")
@@ -61,11 +62,71 @@ func (s *systemd) Unit() string {
 	b.WriteString("# Only the daemon is stopped on restart. Job supervisors and their jobs run\n")
 	b.WriteString("# in their own transient scopes (kran.slice) and must survive daemon upgrades.\n")
 	b.WriteString("KillMode=process\n")
+	b.WriteString(priorityComment)
+	b.WriteString("CPUWeight=1000\nIOWeight=1000\nIOSchedulingClass=best-effort\nIOSchedulingPriority=0\nMemoryLow=256M\n")
 	for _, e := range s.o.unitEnv() {
 		b.WriteString("Environment=" + sdQuote(e.K+"="+e.V, false) + "\n")
 	}
 	b.WriteString("\n[Install]\nWantedBy=default.target\n")
 	return b.String()
+}
+
+const priorityComment = `# The daemon keeps the links, leases and heartbeats of the jobs it manages
+# alive, so it must stay responsive while they, or anything else, load the
+# machine: CPU and I/O weight far above the default 100, best-effort I/O at
+# the highest level, and its memory shielded from reclaim (where the parent
+# cgroups pass protection down). Nice= below 0 and a lower OOMScoreAdjust=
+# need privileges a user service does not have.
+`
+
+var sdUnescape = strings.NewReplacer(`\\`, `\`, `\"`, `"`, "%%", "%", `\n`, "\n")
+
+// sdUnquote reverses sdQuote (a bare word is returned as is).
+func sdUnquote(v string, exec bool) string {
+	if len(v) < 2 || v[0] != '"' || v[len(v)-1] != '"' {
+		return v
+	}
+	v = v[1 : len(v)-1]
+	if exec {
+		v = strings.ReplaceAll(v, "$$", "$")
+	}
+	return sdUnescape.Replace(v)
+}
+
+// parseUnit returns the binary and the environment of a unit kran wrote.
+func parseUnit(text string) (exe string, env map[string]string) {
+	env = map[string]string{}
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "ExecStart="):
+			v := strings.TrimSuffix(strings.TrimPrefix(line, "ExecStart="), " daemon")
+			exe = sdUnquote(v, true)
+		case strings.HasPrefix(line, "Environment="):
+			if k, val, ok := strings.Cut(sdUnquote(strings.TrimPrefix(line, "Environment="), false), "="); ok {
+				env[k] = val
+			}
+		}
+	}
+	return exe, env
+}
+
+func (s *systemd) Refresh(ctx context.Context) (bool, error) {
+	cur, err := os.ReadFile(s.unitPath())
+	if err != nil {
+		return false, ErrNotInstalled
+	}
+	exe, env := parseUnit(string(cur))
+	if exe == "" {
+		return false, nil // not a unit kran can read back: leave it alone
+	}
+	want := (&systemd{o: installedOptions(s.o, exe, env), unit: s.unit}).Unit()
+	changed, err := writeIfChanged(s.unitPath(), want)
+	if err != nil || !changed {
+		return changed, err
+	}
+	_, err = s.ctl(ctx, "daemon-reload")
+	return true, err
 }
 
 // ctl runs `systemctl --user …` and turns a missing user bus into advice.
@@ -140,14 +201,19 @@ func (s *systemd) Restart(ctx context.Context, ro RestartOptions) error {
 	if err := restartWhenIdle(ctx, s.o, ro); err != nil {
 		return err
 	}
+	// An upgrade restarts through here: bring the unit up to date first.
+	if _, err := s.Refresh(ctx); err != nil {
+		s.o.Logf("could not update %s: %v", s.unitPath(), err)
+	}
 	_, err := s.ctl(ctx, "restart", s.unit)
 	return err
 }
 
 func (s *systemd) Status(ctx context.Context) (Status, error) {
 	st := Status{Manager: "systemd", Mode: "systemd", UnitPath: s.unitPath(), LogPath: paths.LogFile()}
-	_, ferr := os.Stat(s.unitPath())
+	cur, ferr := os.ReadFile(s.unitPath())
 	st.Installed = ferr == nil
+	st.Outdated = st.Installed && !strings.Contains(string(cur), formatMarker)
 	out, err := s.ctl(ctx, "show", s.unit, "-p", "ActiveState,SubState,MainPID,UnitFileState,LoadState")
 	if err != nil {
 		if st.Installed {

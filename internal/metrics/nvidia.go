@@ -14,13 +14,19 @@ import (
 type nvidiaProbe struct {
 	p *prober
 
+	gate *probeGate
+
 	mu      sync.Mutex
 	path    string // "" = not found
 	looked  bool
 	present bool // GPUs were listed at the last probe
+	util    float64
+	memUsed int64 // last successful sample
 }
 
-func newNvidiaProbe(p *prober) *nvidiaProbe { return &nvidiaProbe{p: p} }
+func newNvidiaProbe(p *prober) *nvidiaProbe {
+	return &nvidiaProbe{p: p, gate: newProbeGate(5*time.Second, 2*time.Minute)}
+}
 
 func (n *nvidiaProbe) bin() string {
 	n.mu.Lock()
@@ -72,23 +78,41 @@ func (n *nvidiaProbe) probe(ctx context.Context) []proto.GPU {
 	return gpus
 }
 
-// sample fills GPU utilization (mean over GPUs) and used memory.
-func (n *nvidiaProbe) sample(ctx context.Context, m *proto.NodeMetrics) {
+// sample fills GPU utilization (mean over GPUs) and used memory. Paced by
+// the gate: on an overloaded node, or after a failed run, the last reading
+// stands in instead of forking nvidia-smi again.
+func (n *nvidiaProbe) sample(ctx context.Context, m *proto.NodeMetrics, stressed bool) {
 	n.mu.Lock()
 	present := n.present
 	n.mu.Unlock()
 	if !present {
 		return
 	}
+	now := n.p.now()
+	if !n.gate.allow(now, stressed) {
+		n.mu.Lock()
+		m.GPUUtil, m.GPUMemUsed = n.util, n.memUsed
+		n.mu.Unlock()
+		return
+	}
 	rs, err := n.query(ctx)
-	if err != nil || len(rs) == 0 {
-		n.p.logOnce("nvidia-sample", "metrics: nvidia-smi sampling failed: %v", err)
+	ok := err == nil && len(rs) > 0
+	n.gate.done(now, ok)
+	if !ok {
+		n.p.logOnce("nvidia-sample", "metrics: nvidia-smi sampling failed: %v (retrying less often)", err)
+		n.mu.Lock()
+		n.util, n.memUsed = 0, 0
+		n.mu.Unlock()
 		return
 	}
 	var util float64
+	var mem int64
 	for _, r := range rs {
 		util += r.util
-		m.GPUMemUsed += r.memUsed
+		mem += r.memUsed
 	}
-	m.GPUUtil = util / float64(len(rs))
+	m.GPUUtil, m.GPUMemUsed = util/float64(len(rs)), mem
+	n.mu.Lock()
+	n.util, n.memUsed = m.GPUUtil, mem
+	n.mu.Unlock()
 }

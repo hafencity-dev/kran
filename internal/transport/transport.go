@@ -42,7 +42,7 @@ var (
 	ErrHostKey = errors.New("host key mismatch")
 	// ErrAuth: the peer refused the kran key.
 	ErrAuth = errors.New("kran key refused")
-	// ErrKeepalive: the peer stopped answering pings.
+	// ErrKeepalive: nothing arrived from the peer for longer than the link tolerates.
 	ErrKeepalive = errors.New("peer stopped answering")
 	// ErrAlreadyRunning: another process serves the socket.
 	ErrAlreadyRunning = errors.New("another kran daemon is already running")

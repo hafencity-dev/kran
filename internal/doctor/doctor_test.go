@@ -32,6 +32,13 @@ type fakeSvc struct {
 	installed int
 	started   int
 	restarted int
+	refreshed int
+}
+
+func (f *fakeSvc) Refresh(context.Context) (bool, error) {
+	f.refreshed++
+	f.st.Outdated = false
+	return true, nil
 }
 
 func (f *fakeSvc) Install(context.Context) (bool, error) { f.installed++; return true, nil }
@@ -141,6 +148,27 @@ func TestServiceChecks(t *testing.T) {
 	}
 	if r := find(rs, "linger"); r == nil || r.Level != Warn || !strings.Contains(r.Fix, "enable-linger") {
 		t.Fatalf("%+v", r)
+	}
+}
+
+// A unit written by an older kran (without the daemon's priority settings)
+// is reported, and --fix rewrites it.
+func TestOutdatedServiceUnit(t *testing.T) {
+	o := baseOpts(t)
+	f := &fakeSvc{st: service.Status{Installed: true, Running: true, PID: 5, Manager: "systemd", Mode: "systemd", Outdated: true}}
+	o.Service = func() (service.Manager, error) { return f, nil }
+	r := find(Run(context.Background(), o), "service.unit")
+	if r == nil || r.Level != Warn || !strings.Contains(r.Fix, "kran doctor --fix") {
+		t.Fatalf("%+v", r)
+	}
+	o.Fix = true
+	r = find(Run(context.Background(), o), "service.unit")
+	if f.refreshed != 1 || r == nil || !r.Fixed {
+		t.Fatalf("fix: refreshed %d, %+v", f.refreshed, r)
+	}
+	o.Fix = false
+	if r := find(Run(context.Background(), o), "service.unit"); r != nil {
+		t.Fatalf("current unit reported: %+v", r)
 	}
 }
 

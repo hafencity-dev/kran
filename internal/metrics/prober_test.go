@@ -60,7 +60,7 @@ func TestNvidiaGB10Unified(t *testing.T) {
 		t.Fatalf("gpus = %+v", gpus)
 	}
 	var m proto.NodeMetrics
-	p.nvidia.sample(context.Background(), &m)
+	p.nvidia.sample(context.Background(), &m, false)
 	if !near(m.GPUUtil, 0.06) || m.GPUMemUsed != 0 {
 		t.Fatalf("metrics = %+v", m)
 	}
@@ -79,7 +79,7 @@ func TestNvidiaAbsentOrFailing(t *testing.T) {
 		t.Fatalf("failure must be logged once, got %d", len(logs))
 	}
 	var m proto.NodeMetrics
-	p.nvidia.sample(context.Background(), &m)
+	p.nvidia.sample(context.Background(), &m, false)
 	if fr.count("--query-gpu") != 2 {
 		t.Fatal("sample must not query when no GPU was found")
 	}

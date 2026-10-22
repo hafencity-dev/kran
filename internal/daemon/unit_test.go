@@ -441,3 +441,18 @@ func TestUTF8Complete(t *testing.T) {
 		}
 	}
 }
+
+func TestKeepaliveFromEnv(t *testing.T) {
+	ka, err := keepaliveFromEnv("1s,8s,20s")
+	if err != nil || ka == nil || ka.Interval != time.Second || ka.DeadAfter != 8*time.Second || ka.MaxDeadAfter != 20*time.Second {
+		t.Fatalf("%+v %v", ka, err)
+	}
+	if ka, err := keepaliveFromEnv(""); ka != nil || err != nil {
+		t.Fatalf("empty: %+v %v", ka, err)
+	}
+	for _, bad := range []string{"1s", "1s,x,2s", "1s,8s,4s", "0s,1s,2s"} {
+		if _, err := keepaliveFromEnv(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}

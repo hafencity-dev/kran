@@ -116,6 +116,10 @@ type testNode struct {
 	// clientAlive overrides the liveness check of a dropped CLI's process
 	// (nil: CLIs in this test process count as gone).
 	clientAlive func(pid int) bool
+	// logs, when set, also records every daemon log line.
+	logs *logCapture
+	// netSig overrides the network signature (nil: a constant).
+	netSig func() string
 
 	mu     sync.Mutex
 	d      *Daemon
@@ -213,10 +217,11 @@ func (n *testNode) start() *Daemon {
 		Peers:   src,
 		Dialer:  dialer,
 		Session: testSessionConfig(),
-		Logf:    n.log.logf(n.name),
+		Logf:    n.logf(),
 		Timing:  n.timing,
 
-		ClientAlive: n.clientAlive,
+		ClientAlive:  n.clientAlive,
+		NetSignature: n.netSignature(),
 	})
 	if err != nil {
 		n.t.Fatal(err)
@@ -245,6 +250,55 @@ func (n *testNode) start() *Daemon {
 		time.Sleep(10 * time.Millisecond)
 	}
 	return d
+}
+
+func (n *testNode) logf() func(string, ...any) {
+	base := n.log.logf(n.name)
+	if n.logs == nil {
+		return base
+	}
+	return func(format string, args ...any) {
+		base(format, args...)
+		n.logs.add(fmt.Sprintf(format, args...))
+	}
+}
+
+func (n *testNode) netSignature() func() string {
+	if n.netSig != nil {
+		return n.netSig
+	}
+	return func() string { return "test" }
+}
+
+// logCapture records log lines for assertions.
+type logCapture struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *logCapture) add(s string) {
+	l.mu.Lock()
+	l.lines = append(l.lines, s)
+	l.mu.Unlock()
+}
+
+// count returns how many lines contain sub.
+func (l *logCapture) count(sub string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := 0
+	for _, s := range l.lines {
+		if strings.Contains(s, sub) {
+			n++
+		}
+	}
+	return n
+}
+
+func (l *logCapture) all() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return strings.Join(l.lines, "\n")
 }
 
 // stop shuts the daemon down gracefully (supervisors keep running).

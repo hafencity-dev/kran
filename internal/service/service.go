@@ -88,6 +88,10 @@ type Status struct {
 	// NoGUI is set on macOS when no GUI login session exists, so LaunchAgents
 	// cannot load (the daemon then starts on demand or as a system daemon).
 	NoGUI bool
+	// Outdated: the installed unit was written by an older kran and lacks
+	// current settings (e.g. the daemon's scheduling priority); Refresh
+	// rewrites it.
+	Outdated bool
 }
 
 // RestartOptions control Restart.
@@ -115,6 +119,30 @@ type Manager interface {
 	Status(ctx context.Context) (Status, error)
 	// Unit returns the rendered unit/plist text.
 	Unit() string
+	// Refresh rewrites an installed unit in the current format, keeping
+	// the binary path and environment it was installed with; it reports
+	// whether anything changed. The service manager is told (systemd
+	// daemon-reload); a running daemon picks up what needs a restart at
+	// its next one. Restart refreshes first.
+	Refresh(ctx context.Context) (changed bool, err error)
+}
+
+// unitFormat is the version of the rendered unit; bump it whenever Unit()
+// changes in a way installed units should get (Status reports older ones).
+const unitFormat = 2
+
+var formatMarker = "kran-unit-format: " + strconv.Itoa(unitFormat)
+
+// installedOptions are o with the binary and environment of an installed
+// unit instead of this process's (an upgrade runs over ssh with a minimal
+// PATH; the one the user installed with must survive).
+func installedOptions(o Options, exe string, env map[string]string) Options {
+	if exe != "" {
+		o.KranPath = exe
+	}
+	o.Env = env
+	o.Getenv = func(string) string { return "" }
+	return o
 }
 
 // ErrNotInstalled is returned by Start/Restart when no unit exists.

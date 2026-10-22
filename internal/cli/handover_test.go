@@ -91,7 +91,8 @@ func (m *fakeManager) Stop(context.Context) error      { return nil }
 func (m *fakeManager) Restart(ctx context.Context, o service.RestartOptions) error {
 	return m.Start(ctx)
 }
-func (m *fakeManager) Unit() string { return "" }
+func (m *fakeManager) Unit() string                          { return "" }
+func (m *fakeManager) Refresh(context.Context) (bool, error) { return false, nil }
 func (m *fakeManager) Status(context.Context) (service.Status, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
