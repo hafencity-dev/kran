@@ -311,7 +311,7 @@ func Link(ctx context.Context, o Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if ch, err := EnsureAuthorizedKey(ak, AuthorizedKeysLine(o.SelfPath, info.PubKey, o.Tag)); err != nil {
+	if ch, err := EnsureAuthorizedKey(ak, AuthorizedKeysLineEnv(o.SelfPath, info.PubKey, o.Tag, InstallEnv())); err != nil {
 		return nil, err
 	} else if ch {
 		changed = true

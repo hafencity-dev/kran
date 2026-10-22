@@ -18,6 +18,37 @@ import (
 // pubKey may be a full "type blob comment" line. The key can then do nothing
 // except speak the kran protocol (SPEC §3).
 func AuthorizedKeysLine(kranPath, pubKey, tag string) string {
+	return authorizedKeysLine(kranPath, pubKey, tag, nil)
+}
+
+// installEnv are the variables that place a kran install (KRAN_*_DIR and
+// the resource namespace). A development install next to a real one sets
+// them; its forced command must carry them, or `kran serve --stdio` would
+// reach (and autostart) the default install's daemon instead.
+var installEnv = []string{"KRAN_CONFIG_DIR", "KRAN_STATE_DIR", "KRAN_RUNTIME_DIR", "KRAN_CACHE_DIR", "KRAN_NAMESPACE"}
+
+// InstallEnv returns the install-placing variables set in this process
+// (nil for a normal install).
+func InstallEnv() map[string]string {
+	var m map[string]string
+	for _, k := range installEnv {
+		if v := os.Getenv(k); v != "" {
+			if m == nil {
+				m = map[string]string{}
+			}
+			m[k] = v
+		}
+	}
+	return m
+}
+
+// AuthorizedKeysLineEnv is AuthorizedKeysLine for an install placed by env
+// (see InstallEnv): the forced command runs `env K='v' … <kran> serve --stdio`.
+func AuthorizedKeysLineEnv(kranPath, pubKey, tag string, env map[string]string) string {
+	return authorizedKeysLine(kranPath, pubKey, tag, env)
+}
+
+func authorizedKeysLine(kranPath, pubKey, tag string, env map[string]string) string {
 	f := strings.Fields(pubKey)
 	if len(f) < 2 {
 		return ""
@@ -29,9 +60,23 @@ func AuthorizedKeysLine(kranPath, pubKey, tag string) string {
 	if tag != "" && !strings.Contains(" "+comment+" ", " "+tag+" ") {
 		comment += " " + tag
 	}
-	esc := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(kranPath)
+	cmd := kranPath
+	if len(env) > 0 {
+		// sshd runs the command with the user's shell: quote for it.
+		var b strings.Builder
+		b.WriteString("env")
+		for _, k := range installEnv {
+			if v, ok := env[k]; ok {
+				fmt.Fprintf(&b, " %s=%s", k, shellQuote(v))
+			}
+		}
+		cmd = b.String() + " " + shellQuote(kranPath)
+	}
+	esc := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(cmd)
 	return fmt.Sprintf(`command="%s serve --stdio",restrict %s %s %s`, esc, f[0], f[1], comment)
 }
+
+func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
 // authLine is a parsed authorized_keys line.
 type authLine struct {
