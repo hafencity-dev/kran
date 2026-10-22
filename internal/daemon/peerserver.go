@@ -198,7 +198,10 @@ func (t *targetSide) handleAdmit(ps *peerSession, pc *peerConn, req rawPeerReque
 }
 
 // begin marks a prestart operation in flight (keeps the reservation alive).
-func (t *targetSide) begin(id string) (*tjob, error) {
+// usesSlot marks operations that work in the job's slot (all but blob.put,
+// which writes only the shared blob store): a cancel releases the slot only
+// once none of them is in flight.
+func (t *targetSide) begin(id string, usesSlot bool) (*tjob, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	j := t.jobs[id]
@@ -212,14 +215,20 @@ func (t *targetSide) begin(id string) (*tjob, error) {
 		return nil, &peerError{Code: codeUnknownJob, Msg: fmt.Sprintf("job %s was canceled on %s", id, t.d.self)}
 	}
 	j.busy++
+	if usesSlot {
+		j.slotOps++
+	}
 	return j, nil
 }
 
-func (t *targetSide) end(j *tjob) {
+func (t *targetSide) end(j *tjob, usesSlot bool) {
 	t.mu.Lock()
 	j.busy--
+	if usesSlot {
+		j.slotOps--
+	}
 	j.reservedAt = t.d.now()
-	if j.canceled && j.busy == 0 && !j.started {
+	if j.canceled && j.slotOps == 0 && !j.started && t.jobs[j.ID] == j {
 		t.releaseLocked(j, "canceled by origin")
 	}
 	t.mu.Unlock()
@@ -240,12 +249,12 @@ func (t *targetSide) handleSlotAcquire(pc *peerConn, req rawPeerRequest) {
 		pc.fail(codeBadRequest, "malformed slot.acquire")
 		return
 	}
-	j, err := t.begin(req.JobID)
+	j, err := t.begin(req.JobID, true)
 	if err != nil {
 		failPeer(pc, err)
 		return
 	}
-	defer t.end(j)
+	defer t.end(j, true)
 	t.mu.Lock()
 	if j.Slot != nil {
 		s := *j.Slot
@@ -287,12 +296,12 @@ func newZstdDecoder() (*zstd.Decoder, error) {
 }
 
 func (t *targetSide) handleSlotDiff(pc *peerConn, req rawPeerRequest) {
-	j, err := t.begin(req.JobID)
+	j, err := t.begin(req.JobID, true)
 	if err != nil {
 		failPeer(pc, err)
 		return
 	}
-	defer t.end(j)
+	defer t.end(j, true)
 	t.mu.Lock()
 	slot := j.Slot
 	t.mu.Unlock()
@@ -340,11 +349,11 @@ func (t *targetSide) handleBlobPut(pc *peerConn, req rawPeerRequest) {
 	var j *tjob
 	if req.JobID != "" {
 		var err error
-		if j, err = t.begin(req.JobID); err != nil {
+		if j, err = t.begin(req.JobID, false); err != nil {
 			failPeer(pc, err)
 			return
 		}
-		defer t.end(j)
+		defer t.end(j, false)
 	}
 	if err := pc.respond(nil); err != nil {
 		return
@@ -444,12 +453,12 @@ func (t *targetSide) putBlob(ctx context.Context, pc *peerConn, dec *zstd.Decode
 }
 
 func (t *targetSide) handleSlotCommit(pc *peerConn, req rawPeerRequest) {
-	j, err := t.begin(req.JobID)
+	j, err := t.begin(req.JobID, true)
 	if err != nil {
 		failPeer(pc, err)
 		return
 	}
-	defer t.end(j)
+	defer t.end(j, true)
 	t.mu.Lock()
 	slot, m := j.Slot, j.manifest
 	t.mu.Unlock()
@@ -482,7 +491,7 @@ func (t *targetSide) handleJobStart(ps *peerSession, pc *peerConn, req rawPeerRe
 		pc.fail(codeBadRequest, "malformed job.start")
 		return
 	}
-	j, err := t.begin(req.JobID)
+	j, err := t.begin(req.JobID, true)
 	if err != nil {
 		failPeer(pc, err)
 		return
@@ -491,7 +500,7 @@ func (t *targetSide) handleJobStart(ps *peerSession, pc *peerConn, req rawPeerRe
 	slot := j.Slot
 	t.mu.Unlock()
 	if slot == nil {
-		t.end(j)
+		t.end(j, true)
 		pc.fail(codeBadRequest, "job.start before slot.commit")
 		return
 	}
@@ -508,13 +517,14 @@ func (t *targetSide) handleJobStart(ps *peerSession, pc *peerConn, req rawPeerRe
 	})
 	cancel()
 	if err != nil {
-		t.end(j)
+		t.end(j, true)
 		pc.fail(codeInternal, "start on %s: %v", t.d.self, err)
 		return
 	}
 	j.setProc(proc)
 	t.mu.Lock()
 	j.busy--
+	j.slotOps--
 	j.started = true
 	canceled := j.canceled
 	t.persistLocked()

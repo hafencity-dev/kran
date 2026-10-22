@@ -420,11 +420,11 @@ type fakeExec struct {
 	endBeforeStart *proto.Exit
 	// setup: the job reports a setup phase this long before the command
 	// starts (a TERM meanwhile cancels it).
-	setup time.Duration
-	starting       int
-	putBlobs       int
-	acquires       int
-	releases       int
+	setup    time.Duration
+	starting int
+	putBlobs int
+	acquires int
+	releases int
 }
 
 func newFakeExec(node, dir string, lease time.Duration) *fakeExec {

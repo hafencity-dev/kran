@@ -43,6 +43,7 @@ type tjob struct {
 	sess       transport.Session // session that admitted it
 	reservedAt time.Time
 	busy       int // in-flight prestart operations (holds the reservation)
+	slotOps    int // those of them working in the slot
 	// canceled: the origin gave the job up while an operation was in
 	// flight; the last one to finish releases (or stops) it.
 	canceled bool
@@ -247,7 +248,7 @@ func (t *targetSide) cancelLocked(j *tjob, why string) {
 	if j.started {
 		return
 	}
-	if j.busy > 0 {
+	if j.slotOps > 0 {
 		j.canceled = true
 		return
 	}
