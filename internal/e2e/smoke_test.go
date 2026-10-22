@@ -318,19 +318,29 @@ func (s *smoke) uiAddr() string {
 	return m[len(m)-1][1]
 }
 
+// smokePath prepends the node's tool dirs to PATH for its non-login ssh
+// shell; KRAN_SMOKE_PATH adds dirs before the Homebrew defaults.
+func smokePath() string {
+	p := "/opt/homebrew/bin:/usr/local/bin"
+	if extra := os.Getenv("KRAN_SMOKE_PATH"); extra != "" {
+		p = extra + ":" + p
+	}
+	return "PATH=" + p + ":$PATH; "
+}
+
 // realKran describes the node's real install: its daemon and its sync
 // container must be the same before and after (its job containers come and
 // go with its own work).
 func (s *smoke) realKran() string {
 	out, _ := s.ssh(`pgrep -f "kran daemon" | while read p; do ps -o pid=,command= -p $p; done | grep -v kran-dev; ` +
-		`PATH=/usr/local/lokalaise/tools/bin:/opt/homebrew/bin:/usr/local/bin:$PATH; docker ps --format '{{.Names}} {{.ID}}' 2>/dev/null | grep '^kran-sync '; true`)
+		smokePath() + `docker ps --format '{{.Names}} {{.ID}}' 2>/dev/null | grep '^kran-sync '; true`)
 	return out
 }
 
 // devLeftovers lists anything of the dev install on the node.
 func (s *smoke) devLeftovers() string {
 	out, _ := s.ssh(`ps -axo pid=,command= | grep "kran-dev/t1/" | grep -v grep; ` +
-		`PATH=/usr/local/lokalaise/tools/bin:/opt/homebrew/bin:/usr/local/bin:$PATH; ` +
+		smokePath() +
 		`docker ps -a --format 'container {{.Names}}' 2>/dev/null | grep ' kran-dev-'; ` +
 		`docker volume ls --format 'volume {{.Name}}' 2>/dev/null | grep ' kran-dev-'; ` +
 		`launchctl list 2>/dev/null | grep -i kran-dev; true`)
@@ -353,7 +363,7 @@ func (s *smoke) cleanup(localAK string, localBefore []byte, remoteBefore, realBe
 	// stop it, then remove what the dev namespace created in Docker.
 	s.ssh(`pkill -TERM -f "` + s.rdir + `/bin/kran daemon"; sleep 3; pkill -KILL -f "` + s.rdir + `/bin/kran"; true`)
 	keepImage := os.Getenv("KRAN_SMOKE_KEEP_IMAGE") != ""
-	dockerClean := `PATH=/usr/local/lokalaise/tools/bin:/opt/homebrew/bin:/usr/local/bin:$PATH; ` +
+	dockerClean := smokePath() +
 		`for c in $(docker ps -aq --filter name=^kran-dev-); do docker rm -f $c; done; ` +
 		`for v in $(docker volume ls -q --filter name=^kran-dev-); do docker volume rm $v; done; `
 	if !keepImage {

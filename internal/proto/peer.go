@@ -3,7 +3,7 @@ package proto
 // Peer protocol (SPEC §8.3). Every yamux stream starts with one JSON line:
 // a PeerRequest. The responder answers with one JSON line PeerResponse, after
 // which the stream carries method-specific data (documented per method in
-// internal/transport and internal/daemon). Package A owns the details; the
+// internal/transport and internal/daemon). The details live there; the
 // types here are the stable envelope.
 
 type PeerRequest struct {
