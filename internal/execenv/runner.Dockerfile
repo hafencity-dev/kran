@@ -1,14 +1,25 @@
 # kran-runner: the Linux environment of kran's container runtime (SPEC §6.8).
 # Toolchains are not baked in: jobs get them from mise, installed on demand
 # into the kran-tools volume and shared by every job on the node.
+# Built with kran-init (runner-init.sh) next to this file as the context.
 FROM debian:stable-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl git build-essential unzip xz-utils pkg-config \
-      bash zsh procps openssh-client gnupg \
+      bash zsh procps openssh-client gnupg locales tzdata \
  && rm -rf /var/lib/apt/lists/*
+
+# Common UTF-8 locales, so a job sorts and formats like its origin without
+# kran-init building one first (others are built per job, about a second).
+RUN set -eu; for l in en_US en_GB en_AU en_CA en_IE en_IN en_NZ de_DE de_AT de_CH fr_FR fr_CA es_ES es_MX it_IT nl_NL pt_PT pt_BR pl_PL sv_SE da_DK nb_NO fi_FI cs_CZ ru_RU uk_UA tr_TR ja_JP ko_KR zh_CN zh_TW; do \
+      localedef -i "$l" -f UTF-8 "$l.UTF-8"; \
+    done
+
+# The workspace is a copy owned by the job's uid, but parent directories
+# and $HOME may not be: git must not refuse to work in it.
+RUN git config --system --add safe.directory '*'
 
 # mise provisions Go, Node, Python, … per job pin. The Docker CLI and the
 # compose plugin let tests using `docker`, `docker compose` or
@@ -46,9 +57,15 @@ RUN set -eu; arch="$(uname -m)"; \
     rm -f mise docker.tgz docker-compose; \
     mise --version; docker --version; docker compose version
 
+# kran-init gives each job its user, then drops to it; it writes the job's
+# toolchain versions to mise.toml and a shim per tool binary to shims/.
+COPY kran-init /usr/local/lib/kran/init
+RUN chmod 0755 /usr/local/lib/kran/init && mkdir -p /usr/local/lib/kran/shims
+
 ENV MISE_DATA_DIR=/kran/tools/mise \
     MISE_CACHE_DIR=/kran/cache/mise \
+    MISE_GLOBAL_CONFIG_FILE=/usr/local/lib/kran/mise.toml \
     MISE_YES=1 \
-    PATH=/kran/tools/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    PATH=/usr/local/lib/kran/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 LABEL kran.runner="1"

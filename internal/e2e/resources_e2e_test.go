@@ -4,6 +4,8 @@ package e2e
 
 import (
 	"os"
+	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -121,6 +123,28 @@ func TestE2EContainerPathParity(t *testing.T) {
 	want := filepath.Join(repo, "sub") + "\nx\ncontainer\n" + itoa(os.Getuid()) + "\n"
 	if string(r.stdout) != want {
 		t.Errorf("container view: got %q want %q", r.stdout, want)
+	}
+
+	// The job looks like the origin (SPEC §6.8): its user name and home,
+	// the workspace's pinned node, and the origin's own go although the
+	// workspace does not pin it.
+	u, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, _ := os.UserHomeDir()
+	r = a.kran(runOpts{dir: filepath.Join(repo, "sub"), timeout: 10 * time.Minute}, "run", "-n", "b", "--",
+		"sh", "-c", `whoami; echo "$HOME"; touch "$HOME/.kran-e2e" && echo home-ok; node --version; command -v go >/dev/null && go version || echo no-go`)
+	if r.code != 0 {
+		t.Fatalf("container job: %s", r)
+	}
+	t.Logf("container job:\n%s", r.stdout)
+	want = u.Username + "\n" + home + "\nhome-ok\nv18.20.4\n"
+	if out := string(r.stdout); !strings.HasPrefix(out, want) || strings.Contains(string(r.stderr), "No version is set") {
+		t.Errorf("container user/tools: got %q, want prefix %q; stderr %s", out, want, r.stderr)
+	}
+	if _, err := exec.LookPath("go"); err == nil && !strings.Contains(string(r.stdout), "go version go") {
+		t.Errorf("the origin's go is missing in the container: %q", r.stdout)
 	}
 	a.waitIdle(30 * time.Second)
 	b.waitIdle(30 * time.Second)
