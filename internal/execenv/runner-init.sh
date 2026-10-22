@@ -131,5 +131,42 @@ for kr_var in SSL_CERT_FILE SSL_CERT_DIR NODE_EXTRA_CA_CERTS REQUESTS_CA_BUNDLE 
 done
 
 kr_groups=$kr_gid$kr_extra
-unset KRAN_INIT_UID KRAN_INIT_GID KRAN_INIT_GROUPS KRAN_INIT_USER KRAN_INIT_GROUP KRAN_INIT_TOOLS KRAN_INIT_SHIMS KRAN_INIT_TZ
-exec setpriv --reuid="$kr_uid" --regid="$kr_gid" --groups="$kr_groups" -- "$@"
+kr_drop() { setpriv --reuid="$kr_uid" --regid="$kr_gid" --groups="$kr_groups" -- "$@"; }
+
+# --- Docker: the job's /var/run/docker.sock is kran's proxy in front of
+# Docker's socket, so bind mounts of the workspace (`docker run -v
+# "$PWD":/src`, compose) reach the job's own files on the Docker host. It
+# runs as the job's user, outside the job's process tree (its parent is the
+# container's init), and ends with the container. Without it, the job gets
+# Docker's socket as is.
+kr_dhost=/run/kran/docker-host.sock
+if [ -S "$kr_dhost" ]; then
+	kr_dsock=/run/kran/docker/docker.sock
+	if [ -x "$kr_lib/kran" ] && [ -n "${KRAN_INIT_DOCKER_MAP:-}" ] &&
+		mkdir -p /run/kran/docker && chmod 1777 /run/kran/docker; then
+		(kr_drop "$kr_lib/kran" internal docker-proxy --listen "$kr_dsock" --upstream "$kr_dhost" </dev/null >/dev/null 2>&1 9<&- &)
+		kr_i=0
+		while [ ! -S "$kr_dsock" ] && [ $kr_i -lt 200 ]; do
+			sleep 0.01
+			kr_i=$((kr_i + 1))
+		done
+		[ -S "$kr_dsock" ] || kr_warn "the Docker proxy did not start; bind mounts of the workspace will be empty"
+	fi
+	[ -S "$kr_dsock" ] || kr_dsock=$kr_dhost
+	ln -sfn "$kr_dsock" /run/docker.sock 2>/dev/null || kr_warn "could not link the Docker socket"
+fi
+
+# --- shared caches: the job holds kran's cache lock (shared) for the life
+# of its container, so the cache trim never deletes what it uses. A
+# process outside the job's tree holds it: the job may close any fd.
+kr_lock=/kran/cache/.kran-lock
+if [ -f "$kr_lock" ] && [ -r "$kr_lock" ] && command -v flock >/dev/null 2>&1 && exec 9<"$kr_lock"; then
+	if flock -s -w 900 9; then
+		(kr_drop sleep infinity </dev/null >/dev/null 2>&1 &)
+	else
+		kr_warn "the shared caches stayed locked for 15 minutes; running anyway"
+	fi
+fi
+
+unset KRAN_INIT_UID KRAN_INIT_GID KRAN_INIT_GROUPS KRAN_INIT_USER KRAN_INIT_GROUP KRAN_INIT_TOOLS KRAN_INIT_SHIMS KRAN_INIT_TZ KRAN_INIT_DOCKER_MAP
+exec setpriv --reuid="$kr_uid" --regid="$kr_gid" --groups="$kr_groups" -- "$@" 9<&-

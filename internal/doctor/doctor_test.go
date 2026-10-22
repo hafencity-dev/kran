@@ -336,3 +336,14 @@ func TestSystemDaemonModeReported(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 }
+
+func TestCacheResult(t *testing.T) {
+	ok := cacheResult("devmac", &proto.CacheStatus{Used: 12 << 30, Budget: 20 << 30, DiskFree: 40 << 30, DiskTotal: 100 << 30, Reclaimed: 3 << 30})
+	if ok.Level != OK || !strings.Contains(ok.Detail, "12.0 GiB of 20.0 GiB budget") || !strings.Contains(ok.Detail, "reclaimed 3.0 GiB") {
+		t.Errorf("%+v", ok)
+	}
+	low := cacheResult("devmac", &proto.CacheStatus{Used: 12 << 30, Budget: 20 << 30, DiskFree: 5 << 30, DiskTotal: 100 << 30})
+	if low.Level != Warn || low.Fix == "" {
+		t.Errorf("%+v", low)
+	}
+}

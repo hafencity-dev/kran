@@ -45,6 +45,10 @@ type UIConfig struct {
 type RuntimeConfig struct {
 	Container struct {
 		Enabled string `toml:"enabled"` // auto | true | false
+		// CacheBudget bounds the shared caches of container jobs
+		// (toolchains, module and package caches), e.g. "20GiB";
+		// "" = min(20 GiB, a quarter of the Docker disk).
+		CacheBudget string `toml:"cache_budget"`
 	} `toml:"container"`
 }
 
@@ -121,6 +125,11 @@ func (c *Config) Validate() error {
 	case "auto", "local", "remote":
 	default:
 		errs = append(errs, fmt.Errorf("submit.prefer = %q; use auto, local or remote", c.Submit.Prefer))
+	}
+	if b := c.Runtime.Container.CacheBudget; b != "" {
+		if _, err := ParseSize(b); err != nil {
+			errs = append(errs, fmt.Errorf("runtime.container.cache_budget: %w", err))
+		}
 	}
 	switch c.Runtime.Container.Enabled {
 	case "auto", "true", "false":

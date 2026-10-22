@@ -23,6 +23,10 @@ const (
 	ctrInit     = "/usr/local/lib/kran/init"
 	ctrShims    = "/usr/local/lib/kran/shims"
 	ctrMiseConf = "/usr/local/lib/kran/mise.toml"
+	ctrKran     = "/usr/local/lib/kran/kran" // the node's Linux kran binary
+	// The Docker host's socket in a job container; the job's own
+	// /var/run/docker.sock is kran's proxy in front of it (dockerproxy.go).
+	ctrDockerHost = "/run/kran/docker-host.sock"
 )
 
 // ctrToolBins lists the binaries mise provides per toolchain key; a job

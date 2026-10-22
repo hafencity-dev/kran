@@ -12,6 +12,12 @@ All notable changes to kran. Versions follow [semantic versioning](https://semve
 - Reconnects back off up to 20 s and start over when the peer connects or the network changes; the log says what changed instead of repeating itself.
 - One daemon per machine: a second one started by launchd or systemd waits instead of restarting every few seconds. The daemon log is written once (`daemon.log`); `daemon.out.log` keeps only crash output.
 
+### Linux container runtime
+
+- Docker from a job works with bind mounts: `docker run -v "$PWD":/src`, relative bind mounts in compose files and BuildKit builds see the job's workspace (and home) instead of an empty directory. The job's Docker socket is a small proxy that maps those paths to where the slot lives on the Docker host; concurrent jobs and repos keep their own mapping.
+- The shared caches of container jobs (Go, pnpm, npm, uv, pip, cargo, mise installs, the persistent home's caches) are trimmed hourly to a budget (`runtime.container.cache_budget`, default min(20 GiB, a quarter of the Docker disk)), least recently used first and harder when the Docker disk runs low; never while a job uses them. `kran doctor` shows their size. Dangling runner images and stopped kran containers are removed too.
+- The runner image has the everyday tools scripts expect: envsubst, jq, ripgrep, shellcheck, lsof, strace, sfdisk/fdisk, file, zip, zstd, rsync, netcat, dig, ip/ss, sqlite3, bc, patch, xxd and more, plus `docker buildx`.
+
 ## 0.1.0 - first release
 
 kran moves heavy dev jobs to whichever of your machines has room, and never makes a job worse than running it locally.

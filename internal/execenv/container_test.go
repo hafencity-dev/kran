@@ -23,7 +23,7 @@ import (
 // On Linux they run twice: slots on the host (bind mount, the Linux
 // default) and slots in the volume via the sync helper (the macOS path).
 
-const testRunnerDockerfile = "FROM alpine:3.20\nRUN apk add --no-cache coreutils setpriv\nCOPY kran-init /usr/local/lib/kran/init\nLABEL kran.runner=\"test\"\n"
+const testRunnerDockerfile = "FROM alpine:3.20\nRUN apk add --no-cache coreutils setpriv flock\nCOPY kran-init /usr/local/lib/kran/init\nCOPY kran /usr/local/lib/kran/kran\nLABEL kran.runner=\"test\"\n"
 
 func dockerTests(t *testing.T) {
 	t.Helper()
@@ -260,6 +260,82 @@ func testContainerRuntime(t *testing.T, volume bool) {
 		waitExit(t, p, 120*time.Second)
 		if out, _ := output(t, p); !strings.Contains(out, "nosock") {
 			t.Fatalf("NoDocker job: %q", out)
+		}
+	})
+
+	// The job's Docker socket is kran's proxy (the real-runner test runs
+	// docker in a job); the job holds the cache lock through a process
+	// outside its own tree and has no stray descriptor for it.
+	t.Run("docker-proxy-and-cache-lock", func(t *testing.T) {
+		p := te.startCtr(ref, sh(`readlink /var/run/docker.sock; test -S "$(readlink /var/run/docker.sock)" && echo proxy-up
+ls /proc/self/fd | tr '\n' ' '; echo
+flock -n -x /kran/cache/.kran-lock true 2>/dev/null && echo unlocked || echo locked
+env | grep -c '^KRAN_INIT_' || true`))
+		exit := waitExit(t, p, 120*time.Second)
+		out, errOut := output(t, p)
+		if exit.Code != 0 {
+			t.Fatalf("exit %+v\n%s\n%s", exit, out, errOut)
+		}
+		for _, want := range []string{"/run/kran/docker/docker.sock\n", "proxy-up\n", "\nlocked\n", "\n0\n"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("missing %q in:\n%s\n%s", want, out, errOut)
+			}
+		}
+		if strings.Contains(out, " 9 ") {
+			t.Errorf("the job inherited the lock's descriptor: %s", out)
+		}
+		if errOut != "" {
+			t.Errorf("stderr %q", errOut)
+		}
+	})
+
+	// The cache trim deletes old entries over budget, keeps fresh ones,
+	// and never runs while a job holds the caches.
+	t.Run("cache-trim", func(t *testing.T) {
+		p := te.startCtr(ref, sh(`set -e
+mkdir -p /kran/cache/npm/_cacache /kran/cache/go-build/aa
+head -c 3000000 /dev/zero > /kran/cache/npm/_cacache/old
+touch -d '2026-01-01 00:00' /kran/cache/npm/_cacache/old
+head -c 1000 /dev/zero > /kran/cache/go-build/aa/fresh
+echo planted; sleep 300`))
+		waitFor(t, p, "planted", 120*time.Second)
+		dk, _ := te.m.docker()
+		te.m.opts.CacheBudget = 1 << 20
+		rep, err := te.m.runCacheTrim(context.Background(), dk)
+		if err != nil || rep.Skipped == "" {
+			t.Fatalf("trim while a job runs: %+v %v", rep, err)
+		}
+		p.Signal("KILL")
+		waitExit(t, p, 60*time.Second)
+		rep, err = te.m.runCacheTrim(context.Background(), dk)
+		if err != nil || rep.Skipped != "" || rep.Removed < 1 || rep.Reclaimed < 3000000 || rep.Total == 0 {
+			t.Fatalf("trim: %+v %v", rep, err)
+		}
+		p = te.startCtr(ref, sh(`test -e /kran/cache/npm/_cacache && echo old-kept; test -e /kran/cache/go-build/aa/fresh && echo fresh-kept`))
+		waitExit(t, p, 60*time.Second)
+		if out, _ := output(t, p); strings.Contains(out, "old-kept") || !strings.Contains(out, "fresh-kept") {
+			t.Errorf("after trim: %q", out)
+		}
+		// The reaper's way: in the background, reported in the runtime.
+		te.m.opts.CacheBudget = 0
+		te.m.tun.cacheTrimEvery = time.Hour
+		defer func() { te.m.tun.cacheTrimEvery = 0 }()
+		te.m.maybeTrimCaches(context.Background())
+		te.m.ct.mu.Lock()
+		done := te.m.ct.done
+		te.m.ct.mu.Unlock()
+		if done == nil {
+			t.Fatal("no trim started")
+		}
+		<-done
+		var cs *proto.CacheStatus
+		for _, rt := range te.m.Runtimes(context.Background()) {
+			if rt.Kind == proto.RuntimeContainer {
+				cs = rt.Caches
+			}
+		}
+		if cs == nil || cs.DiskTotal == 0 || cs.Budget == 0 || cs.Used == 0 {
+			t.Errorf("runtime caches %+v", cs)
 		}
 	})
 

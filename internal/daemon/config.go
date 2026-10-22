@@ -23,6 +23,7 @@ type NodeConfig struct {
 	// the tailscale IP on port 7270).
 	UIListen         string
 	ContainerEnabled string // auto | true | false
+	CacheBudget      int64  // runtime.container.cache_budget in bytes (0 = automatic)
 }
 
 type AcceptConfig struct {
@@ -67,6 +68,9 @@ func loadNodeConfig(dir string) (NodeConfig, error) {
 		Prefer:           c.Submit.Prefer,
 		UIListen:         c.UI.Listen,
 		ContainerEnabled: c.Runtime.Container.Enabled,
+	}
+	if b := c.Runtime.Container.CacheBudget; b != "" {
+		nc.CacheBudget, _ = config.ParseSize(b)
 	}
 	if b, err := os.ReadFile(filepath.Join(dir, "node_id")); err == nil {
 		nc.ID = strings.TrimSpace(string(b))

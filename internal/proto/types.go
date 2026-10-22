@@ -91,6 +91,20 @@ type Runtime struct {
 	// the container runtime's image is not built yet; the
 	// first container job builds it (about 30 s) before it can start.
 	FirstUse bool `json:"first_use,omitempty"`
+	// Caches: the container runtime's shared caches as its last trim
+	// found them (nil until one ran).
+	Caches *CacheStatus `json:"caches,omitempty"`
+}
+
+// CacheStatus describes the container runtime's shared caches (toolchains,
+// module and package caches, the persistent home) after their last trim.
+type CacheStatus struct {
+	Used      int64     `json:"used"`      // bytes
+	Budget    int64     `json:"budget"`    // bytes the caches may use
+	DiskFree  int64     `json:"disk_free"` // free bytes on the Docker disk
+	DiskTotal int64     `json:"disk_total"`
+	Reclaimed int64     `json:"reclaimed"` // bytes the last trim freed
+	At        time.Time `json:"at"`        // when it ran
 }
 
 // NodeMetrics are live measurements (sampled every 2 s, published every 2 s).

@@ -57,6 +57,7 @@ func testTunables() tunables {
 	tun.watchEvery = 20 * time.Millisecond
 	tun.livenessEvery = 200 * time.Millisecond
 	tun.probe = false
+	tun.cacheTrimEvery = 0 // tests run the cache trim themselves
 	off := false
 	tun.scope = &off
 	return tun

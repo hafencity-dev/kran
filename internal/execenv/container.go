@@ -45,10 +45,11 @@ type dockerEnv struct {
 	cliEnv []string
 
 	mu      sync.Mutex
-	ready   bool      // volumes and image verified
-	sockGID int       // group of /var/run/docker.sock inside the Docker host
-	syncBin string    // kran binary path inside the sync container
-	syncAt  time.Time // when the sync helper was last seen running with syncBin
+	ready   bool              // volumes and image verified
+	sockGID int               // group of /var/run/docker.sock inside the Docker host
+	syncBin string            // kran binary path inside the sync container
+	syncAt  time.Time         // when the sync helper was last seen running with syncBin
+	volDirs map[string]string // volume name → its directory on the Docker host
 }
 
 // syncRecheck: how long a verified sync helper is trusted without asking
@@ -73,10 +74,10 @@ func (dk *dockerEnv) inherit(old *dockerEnv) {
 		return
 	}
 	old.mu.Lock()
-	ready, gid, bin, at := old.ready, old.sockGID, old.syncBin, old.syncAt
+	ready, gid, bin, at, dirs := old.ready, old.sockGID, old.syncBin, old.syncAt, old.volDirs
 	old.mu.Unlock()
 	dk.mu.Lock()
-	dk.ready, dk.sockGID, dk.syncBin, dk.syncAt = ready, gid, bin, at
+	dk.ready, dk.sockGID, dk.syncBin, dk.syncAt, dk.volDirs = ready, gid, bin, at, dirs
 	dk.mu.Unlock()
 }
 
@@ -292,8 +293,10 @@ func (m *manager) prepareVolumes(ctx context.Context, dk *dockerEnv) error {
 		dirs = append(dirs, "/kran/"+v)
 	}
 	owner := fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
-	script := fmt.Sprintf("mkdir -p %s/bin %s/home %s/mise && chown %s %s %s/bin %s/home %s/mise && stat -c %%g /var/run/docker.sock 2>/dev/null || echo -1",
-		ctrTools, ctrCache, ctrCache, owner, strings.Join(dirs, " "), ctrTools, ctrCache, ctrCache)
+	// The cache lock: jobs hold it shared, the cache trim exclusively.
+	lock := ctrCache + "/" + cacheLockFile
+	script := fmt.Sprintf("mkdir -p %s/bin %s/home %s/mise && touch %s && chown %s %s %s/bin %s/home %s/mise %s && stat -c %%g /var/run/docker.sock 2>/dev/null || echo -1",
+		ctrTools, ctrCache, ctrCache, lock, owner, strings.Join(dirs, " "), ctrTools, ctrCache, ctrCache, lock)
 	args = append(args, "--entrypoint", "/bin/sh", m.imageTag(), "-c", script)
 	out, err := dk.run(ctx, nil, args...)
 	if err != nil {
@@ -303,6 +306,7 @@ func (m *manager) prepareVolumes(ctx context.Context, dk *dockerEnv) error {
 	if len(f) > 0 {
 		dk.sockGID, _ = strconv.Atoi(f[len(f)-1])
 	}
+	dk.volDirs = nil // (re)created volumes may live elsewhere
 	return nil
 }
 
@@ -358,10 +362,14 @@ func (m *manager) ensureSync(ctx context.Context, dk *dockerEnv) error {
 	return nil
 }
 
-// linuxBinaryHash hashes the Linux kran binary, once per version of the
-// file (it is tens of MB; every container sync needs its name).
+// linuxBinaryHash hashes the Linux kran binary (runnerBinary), once per
+// version of the file (it is tens of MB; every container sync needs its
+// name).
 func (m *manager) linuxBinaryHash() (string, error) {
-	p := m.opts.LinuxBinary
+	p := m.runnerBinary()
+	if p == "" {
+		return "", errors.New("no Linux kran binary")
+	}
 	fi, err := os.Stat(p)
 	if err != nil {
 		return "", err
@@ -540,6 +548,9 @@ func (m *manager) containerSpec(ctx context.Context, spec *superSpec, req *Start
 		"KRAN_INIT_GROUPS": strings.Join(groups, ","), "KRAN_INIT_USER": user, "KRAN_INIT_GROUP": nodeGroupName(),
 		"KRAN_INIT_TOOLS": initTools, "KRAN_INIT_SHIMS": initShims, "KRAN_INIT_TZ": oe.TZ,
 	}
+	if !req.Spec.Req.NoDocker {
+		fixed["KRAN_INIT_DOCKER_MAP"] = encodeDockerMaps(m.dockerMaps(ctx, dk, s, root, home, homeMount))
+	}
 	if req.Spec.TTY != nil && req.Spec.Env["TERM"] == "" {
 		fixed["TERM"] = "xterm-256color"
 	}
@@ -607,9 +618,10 @@ func (m *manager) containerSpec(ctx context.Context, spec *superSpec, req *Start
 		}
 		// The Docker socket lets testcontainers and docker compose work in
 		// jobs; it is root-equivalent on rootful Docker (SPEC §9), so a
-		// project can opt out.
+		// project can opt out. kran-init puts the bind-mount proxy in
+		// front of it (dockerproxy.go).
 		if !req.Spec.Req.NoDocker {
-			a = append(a, "-v", "/var/run/docker.sock:/var/run/docker.sock")
+			a = append(a, "-v", "/var/run/docker.sock:"+ctrDockerHost)
 		}
 		if spec.MemMax > 0 {
 			a = append(a, "--memory", strconv.FormatInt(spec.MemMax, 10), "--memory-swap", strconv.FormatInt(spec.MemMax, 10))
@@ -668,4 +680,60 @@ func containerArgv(argv []string) []string {
 		}
 	}
 	return out
+}
+
+// volumeDir is where a volume's data lives on the Docker host (cached; a
+// volume keeps its place until it is removed, and prepareVolumes then
+// forgets them).
+func (m *manager) volumeDir(ctx context.Context, dk *dockerEnv, name string) string {
+	dk.mu.Lock()
+	dir, ok := dk.volDirs[name]
+	dk.mu.Unlock()
+	if ok {
+		return dir
+	}
+	var v struct{ Mountpoint string }
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := dk.api.get(ctx, "/volumes/"+name, &v); err != nil || !cleanAbs(v.Mountpoint) {
+		return ""
+	}
+	dk.mu.Lock()
+	if dk.volDirs == nil {
+		dk.volDirs = map[string]string{}
+	}
+	dk.volDirs[name] = v.Mountpoint
+	dk.mu.Unlock()
+	return v.Mountpoint
+}
+
+// dockerMaps tells the job's Docker proxy where its mounts live on the
+// Docker host: the workspace (the slot), the home directory and the
+// caches. A mount whose place is unknown is left out (its bind mounts
+// then behave as without the proxy).
+func (m *manager) dockerMaps(ctx context.Context, dk *dockerEnv, s *slot, root, home string, homeMount bool) []dockerMap {
+	var maps []dockerMap
+	add := func(ctr, host string) {
+		if host != "" && cleanAbs(host) {
+			maps = append(maps, dockerMap{Ctr: ctr, Host: host})
+		}
+	}
+	cache, tools := m.volumeDir(ctx, dk, m.volume("cache")), m.volumeDir(ctx, dk, m.volume("tools"))
+	if s.loc == locVolume {
+		if d := m.volumeDir(ctx, dk, m.volume("slots")); d != "" {
+			add(root, d+"/"+m.pool.ref(s).Path)
+		}
+	} else {
+		add(root, m.pool.hostPath(s))
+	}
+	if homeMount && cache != "" {
+		add(home, cache+"/home")
+	}
+	if cache != "" {
+		add(ctrCache, cache)
+	}
+	if tools != "" {
+		add(ctrTools, tools)
+	}
+	return maps
 }

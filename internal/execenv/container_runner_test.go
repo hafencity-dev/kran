@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -116,4 +117,78 @@ ulimit -Sn; df -k /dev/shm | tail -1`), withOrigin, withEnv("LANG", "de_DE.UTF-8
 			}
 		}
 	})
+}
+
+// TestContainerDockerFromJob runs Docker from inside a job of the real
+// runner image, as a Docker-based test suite would: a bind mount of the
+// workspace ($PWD, and a relative path in a compose file) and of the home
+// directory reaches the job's own files through kran's Docker proxy, with
+// slots on the host and in the volume (the macOS layout). It also checks
+// that the image has the everyday tools scripts expect. Opt-in like
+// TestContainerRealRunner:
+//
+//	KRAN_TEST_DOCKER=1 KRAN_TEST_RUNNER=1 go test -run ContainerDockerFromJob ./internal/execenv/
+func TestContainerDockerFromJob(t *testing.T) {
+	if os.Getenv("KRAN_TEST_RUNNER") != "1" {
+		t.Skip("set KRAN_TEST_DOCKER=1 KRAN_TEST_RUNNER=1 to test the real runner image")
+	}
+	variants := []bool{runtime.GOOS != "linux"}
+	if runtime.GOOS == "linux" {
+		variants = append(variants, true)
+	}
+	for _, volume := range variants {
+		name := "hostslots"
+		if volume {
+			name = "volumeslots"
+		}
+		t.Run(name, func(t *testing.T) { testDockerFromJob(t, volume) })
+	}
+}
+
+func testDockerFromJob(t *testing.T, volume bool) {
+	te := newContainerEnv(t, volume, func(o *Options, tun *tunables) {
+		o.Namespace = runnerTestNS
+		tun.runnerDockerfile = ""
+	})
+	ref, err := te.m.AcquireSlot(context.Background(), testRepo, "wt", proto.RuntimeContainer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	te.commit(ref, testRepo, map[string]string{"sub/somefile": "content from the slot\n"})
+	origin := &proto.OriginEnv{User: "alice", Home: "/work/kran-test", TZ: "UTC"}
+	p := te.startCtr(ref, sh(`set -e
+img=alpine:3.20
+echo "1:$(docker run --rm --user "$(id -u)" -v "$PWD":/w $img cat /w/somefile)"
+docker run --rm --user "$(id -u)" --mount type=bind,src="$PWD",dst=/w $img sh -c 'echo written-by-nested > /w/nested-out'
+echo "2:$(cat nested-out)"
+mkdir -p c
+printf 'services:\n  t:\n    image: %s\n    user: "%s"\n    volumes:\n      - ../:/w\n    command: cat /w/somefile\n' $img "$(id -u)" > c/compose.yml
+echo "3:$(docker compose -p "kran-test-$KRAN_JOB_ID" -f c/compose.yml run --rm t)"
+docker compose -p "kran-test-$KRAN_JOB_ID" -f c/compose.yml down >/dev/null 2>&1
+echo home-file > "$HOME/.kran-test-hf"
+echo "4:$(docker run --rm --user "$(id -u)" -v "$HOME":/h $img cat /h/.kran-test-hf)"
+printf 'FROM %s\nRUN --mount=type=cache,target=/c echo cached > /c/x\nCOPY somefile /s\nCMD ["cat", "/s"]\n' $img > Dockerfile.kt
+tag="kran-test-build-$KRAN_JOB_ID"
+docker build -q -t "$tag" -f Dockerfile.kt . >/dev/null
+echo "5:$(docker run --rm "$tag")"
+docker image rm "$tag" >/dev/null
+for tool in envsubst lsof sfdisk fdisk jq rg shellcheck file unzip zip xz zstd bzip2 rsync ps pkill killall nc dig ip ss ping less patch diff bc sqlite3 make gcc g++ curl wget git ssh tree xxd strace openssl docker; do
+	command -v "$tool" >/dev/null || echo "missing: $tool"
+done
+docker compose version >/dev/null && docker buildx version >/dev/null && echo plugins-ok
+command -v node >/dev/null && echo "node: $(command -v node)" || echo no-node`), func(r *StartRequest) { r.Spec.OriginEnv = origin })
+	exit := waitExit(t, p, 10*time.Minute)
+	out, errOut := output(t, p)
+	if exit.Code != 0 {
+		t.Fatalf("exit %+v\n%s\n%s", exit, out, errOut)
+	}
+	for _, want := range []string{"1:content from the slot\n", "2:written-by-nested\n", "3:content from the slot\n", "4:home-file\n", "5:content from the slot\n", "plugins-ok\n", "no-node\n"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s\n%s", want, out, errOut)
+		}
+	}
+	if strings.Contains(out, "missing:") {
+		t.Errorf("tools missing from the runner image:\n%s", out)
+	}
+	t.Logf("job output:\n%s", out)
 }

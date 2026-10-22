@@ -32,6 +32,7 @@ type tunables struct {
 	readyTimeout     time.Duration
 	reapEvery        time.Duration
 	trimEvery        time.Duration
+	cacheTrimEvery   time.Duration // container cache trim (ctrtrim.go)
 	jobMaxAge        time.Duration // finished job dirs are deleted after this
 	slotMaxIdle      time.Duration // free slots unused this long are deleted
 	slotHoldIdle     time.Duration // acquired but unused slots are released after this
@@ -45,19 +46,20 @@ type tunables struct {
 
 func defaultTunables() tunables {
 	return tunables{
-		leaseTTL:      LeaseTTL,
-		killGrace:     5 * time.Second,
-		sampleEvery:   time.Second,
-		watchEvery:    50 * time.Millisecond,
-		livenessEvery: time.Second,
-		readyTimeout:  20 * time.Second,
-		reapEvery:     30 * time.Second,
-		trimEvery:     10 * time.Minute,
-		jobMaxAge:     7 * 24 * time.Hour,
-		slotMaxIdle:   3 * 24 * time.Hour,
-		slotHoldIdle:  30 * time.Minute,
-		probe:         true,
-		probeDocker:   true,
+		leaseTTL:       LeaseTTL,
+		killGrace:      5 * time.Second,
+		sampleEvery:    time.Second,
+		watchEvery:     50 * time.Millisecond,
+		livenessEvery:  time.Second,
+		readyTimeout:   20 * time.Second,
+		reapEvery:      30 * time.Second,
+		trimEvery:      10 * time.Minute,
+		cacheTrimEvery: cacheTrimEvery,
+		jobMaxAge:      7 * 24 * time.Hour,
+		slotMaxIdle:    3 * 24 * time.Hour,
+		slotHoldIdle:   30 * time.Minute,
+		probe:          true,
+		probeDocker:    true,
 	}
 }
 
@@ -84,6 +86,7 @@ type manager struct {
 	dkReason string     // why not
 
 	img runnerImage
+	ct  cacheTrim
 
 	binMu  sync.Mutex // guards binKey, binSum
 	binKey struct {
@@ -223,8 +226,14 @@ func (m *manager) track(id, dir string, spec superSpec, onPhase func(proto.Phase
 
 func (m *manager) Runtimes(ctx context.Context) []proto.Runtime {
 	m.rtMu.Lock()
-	defer m.rtMu.Unlock()
-	return append([]proto.Runtime(nil), m.runtimes...)
+	rts := append([]proto.Runtime(nil), m.runtimes...)
+	m.rtMu.Unlock()
+	for i := range rts {
+		if rts[i].Kind == proto.RuntimeContainer {
+			rts[i].Caches = m.cacheStatus()
+		}
+	}
+	return rts
 }
 
 func (m *manager) Refresh(ctx context.Context) error {
@@ -506,6 +515,9 @@ func (m *manager) Start(ctx context.Context, req StartRequest) (Process, error) 
 		spec.Runtime = proto.RuntimeNative
 		err = m.nativeSpec(&spec, &req, s, dir)
 	case proto.RuntimeContainer:
+		// Until the job is tracked (it then counts as active), no cache
+		// trim may start; one running now is stopped.
+		defer m.holdCaches(ctx)()
 		err = m.containerSpec(ctx, &spec, &req, s)
 	default:
 		err = fmt.Errorf("%w: unknown runtime %q", ErrRuntimeUnavailable, req.Runtime)

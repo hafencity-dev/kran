@@ -176,6 +176,7 @@ prefer = "auto"               # auto | local | remote
 listen = "127.0.0.1:7270"     # set "" to disable; "tailscale" binds tailscale IP
 [runtime.container]
 enabled = "auto"              # auto = when docker reachable and needed
+cache_budget = ""             # container jobs' shared caches; "" = min(20GiB, 1/4 of the Docker disk)
 ```
 
 ### `peers.toml` (written by `kran link`, never edited by hand)
@@ -285,7 +286,43 @@ Flags: `-l/--local`, `-r/--remote`, `-n/--node NAME`, `--gpu`, `--cpus N`,
   whose metadata has none, e.g. written by an older kran, counts from the
   latest change of its metadata or directory, never as unused since
   year one); enforces disk floor (refuse new remote jobs below
-  max(10 GiB, 5%) free with reason `disk`).
+  max(10 GiB, 5%) free with reason `disk`). Hourly it also removes
+  dangling runner images of its namespace (rebuilds of the same tag),
+  stopped kran containers that are not a job's (a sync helper or trim left
+  by a crash), and trims the container runtime's shared caches (below).
+* Cache trim (container runtime): the volumes `kran-cache` and
+  `kran-tools` only grow as jobs use them, so once an hour (when no
+  container job of the node runs or starts) the reaper runs `kran internal
+  cache-trim` in a container of the runner image with both volumes, as the
+  node user, without network. It measures them (hard links once) and the
+  Docker disk; under the budget (`runtime.container.cache_budget`, default
+  min(20 GiB, a quarter of the Docker disk)) with the Docker disk above
+  the floor (max(10 GiB, 5%) of it) it does nothing. Otherwise it runs the
+  tools' own pruning where it is safe (`uv cache prune` with an installed
+  uv; Go trims GOCACHE itself after 5 days; `pnpm store prune` is not used:
+  node_modules in a slot are copies of the store, so it would see every
+  package as unreferenced), then deletes whole entries, least recently used
+  first by the newest atime/mtime of their files (directory times are
+  ignored: listing a directory updates them), until the caches are at 80%
+  of the budget, or, below the disk floor, also what the floor lacks.
+  Entries used within the last hour stay unless the disk is below the
+  floor; when what it may not delete (the home's other files, installed
+  binaries) alone exceeds the target, it deletes nothing and says so. Entries are kinds known to be caches: GOCACHE files, extracted
+  modules and download files of GOMODCACHE, a pnpm store version, npm's
+  cache and npx dir, the uv and pip caches as a whole, mise's download
+  cache, cargo's registry and git checkouts (never `cargo/bin`), the
+  persistent home's `.cache/*` and `.npm/_cacache` (never anything else in
+  the home), and mise installs per tool version (with the version aliases
+  pointing at them). Each is renamed into a trash directory first and
+  deleted there, so an interrupted trim never leaves half an entry where a
+  tool looks. Every job container holds a shared lock on
+  `kran-cache/.kran-lock` for its lifetime (kran-init, through a process
+  outside the job's tree); the trim takes it exclusively or skips, so it
+  never runs while any job (of any daemon sharing the Docker) uses the
+  caches, and a container job that starts stops a running trim first. The
+  daemon logs what it reclaimed; `kran doctor` shows the caches' size,
+  budget, the Docker disk and the last reclaim (`proto.Runtime.caches`).
+  Native jobs use the node user's own caches, which kran never trims.
 * Process-tree kill: Linux = scope stop (cgroup kill); macOS native = kill
   process group, then sweep descendants by ppid walk; container =
   `docker kill`. Also: docker containers started *by the job* with label
@@ -474,10 +511,17 @@ process tree RSS + CPU time).
   satisfies the workspace's pin, else `mise exec tool@ver --` if mise exists,
   else ineligible with reason.
 * `container`: image `kran-runner:<kran version>` built on the node from an
-  embedded Dockerfile and `kran-init` (debian stable-slim, git,
-  build-essential, ca-certificates, curl, unzip, xz, pkg-config, locales with
-  common UTF-8 locales prebuilt, tzdata, setpriv, mise; git trusts every
-  directory). Built lazily by the
+  embedded Dockerfile, `kran-init` and the node's Linux kran binary (the
+  one `kran link` placed for the Docker VM on macOS, the running binary on
+  Linux; the image label hashes all three, so a new binary rebuilds the
+  last layer). Debian stable-slim with git, build-essential, pkg-config,
+  ca-certificates, curl, wget, locales with common UTF-8 locales prebuilt,
+  tzdata, setpriv, mise, the Docker CLI with the compose and buildx plugins,
+  and the everyday tools scripts expect on a Linux box: envsubst, jq,
+  ripgrep, shellcheck, lsof, strace, fdisk/sfdisk, file, zip/unzip, xz,
+  zstd, bzip2, rsync, procps, psmisc, iproute2, ping, netcat, dig, less,
+  patch, diff, bc, time, tree, xxd, openssl, sqlite3, zsh; git trusts every
+  directory. Built lazily by the
   first container job (phase `setup`, "preparing the Linux runtime (first
   use, ~30 s)"), one build at a time; until then the runtime reports
   `first_use` but counts as available whenever Docker is reachable. A job
@@ -498,10 +542,11 @@ process tree RSS + CPU time).
   a tool neither the origin nor the repo has is "not found", never "No
   version is set". Pinned tools kran has no shims for run via `mise exec
   tool@ver --`. Caches in volume `kran-cache` (GOCACHE, GOMODCACHE, pnpm
-  store, npm cache, uv cache, mise). Job = `docker run --rm --init --network
+  store, npm cache, uv cache, mise), trimmed to a budget (§6.2). Job = `docker run --rm --init --network
   host --name kran-job-<id> --label kran.job=<id> --memory <cap> --cpus <n>
   --shm-size <cap/2, 2 GiB uncapped> --ulimit nofile=65536:524288 (not on
-  rootless Docker) -v /var/run/docker.sock:… -e … -w <origin cwd> --user 0:0
+  rootless Docker) -v /var/run/docker.sock:/run/kran/docker-host.sock -e …
+  -w <origin cwd> --user 0:0
   --entrypoint kran-init --cap-drop ALL --cap-add SETUID,SETGID,KILL
   --security-opt no-new-privileges`. **kran-init** runs as root only to
   describe the job's machine, then `setpriv`s to the node's `<uid>:<gid>`
@@ -512,7 +557,8 @@ process tree RSS + CPU time).
   a missing UTF-8 locale named in `LANG`/`LC_*` (≈1 s; one that cannot exist,
   like macOS's `LC_CTYPE=UTF-8`, becomes `C.UTF-8`) and unsets CA bundle and
   SDK path variables (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `JAVA_HOME`,
-  `VIRTUAL_ENV`, …) that name files missing in the container. Its inputs
+  `VIRTUAL_ENV`, …) that name files missing in the container, starts the
+  job's Docker proxy (below) and takes the cache lock (§6.2). Its inputs
   come as `KRAN_INIT_*` variables, validated in kran and again in the script,
   and are unset before the job starts. `HOME` is the origin's home path, a
   mount of the node's persistent container home (`kran-cache`, subpath
@@ -526,6 +572,37 @@ process tree RSS + CPU time).
   docker = false` or `kran run --no-docker`); host networking makes
   `localhost:<published port>` work as on Linux. The slot sync helper lives
   in its own container's file system, never in a volume jobs mount.
+* **Docker from a job** (bind mounts): the job sees its workspace at the
+  origin's path, but Docker resolves a bind mount's source on the Docker
+  host (the Docker VM on macOS), where the slot lives elsewhere: in the
+  `kran-slots` volume, or under the state dir on Linux. So the job's
+  `/var/run/docker.sock` is a proxy (`kran internal docker-proxy`, started
+  by kran-init as the job's user, outside the job's process tree, ending
+  with the container) in front of Docker's socket at
+  `/run/kran/docker-host.sock`. It forwards every request unchanged except
+  `POST /containers/create` (`HostConfig.Binds` and bind `Mounts`) and
+  `POST /volumes/create` (local volumes with `o=bind`), whose sources
+  under the job's own mounts are rewritten to where those live on the
+  Docker host (`KRAN_INIT_DOCKER_MAP`, from the volumes' mountpoints): the
+  workspace → the slot, the home → `kran-cache`'s `home`, `/kran/cache` and
+  `/kran/tools` → their volumes. So `docker run -v "$PWD":/src`, relative
+  bind mounts in compose files, `--mount type=bind` and BuildKit builds
+  work as on the origin, and see the live slot. The map is per job, so
+  concurrent jobs of one worktree (different slots, same path) and of other
+  repos never interfere; nothing is mounted in the Docker host, so there is
+  nothing to clean up when a slot goes and nothing to restore after a VM
+  restart. Each request is parsed on its own connection (the proxy asks
+  Docker to close it after the response); upgraded connections (attach,
+  exec, BuildKit sessions) are copied raw. Limits: only paths under those
+  mounts are mapped, so a bind of the job's `/tmp` or of anything else that
+  exists only in the job's container still gets the Docker host's path; a
+  path that leaves the workspace through a symlink is not followed; a
+  client that bypasses `/var/run/docker.sock` (`DOCKER_HOST` set by the
+  job to another endpoint, or a nested container that mounts the socket
+  itself, like testcontainers' Ryuk) talks to Docker directly; files
+  written by nested containers belong to the user they run as. Without the
+  kran binary in the image (an image of an older kran), the job gets
+  Docker's socket directly.
 * Resource caps: memory cap = admitted estimate × 2, at least 2 GiB, at most
   free memory at start; on cap breach the job is OOM-killed and the exit
   reason says so (`kran: job hit its 6 GiB memory cap on devmac — rerun with
@@ -626,7 +703,9 @@ is a no-op.
   container's own `/etc` and image files, never the mounted volumes, and the
   job's process has no capabilities and cannot regain any.
 * **Container jobs get the Docker socket by default**, so testcontainers and
-  `docker compose` work. With rootful Docker (Linux without rootless mode)
+  `docker compose` work. The job's socket is kran's bind-mount proxy
+  (§6.8); it maps only to the job's own mounts and adds no access Docker
+  does not already give. With rootful Docker (Linux without rootless mode)
   that is root-equivalent on the node: a job can start a privileged
   container and own the host or the Docker VM, including other repos'
   slots. Only run code you would run as root there, or opt out per repo

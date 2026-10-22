@@ -91,6 +91,9 @@ type Options struct {
 	LinuxBinary string // path to a linux kran binary of the node arch (container runtime on darwin)
 	BlobCap     int64  // bytes; 0 = default
 	DiskFloor   int64  // bytes; 0 = default max(10 GiB, 5%)
+	// CacheBudget bounds the container runtime's shared caches (bytes;
+	// 0 = min(20 GiB, a quarter of the Docker disk)).
+	CacheBudget int64
 	Logf        func(format string, args ...any)
 
 	// Container is config runtime.container.enabled: "auto" (default:

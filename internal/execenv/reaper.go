@@ -33,6 +33,7 @@ func (m *manager) Reap(ctx context.Context) error {
 	if err := m.pruneImages(ctx); err != nil {
 		errs = append(errs, err)
 	}
+	m.maybeTrimCaches(ctx)
 	if err := m.reapJobDirs(); err != nil {
 		errs = append(errs, err)
 	}

@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -47,20 +48,47 @@ type runnerImage struct {
 //go:embed runner-init.sh
 var runnerInit string
 
-// dockerfileLabel identifies what the image was built from.
+// dockerfileLabel identifies what the image was built from: the
+// Dockerfile, kran-init and the kran binary in it.
 func (m *manager) dockerfileLabel() string {
-	return hashString(m.dockerfile() + "\x00" + runnerInit)[:16]
+	sum, err := m.linuxBinaryHash()
+	if err != nil {
+		sum = "none"
+	}
+	return hashString(m.dockerfile() + "\x00" + runnerInit + "\x00" + sum)[:16]
 }
 
-// buildContext is the image's build context: the Dockerfile and kran-init.
-func buildContext(dockerfile string) ([]byte, error) {
+// runnerBinary is the Linux kran binary for the image: the one `kran link`
+// placed for the Docker VM (macOS), else this binary itself (Linux).
+func (m *manager) runnerBinary() string {
+	if m.opts.LinuxBinary != "" || runtime.GOOS != "linux" {
+		return m.opts.LinuxBinary
+	}
+	return m.opts.Self
+}
+
+// noBinary stands in for a missing kran binary in the image: kran-init
+// then gives jobs Docker's socket directly, and no cache trim runs.
+const noBinary = "#!/bin/sh\necho 'kran: this runner image has no kran binary' >&2\nexit 1\n"
+
+// buildContext is the image's build context: the Dockerfile, kran-init
+// and the kran binary (kranBin; "" for noBinary).
+func buildContext(dockerfile, kranBin string) ([]byte, error) {
+	kran := []byte(noBinary)
+	if kranBin != "" {
+		b, err := os.ReadFile(kranBin)
+		if err != nil {
+			return nil, err
+		}
+		kran = b
+	}
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(zw)
 	for _, f := range []struct {
 		name, body string
 		mode       int64
-	}{{"Dockerfile", dockerfile, 0o644}, {"kran-init", runnerInit, 0o755}} {
+	}{{"Dockerfile", dockerfile, 0o644}, {"kran-init", runnerInit, 0o755}, {"kran", string(kran), 0o755}} {
 		hdr := &tar.Header{Name: f.name, Mode: f.mode, Size: int64(len(f.body)), Typeflag: tar.TypeReg, ModTime: time.Unix(0, 0)}
 		if err := tw.WriteHeader(hdr); err != nil {
 			return nil, err
@@ -177,7 +205,11 @@ func (m *manager) buildImageLocked(ctx context.Context, dk *dockerEnv) error {
 	}
 	m.logf("building %s (first container job on this node)", tag)
 	start := time.Now()
-	bctx, err := buildContext(m.dockerfile())
+	bin := m.runnerBinary()
+	if bin != "" && checkFile(bin) != nil {
+		bin = ""
+	}
+	bctx, err := buildContext(m.dockerfile(), bin)
 	if err != nil {
 		return fmt.Errorf("runner image build context: %w", err)
 	}
@@ -222,7 +254,66 @@ func (m *manager) pruneImages(ctx context.Context) error {
 		}
 		m.logf("reaper: removed old runner image %s", ref)
 	}
+	// Rebuilds of the same tag (a new kran binary, a changed Dockerfile)
+	// leave the old image dangling.
+	if out, err := dk.run(ctx, nil, "image", "prune", "--force", "--filter", "label=kran.ns="+m.ns); err != nil {
+		m.logf("reaper: pruning dangling runner images: %v", err)
+	} else if r := pruneSummary(string(out)); r != "" {
+		m.logf("reaper: removed dangling runner images: %s", r)
+	}
+	m.pruneStoppedContainers(ctx, dk)
 	return nil
+}
+
+// pruneStoppedContainers removes stopped containers of this namespace that
+// are not a job's (those are the supervisor's and reapContainers'
+// business): a sync helper or trim left behind by a crash or a Docker
+// restart. A running one is never touched.
+func (m *manager) pruneStoppedContainers(ctx context.Context, dk *dockerEnv) {
+	if dk.api == nil {
+		return
+	}
+	cs, err := dk.api.containers(ctx, "kran.ns="+m.ns)
+	if err != nil {
+		return
+	}
+	var ids []string
+	for _, c := range cs {
+		if _, job := c.Labels["kran.job"]; job || c.Labels["kran.ns"] != m.ns {
+			continue
+		}
+		switch c.State {
+		case "exited", "created", "dead":
+			ids = append(ids, c.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	if _, err := dk.run(ctx, nil, append([]string{"rm", "--volumes"}, ids...)...); err != nil {
+		m.logf("reaper: removing stopped containers: %v", err)
+		return
+	}
+	m.logf("reaper: removed %d stopped kran containers", len(ids))
+}
+
+// pruneSummary sums up docker's prune output: images deleted and the
+// space reclaimed ("" when nothing was deleted).
+func pruneSummary(out string) string {
+	n, space := 0, ""
+	for _, ln := range strings.Split(out, "\n") {
+		ln = strings.TrimSpace(ln)
+		if strings.HasPrefix(ln, "deleted:") {
+			n++
+		}
+		if v, ok := strings.CutPrefix(ln, "Total reclaimed space:"); ok {
+			space = strings.TrimSpace(v)
+		}
+	}
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d layers or images, %s reclaimed", n, space)
 }
 
 // staleRunnerImages picks repo:tag lines of repo other than current.

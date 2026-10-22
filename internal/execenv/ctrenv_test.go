@@ -157,7 +157,7 @@ func TestCtrShmSizeAndPath(t *testing.T) {
 // The image is built from a context holding the Dockerfile and kran-init,
 // and a change to either rebuilds it.
 func TestRunnerBuildContext(t *testing.T) {
-	b, err := buildContext("FROM scratch\n")
+	b, err := buildContext("FROM scratch\n", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,10 +181,10 @@ func TestRunnerBuildContext(t *testing.T) {
 			t.Error("kran-init not executable")
 		}
 	}
-	if got["Dockerfile"] != "FROM scratch\n" || got["kran-init"] != runnerInit {
+	if got["Dockerfile"] != "FROM scratch\n" || got["kran-init"] != runnerInit || got["kran"] != noBinary {
 		t.Errorf("context files: %v", len(got))
 	}
-	for _, want := range []string{"COPY kran-init " + ctrInit, "MISE_GLOBAL_CONFIG_FILE=" + ctrMiseConf, ctrShims + ":", "locales", "tzdata", "safe.directory"} {
+	for _, want := range []string{"COPY kran-init " + ctrInit, "COPY kran " + ctrKran, "MISE_GLOBAL_CONFIG_FILE=" + ctrMiseConf, ctrShims + ":", "locales", "tzdata", "safe.directory"} {
 		if !strings.Contains(runnerDockerfile, want) {
 			t.Errorf("runner Dockerfile lacks %q", want)
 		}

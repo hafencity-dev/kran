@@ -25,6 +25,7 @@ case "$1 $2" in
 "image inspect") [ -f "$d/built" ] && { cat "$d/built"; exit 0; }; echo "No such image" >&2; exit 1 ;;
 "image ls") cat "$d/images" 2>/dev/null; exit 0 ;;
 "image rm") echo "$3" >> "$d/removed"; exit 0 ;;
+"image prune") echo "$*" >> "$d/pruned"; echo "Total reclaimed space: 0B"; exit 0 ;;
 esac
 if [ "$1" = build ]; then
   echo x >> "$d/builds"
@@ -142,11 +143,25 @@ func TestPruneImagesRemovesOtherVersionsOnly(t *testing.T) {
 	if string(b) != "kran-test-runner:0.0.1\n" {
 		t.Fatalf("removed %q", b)
 	}
+	// Dangling images of this namespace (rebuilds of the same tag) go too.
+	if b, _ := os.ReadFile(filepath.Join(dir, "pruned")); string(b) != "image prune --force --filter label=kran.ns=kran-test\n" {
+		t.Fatalf("pruned %q", b)
+	}
 	// Rate-limited: the next reaper pass does not list again.
 	os.Remove(filepath.Join(dir, "removed"))
 	m.pruneImages(context.Background())
 	if _, err := os.Stat(filepath.Join(dir, "removed")); err == nil {
 		t.Fatal("pruned again within the hour")
+	}
+}
+
+func TestPruneSummary(t *testing.T) {
+	out := "Deleted Images:\nuntagged: kran-runner@sha256:ab\ndeleted: sha256:01\ndeleted: sha256:02\n\nTotal reclaimed space: 1.2GB\n"
+	if got := pruneSummary(out); got != "2 layers or images, 1.2GB reclaimed" {
+		t.Errorf("%q", got)
+	}
+	if got := pruneSummary("Total reclaimed space: 0B\n"); got != "" {
+		t.Errorf("%q", got)
 	}
 }
 

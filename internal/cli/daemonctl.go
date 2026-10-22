@@ -122,6 +122,28 @@ func (a *App) internalCommand() *cobra.Command {
 			return nil
 		},
 	})
+	for _, c := range []struct {
+		use string
+		run func([]string) int
+	}{
+		// Both run inside the container runtime's containers (SPEC §6.8):
+		// the job's Docker socket proxy and the shared cache trim.
+		{"docker-proxy", execenv.DockerProxy},
+		{"cache-trim", execenv.CacheTrim},
+	} {
+		run := c.run
+		cmd.AddCommand(&cobra.Command{
+			Use:                c.use,
+			Hidden:             true,
+			DisableFlagParsing: true,
+			RunE: func(_ *cobra.Command, args []string) error {
+				if code := run(args); code != 0 {
+					return &ExitError{Code: code}
+				}
+				return nil
+			},
+		})
+	}
 	cmd.AddCommand(&cobra.Command{
 		Use:    "watch-parent <pgid>",
 		Hidden: true,

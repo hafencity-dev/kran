@@ -25,6 +25,10 @@ func TestMain(m *testing.M) {
 			os.Exit(Supervise(os.Args[3:]))
 		case "apply":
 			os.Exit(Apply(os.Args[3:]))
+		case "docker-proxy":
+			os.Exit(DockerProxy(os.Args[3:]))
+		case "cache-trim":
+			os.Exit(CacheTrim(os.Args[3:]))
 		}
 		os.Exit(2)
 	}
