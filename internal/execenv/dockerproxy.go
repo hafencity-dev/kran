@@ -316,6 +316,18 @@ func proxyDockerConn(c net.Conn, upstream string, maps []dockerMap) {
 	if err := req.Write(up); err != nil {
 		return
 	}
+	if rewritesResponse(maps, req) {
+		// An answer that shows bind sources: map them back.
+		resp, err := http.ReadResponse(bufio.NewReader(up), req)
+		if err != nil {
+			return
+		}
+		rewriteResponse(maps, resp)
+		resp.Close = true
+		resp.Write(c)
+		resp.Body.Close()
+		return
+	}
 	go func() {
 		// Whatever the client sends after the request (stdin of an
 		// attached container) goes through as is.

@@ -94,6 +94,10 @@ type Options struct {
 	// CacheBudget bounds the container runtime's shared caches (bytes;
 	// 0 = min(20 GiB, a quarter of the Docker disk)).
 	CacheBudget int64
+	// DiskReserve is the free space kran keeps on the disks it fills
+	// (Docker disk: caches, then idle slots; this machine's disk: idle
+	// slots), bytes; 0 = max(25 GiB, 20%), at most 50 GiB.
+	DiskReserve int64
 	Logf        func(format string, args ...any)
 
 	// Container is config runtime.container.enabled: "auto" (default:

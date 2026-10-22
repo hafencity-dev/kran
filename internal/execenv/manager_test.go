@@ -29,6 +29,12 @@ type syncLog struct {
 	buf bytes.Buffer
 }
 
+func (l *syncLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
+}
+
 func (l *syncLog) logf(f string, a ...any) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -67,7 +73,7 @@ func newTestEnv(t *testing.T, opts ...mgrOpt) *testEnv {
 	t.Helper()
 	dir := t.TempDir()
 	lg := &syncLog{}
-	o := Options{StateDir: dir, NodeName: "testnode", Self: testBinary(t), Namespace: "kran-test", Logf: lg.logf, DiskFloor: 1}
+	o := Options{StateDir: dir, NodeName: "testnode", Self: testBinary(t), Namespace: "kran-test", Logf: lg.logf, DiskFloor: 1, DiskReserve: 1}
 	tun := testTunables()
 	for _, f := range opts {
 		f(&o, &tun)

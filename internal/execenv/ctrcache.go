@@ -43,6 +43,7 @@ type cacheReport struct {
 	Free      int64  `json:"free"`      // free bytes on the Docker disk (after)
 	Total     int64  `json:"total"`     // size of the Docker disk
 	Floor     int64  `json:"floor"`     // the disk floor below which it trims harder
+	Reserve   int64  `json:"reserve"`   // free space the trim keeps on the disk
 	Removed   int    `json:"removed"`   // entries deleted
 	Reclaimed int64  `json:"reclaimed"` // bytes freed
 	Skipped   string `json:"skipped,omitempty"`
@@ -195,6 +196,7 @@ func cacheScan(root string, tools bool, seen map[[2]uint64]bool) (int64, map[str
 type cacheTrimOpts struct {
 	Cache, Tools string
 	Budget       int64         // 0: min(20 GiB, a quarter of the disk)
+	Reserve      int64         // free space to keep; 0: diskReserve
 	Floor        int64         // 0: max(10 GiB, 5% of the disk)
 	Recent       time.Duration // entries used this recently stay unless the disk is short
 	Now          func() time.Time
@@ -230,13 +232,20 @@ func trimCaches(ctx context.Context, o cacheTrimOpts) (cacheReport, error) {
 	if rep.Floor <= 0 {
 		rep.Floor = diskFloor(total)
 	}
+	rep.Reserve = o.Reserve
+	if rep.Reserve <= 0 {
+		rep.Reserve = diskReserve(total)
+	}
+	rep.Reserve = max(rep.Reserve, rep.Floor)
 	used, units, err := scanCaches(o)
 	if err != nil {
 		return rep, err
 	}
 	rep.Used, rep.After = used, used
-	short := free < rep.Floor
-	if used <= rep.Budget && !short {
+	// short: below the floor, where even entries used just now go;
+	// tight: below the reserve the disk should keep free.
+	short, tight := free < rep.Floor, free < rep.Reserve
+	if used <= rep.Budget && !tight {
 		return rep, nil
 	}
 	// Over budget: first what the tools drop themselves (entries nothing
@@ -247,13 +256,17 @@ func trimCaches(ctx context.Context, o cacheTrimOpts) (cacheReport, error) {
 			return rep, err
 		}
 		if free, _, err = o.DiskSpace(o.Cache); err == nil {
-			short = free < rep.Floor
+			short, tight = free < rep.Floor, free < rep.Reserve
 		}
 	}
-	target := rep.Budget * 8 / 10 // some headroom, so the next job does not trigger a trim at once
-	if short {
-		// Below the disk floor: free what the floor lacks as well.
-		target = max(min(target, used-(rep.Floor-free)), 0)
+	target := used
+	if used > rep.Budget {
+		target = rep.Budget * 8 / 10 // some headroom, so the next job does not trigger a trim at once
+	}
+	if tight {
+		// The disk keeps less free than its reserve: free what it lacks
+		// as well (the product images and slots next to the caches count).
+		target = max(min(target, used-(rep.Reserve-free)), 0)
 	}
 	list := make([]*cacheUnit, 0, len(units))
 	var deletable int64
@@ -265,7 +278,7 @@ func trimCaches(ctx context.Context, o cacheTrimOpts) (cacheReport, error) {
 		// Even without every cache entry the volumes stay over budget
 		// (files in the home, installed binaries): emptying the caches
 		// each hour would only slow jobs down.
-		rep.Skipped = fmt.Sprintf("%s of the caches are not cache entries kran may delete (the persistent home, installed binaries); raise runtime.container.cache_budget", fmtGiB(kept))
+		rep.Skipped = fmt.Sprintf("%s of the caches are not cache entries kran may delete (the persistent home, installed binaries)", fmtGiB(kept))
 		return rep, nil
 	}
 	sort.Slice(list, func(i, j int) bool {
@@ -435,6 +448,7 @@ func CacheTrim(args []string) int {
 	cache := fs.String("cache", ctrCache, "the cache volume")
 	tools := fs.String("tools", ctrTools, "the tools volume")
 	budget := fs.Int64("budget", 0, "bytes the caches may use (0: automatic)")
+	reserve := fs.Int64("reserve", 0, "free bytes to keep on the disk (0: automatic)")
 	floor := fs.Int64("floor", 0, "free bytes below which to trim harder (0: automatic)")
 	recent := fs.Duration("recent", time.Hour, "keep entries used this recently")
 	if err := fs.Parse(args); err != nil {
@@ -451,7 +465,7 @@ func CacheTrim(args []string) int {
 		rep.Skipped = "a job is using the caches"
 	} else {
 		rep, err = trimCaches(context.Background(), cacheTrimOpts{
-			Cache: *cache, Tools: *tools, Budget: *budget, Floor: *floor, Recent: *recent, Prune: pruneWithTools,
+			Cache: *cache, Tools: *tools, Budget: *budget, Reserve: *reserve, Floor: *floor, Recent: *recent, Prune: pruneWithTools,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "kran: cache trim: %v\n", err)

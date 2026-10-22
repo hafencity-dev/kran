@@ -188,6 +188,19 @@ func TestTrimCaches(t *testing.T) {
 		}
 	})
 
+	// Within budget, but the disk keeps less free than its reserve (25 GiB
+	// of 100): trim what it lacks, keeping what was used just now.
+	t.Run("below-reserve", func(t *testing.T) {
+		cache, tools := setup(t)
+		rep, err := trimCaches(context.Background(), opts(cache, tools, 100*gib, 25*gib-(3<<20)))
+		if err != nil || rep.Removed == 0 || rep.Reserve != 25*gib || rep.Reclaimed < 3<<20 {
+			t.Fatalf("%+v %v", rep, err)
+		}
+		if exists(filepath.Join(cache, "go-build/aa/old-d")) || !exists(filepath.Join(cache, "go-build/bb/new-d")) {
+			t.Error("not least recently used first, or a recent entry went above the floor")
+		}
+	})
+
 	t.Run("disk-below-floor", func(t *testing.T) {
 		cache, tools := setup(t)
 		// Within budget, but the Docker disk has less free than its floor:
@@ -248,7 +261,7 @@ func TestDockerDiskFloor(t *testing.T) {
 		t.Fatalf("no measurement yet: %v", err)
 	}
 	m.ct.mu.Lock()
-	m.ct.report, m.ct.reportAt, m.ct.last = &cacheReport{Free: 4 * gib, Total: 100 * gib}, m.now(), m.now()
+	m.ct.diskFree, m.ct.diskTotal, m.ct.diskAt, m.ct.last = 4*gib, 100*gib, m.now(), m.now()
 	m.ct.mu.Unlock()
 	err := m.checkDockerDiskFloor()
 	if !errors.Is(err, ErrDiskFloor) || !strings.Contains(err.Error(), "Docker disk") {
@@ -259,7 +272,7 @@ func TestDockerDiskFloor(t *testing.T) {
 	}
 	m.ct.mu.Lock()
 	due := m.ct.last.IsZero()
-	m.ct.report.Free = 50 * gib
+	m.ct.diskFree = 50 * gib
 	m.ct.mu.Unlock()
 	if !due {
 		t.Error("no trim requested")

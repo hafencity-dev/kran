@@ -129,7 +129,7 @@ func run(ctx context.Context, opts Options) error {
 	var ex execenv.Manager
 	if m, err := execenv.New(execenv.Options{
 		StateDir: dirs.State, NodeName: cfg.Name, Self: self, Logf: logf, Namespace: ns,
-		Container: cfg.ContainerEnabled, CacheBudget: cfg.CacheBudget,
+		Container: cfg.ContainerEnabled, CacheBudget: cfg.CacheBudget, DiskReserve: cfg.DiskReserve,
 		// Placed there by `kran link`/`kran upgrade`; the Docker VM runs the
 		// host's architecture (Apple Silicon → linux/arm64).
 		LinuxBinary: linuxBinary(),

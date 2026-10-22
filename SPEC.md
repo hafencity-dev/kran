@@ -170,6 +170,7 @@ name = "gx10"                 # node name; default: short hostname, lowercased
 enabled = true
 reserve_cpus = 2              # never scheduled; owner's headroom
 reserve_mem = "8GiB"
+disk_reserve = ""             # free space kran keeps on the disks it fills (caches, idle slots); "" = max(25GiB, 20%), at most 50GiB
 max_jobs = 0                  # 0 = unlimited (bounded by resources)
 nice = 10                     # remote jobs run niced
 [submit]
@@ -319,22 +320,40 @@ Flags: `-l/--local`, `-r/--remote`, `-n/--node NAME`, `--gpu`, `--cpus N`,
   max(10 GiB, 5%) free with reason `disk`). Hourly it also removes
   dangling runner images of its namespace (rebuilds of the same tag),
   stopped kran containers that are not a job's (a sync helper or trim left
-  by a crash), and trims the container runtime's shared caches (below).
+  by a crash), runner images of other kran versions, and trims the
+  container runtime's shared caches (below). An old runner image that a
+  container still holds is released first: the old version's sync helper
+  is removed (the next sync starts one from the current image) and so are
+  stopped containers on it; while a job of the old version still runs on
+  it, it stays and the reaper tries again every 5 minutes.
+* Disk reserve: kran keeps `accept.disk_reserve` free (default max(25 GiB,
+  20%) of the disk, at most 50 GiB, never below the floor) on the disks it
+  fills, deleting its own data only: the cache trim's caches (below), then
+  idle slots, least recently used first (by last acquisition or release),
+  never one in use or acquired for a job about to start, at most 8 per
+  pass, each logged. This machine's disk (native slots, and container
+  slots on Linux) is checked on every reaper pass; the Docker disk of the
+  volume layout (macOS) every 5 minutes through the sync helper (`df`),
+  and right after a cache trim that left it short. The 3-day TTL applies
+  on top. Others' data on the disk (images of other projects, the
+  owner's files) is never touched; when only that is left, the log says
+  so.
 * Cache trim (container runtime): the volumes `kran-cache` and
   `kran-tools` only grow as jobs use them, so once an hour (when no
   container job of the node runs or starts) the reaper runs `kran internal
   cache-trim` in a container of the runner image with both volumes, as the
   node user, without network. It measures them (hard links once) and the
   Docker disk; under the budget (`runtime.container.cache_budget`, default
-  min(20 GiB, a quarter of the Docker disk)) with the Docker disk above
-  the floor (max(10 GiB, 5%) of it) it does nothing. Otherwise it runs the
+  min(20 GiB, a quarter of the Docker disk)) with the Docker disk keeping
+  its reserve (above) free it does nothing. Otherwise it runs the
   tools' own pruning where it is safe (`uv cache prune` with an installed
   uv; Go trims GOCACHE itself after 5 days; `pnpm store prune` is not used:
   node_modules in a slot are copies of the store, so it would see every
   package as unreferenced), then deletes whole entries, least recently used
   first by the newest atime/mtime of their files (directory times are
   ignored: listing a directory updates them), until the caches are at 80%
-  of the budget, or, below the disk floor, also what the floor lacks.
+  of the budget, or, with less than the reserve free, also what the
+  reserve lacks.
   Entries used within the last hour stay unless the disk is below the
   floor; when what it may not delete (the home's other files, installed
   binaries) alone exceeds the target, it deletes nothing and says so. Entries are kinds known to be caches: GOCACHE files, extracted
@@ -556,7 +575,8 @@ pass, anything that holds the memory is stopped).
   and the everyday tools scripts expect on a Linux box: envsubst, jq,
   ripgrep, shellcheck, lsof, strace, fdisk/sfdisk, file, zip/unzip, xz,
   zstd, bzip2, rsync, procps, psmisc, iproute2, ping, netcat, dig, less,
-  patch, diff, bc, time, tree, xxd, openssl, sqlite3, zsh; git trusts every
+  patch, diff, bc, time, tree, xxd, openssl, sqlite3, zsh, GNU awk (as
+  `awk`), GNU parallel, uuidgen, hostname, tput, cpio; git trusts every
   directory. Built lazily by the
   first container job (phase `setup`, "preparing the Linux runtime (first
   use, ~30 s)"), one build at a time; until then the runtime reports
@@ -630,7 +650,13 @@ pass, anything that holds the memory is stopped).
   nothing to clean up when a slot goes and nothing to restore after a VM
   restart. Each request is parsed on its own connection (the proxy asks
   Docker to close it after the response); upgraded connections (attach,
-  exec, BuildKit sessions) are copied raw. Limits: only paths under those
+  exec, BuildKit sessions) are copied raw. Answers that show bind sources
+  are mapped back, so a job sees the paths it used: `GET
+  /containers/{id}/json` (`Mounts[].Source` of binds, `HostConfig.Binds`,
+  `HostConfig.Mounts`), `GET /containers/json` and `GET /volumes`,
+  `/volumes/{name}` (`Options.device` of local bind volumes); only Docker
+  host paths under the job's own maps change. Such an answer is read whole
+  up to 32 MiB (a bigger one streams through unchanged). Limits: only paths under those
   mounts are mapped, so a bind of anything else that exists only in the
   job's container (`/etc`, `/run`, `/dev/shm`, `/var/tmp`, the image's
   files) still gets the Docker host's path; a
@@ -652,11 +678,11 @@ pass, anything that holds the memory is stopped).
   layer was before, so the Docker disk floor below covers it; the cache
   trim never touches it.
 * Docker disk floor: on macOS container jobs write to the Docker VM's disk
-  (slots, caches, `/tmp`), not the state dir's. The cache trim measures it
-  (§6.2); while its last measurement (at most two hours old) is below the
-  node's floor (max(10 GiB, 5%) of that disk, or `DiskFloor`), container
-  slots are refused with reason `disk` and the next reaper pass trims at
-  once.
+  (slots, caches, `/tmp`), not the state dir's. The cache trim and the
+  slot check measure it (§6.2); while the last measurement (at most two
+  hours old) is below the node's floor (max(10 GiB, 5%) of that disk, or
+  `DiskFloor`), container slots are refused with reason `disk` and the
+  next reaper pass trims caches and idle slots at once.
 * Resource caps: memory cap = admitted memory × 2, at least 8 GiB for an
   estimate (a first compile or link of a large package needs more than its
   siblings' estimate; the cap reserves nothing) and 2 GiB for an explicit

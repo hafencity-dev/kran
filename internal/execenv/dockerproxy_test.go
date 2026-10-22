@@ -132,6 +132,12 @@ func fakeDockerUpstream(t *testing.T, sock string) chan string {
 			brw.Flush()
 			line, _ := brw.ReadString('\n')
 			c.Write([]byte("echo:" + line))
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/containers/x/json"):
+			// Chunked, as Docker streams it.
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"Id":"x","Mounts":[{"Type":"bind","Source":"/var/lib/docker/volumes/kran-slots/_data/r1/0/store",`)
+			w.(http.Flusher).Flush()
+			io.WriteString(w, `"Destination":"/s"}],"HostConfig":{"Binds":["/var/lib/docker/volumes/kran-slots/_data/r1/0/store:/s:ro"],"Memory":9007199254740993}}`)
 		case strings.HasSuffix(r.URL.Path, "/logs"):
 			for i := 0; i < 3; i++ {
 				io.WriteString(w, "tick\n")
@@ -182,11 +188,23 @@ func TestDockerProxyServes(t *testing.T) {
 			t.Fatalf("upstream saw %q", got)
 		}
 	}
-	resp, err := cl.Get("http://docker/v1.47/containers/x/logs?follow=1")
+	// Answers that show bind sources are mapped back to the job's paths.
+	resp, err := cl.Get("http://docker/v1.47/containers/x/json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if want := `{"HostConfig":{"Binds":["/home/alice/src/app/store:/s:ro"],"Memory":9007199254740993},"Id":"x","Mounts":[{"Destination":"/s","Source":"/home/alice/src/app/store","Type":"bind"}]}` + "\n"; string(b) != want {
+		t.Errorf("inspect:\n%s\nwant\n%s", b, want)
+	}
+	<-seen
+
+	resp, err = cl.Get("http://docker/v1.47/containers/x/logs?follow=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if string(b) != "tick\ntick\ntick\n" {
 		t.Errorf("streamed body %q", b)
@@ -216,5 +234,41 @@ func TestDockerProxyServes(t *testing.T) {
 	got, _ := br.ReadString('\n')
 	if got != "echo:hello\n" {
 		t.Errorf("hijacked echo %q", got)
+	}
+}
+
+func TestDockerUnmap(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"/var/lib/docker/volumes/kran-slots/_data/r1/0", "/home/alice/src/app"},
+		{"/var/lib/docker/volumes/kran-slots/_data/r1/0/a/b", "/home/alice/src/app/a/b"},
+		{"/var/lib/docker/volumes/kran-cache/_data/home/.aws", "/home/alice/.aws"},
+		{"/var/lib/docker/volumes/kran-slots/_data/r1/01", "/var/lib/docker/volumes/kran-slots/_data/r1/01"},
+		{"/etc/hosts", "/etc/hosts"},
+	} {
+		if got, _ := unmapHostPath(testMaps, tc.in); got != tc.want {
+			t.Errorf("unmap %q = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	for _, in := range []string{"/home/alice/src/app/x", "/home/alice/.cache"} {
+		h, _ := mapHostPath(testMaps, in)
+		if back, _ := unmapHostPath(testMaps, h); back != in {
+			t.Errorf("round trip %q -> %q -> %q", in, h, back)
+		}
+	}
+	var list any
+	json.Unmarshal([]byte(`[{"Id":"a","Mounts":[{"Type":"bind","Source":"/var/lib/docker/volumes/kran-slots/_data/r1/0"},{"Type":"volume","Source":"/var/lib/docker/volumes/kran-slots/_data/r1/0"}]}]`), &list)
+	if !unmapJSON(testMaps, list) {
+		t.Fatal("list not changed")
+	}
+	ms := list.([]any)[0].(map[string]any)["Mounts"].([]any)
+	if ms[0].(map[string]any)["Source"] != "/home/alice/src/app" || ms[1].(map[string]any)["Source"] != "/var/lib/docker/volumes/kran-slots/_data/r1/0" {
+		t.Errorf("list mounts: %v", ms)
+	}
+	var vol any
+	json.Unmarshal([]byte(`{"Volumes":[{"Name":"d","Options":{"type":"none","o":"bind","device":"/var/lib/docker/volumes/kran-slots/_data/r1/0/data"}},{"Name":"n","Options":{"type":"nfs","device":"/var/lib/docker/volumes/kran-slots/_data/r1/0"}}]}`), &vol)
+	unmapJSON(testMaps, vol)
+	vs := vol.(map[string]any)["Volumes"].([]any)
+	if vs[0].(map[string]any)["Options"].(map[string]any)["device"] != "/home/alice/src/app/data" || vs[1].(map[string]any)["Options"].(map[string]any)["device"] != "/var/lib/docker/volumes/kran-slots/_data/r1/0" {
+		t.Errorf("volumes: %v", vs)
 	}
 }
