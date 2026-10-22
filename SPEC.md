@@ -449,7 +449,7 @@ kran run [flags] -- cmd    run a job where it fits (alias: kran r)
 kran status [--json]       mesh at a glance
 kran top                   live terminal view
 kran ui [--print-url]      open the web dashboard
-kran jobs [--json] [-a]    recent jobs; kran logs <id> [-f]; kran cancel <id>
+kran jobs [--json] [-a] [--why]   recent jobs (--why: the scheduler's reason); kran logs <id> [-f]; kran cancel <id>
 kran drain <node> / kran resume <node>
 kran doctor [--fix] [node]
 kran agents install|uninstall|status

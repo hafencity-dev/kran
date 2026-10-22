@@ -59,7 +59,7 @@ func (a *App) serveCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:    "serve --stdio",
 		Short:  "Serve the peer protocol on stdin/stdout (used by linked machines over SSH)",
-		Hidden: false,
+		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if !stdio {

@@ -3,9 +3,24 @@ package agents
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
+
+func TestMain(m *testing.M) {
+	daemonUp = func() bool { return true }
+	os.Exit(m.Run())
+}
+
+func TestHookStaysOutWithoutDaemon(t *testing.T) {
+	daemonUp = func() bool { return false }
+	defer func() { daemonUp = func() bool { return true } }()
+	out, code := runHook(t, `{"tool_name":"Bash","tool_input":{"command":"go test ./..."}}`)
+	if out != "" || code != 0 {
+		t.Fatalf("without a daemon the hook must stay silent, got code=%d out=%q", code, out)
+	}
+}
 
 func runHook(t *testing.T, in string) (string, int) {
 	t.Helper()

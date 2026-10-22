@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -47,13 +48,17 @@ known_hosts to choose from.`,
 			}
 			f.Interactive = isTerminal(a.In) && a.outTTY
 			if err := a.linkHost(cmd.Context(), f); err != nil {
+				var ue *UsageError
+				if errors.As(err, &ue) {
+					return err
+				}
 				return &ExitError{Code: 1, Msg: err.Error()}
 			}
 			return nil
 		},
 	}
 	fs := cmd.Flags()
-	fs.StringVar(&f.Name, "name", "", "node name for the other machine (default: its own)")
+	fs.StringVar(&f.Name, "name", "", "name for the other machine (default: its own)")
 	fs.StringArrayVar(&f.SSHArgs, "ssh-arg", nil, "extra argument for ssh, e.g. --ssh-arg=-p --ssh-arg=2222 (repeatable)")
 	fs.StringVar(&f.Tag, "tag", "", "mark the keys and entry this link adds (for development setups)")
 	fs.StringArrayVar(&f.RemoteEnv, "remote-env", nil, "KEY=VALUE exported for every kran command run on the other machine (development)")
@@ -210,10 +215,10 @@ func (a *App) chooseHost(ctx context.Context) (string, error) {
 func (a *App) unlinkCommand() *cobra.Command {
 	var f linkFlags
 	cmd := &cobra.Command{
-		Use:               "unlink <node>",
+		Use:               "unlink <machine>",
 		Short:             "Undo a link: removes the keys and entries `kran link` added, here and there",
 		Example:           "  kran unlink devmac",
-		Args:              cobra.ExactArgs(1),
+		Args:              oneArg("machine", "linked machines are in `kran status`"),
 		ValidArgsFunction: completeNodes,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			o, err := a.linkOptions(f)

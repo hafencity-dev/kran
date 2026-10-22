@@ -46,3 +46,6 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
 )
+
+// kran patch: no terminal query at process start (see third_party/bubbletea/tea_init.go)
+replace github.com/charmbracelet/bubbletea => ./third_party/bubbletea

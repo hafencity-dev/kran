@@ -18,7 +18,7 @@ export async function cancelJob(job: Job) {
   const cmd = command(job.spec.argv, job.spec.shell)
   const running = job.state !== 'queued'
   const ok = await confirmAction(
-    running ? 'Stop this job?' : 'Remove this job from the queue?',
+    running ? 'Cancel this job?' : 'Cancel this waiting job?',
     h(
       'div',
       null,
@@ -27,16 +27,16 @@ export async function cancelJob(job: Job) {
         'p',
         null,
         running
-          ? `It is ${job.state} on ${job.node ?? 'a node'} for ${job.spec.owner.name}. The command is stopped and the caller sees it as interrupted.`
+          ? `It is ${job.state} on ${job.node ?? 'a node'} for ${job.spec.owner.name}. It is stopped and its kran run exits as interrupted.`
           : `${job.spec.owner.name} is waiting for it. Its kran run exits as canceled.`,
       ),
     ),
-    running ? 'Stop job' : 'Remove from queue',
+    'Cancel job',
   )
   if (!ok) return
   try {
     await api.cancel(job.spec.id)
-    toast(running ? `Stopped ${cmd}` : `Removed ${cmd} from the queue`)
+    toast(`Canceled ${cmd}`)
   } catch (e) {
     report(e, 'cancel the job')
   }

@@ -25,13 +25,22 @@ func (a *App) runCommand() *cobra.Command {
 exit code are the same as running it directly. If kran cannot place the job it
 runs it here, so it is never worse than running it yourself.
 
-Everything after the first non-flag argument (or after --) is the command.`,
+Everything after the first non-flag argument (or after --) is the command.
+kran says something on stderr only when it adds information, as one line
+starting with "kran:".
+
+A job that runs on another machine works on a synced copy of your files: files
+it creates stay there. Use --local when you need them here.
+
+Exit codes: the command's own; 125 kran failed after the command started (or
+--remote/--no-fallback could not be honored); 126 not executable; 127 not
+found; 128+n killed by signal n; 2 usage error.`,
 		Example: `  kran run -- go test ./...
   kran run go build ./...                 # -- is optional
   kran run --sh 'pnpm install && pnpm build | tail -n 20'
   kran run --mem 12G --cpus 8 -- cargo test
-  kran run -n devmac -- docker build .
-  kran run --local -- npm run dev         # never leave this machine
+  kran run -n devmac -- docker build .    # pin a machine
+  kran run --local -- ./build.sh          # keep the output files here
   kran run --json-events -- make test     # progress as JSON lines on stderr`,
 		Args:                  cobra.ArbitraryArgs,
 		DisableFlagsInUseLine: true,
@@ -47,18 +56,18 @@ Everything after the first non-flag argument (or after --) is the command.`,
 	fs := cmd.Flags()
 	fs.SetInterspersed(false) // flags after the command belong to the command
 	fs.BoolVarP(&f.Local, "local", "l", false, "run on this machine only")
-	fs.BoolVarP(&f.Remote, "remote", "r", false, "never run here; fail (exit 125) instead of falling back")
-	fs.StringVarP(&f.Node, "node", "n", "", "run on this node")
+	fs.BoolVarP(&f.Remote, "remote", "r", false, "never run here: exit 125 if no other machine can take the job")
+	fs.StringVarP(&f.Node, "node", "n", "", "run on this machine (a name from kran status)")
 	fs.BoolVar(&f.GPU, "gpu", false, "needs a GPU")
 	fs.Float64Var(&f.CPUs, "cpus", 0, "CPU cores to reserve (default: learned estimate)")
 	fs.StringVar(&f.Mem, "mem", "", "memory to reserve, e.g. 6G (default: learned estimate)")
 	fs.BoolVar(&f.AnyOS, "any-os", false, "allow running natively on a different OS than this one")
 	fs.BoolVarP(&f.Stdin, "stdin", "i", false, "forward stdin to a remote job")
-	fs.BoolVarP(&f.Quiet, "quiet", "q", false, "no kran: messages on stderr")
+	fs.BoolVarP(&f.Quiet, "quiet", "q", false, "hide kran's informational messages (errors still show)")
 	fs.BoolVar(&f.JSONEvents, "json-events", false, "print progress as JSON lines on stderr")
 	fs.StringVar(&f.Priority, "priority", "", "high, normal or low (default: high on a terminal, else normal)")
 	fs.StringArrayVar(&f.Labels, "label", nil, "label the job, key=value (repeatable)")
-	fs.BoolVar(&f.NoFallback, "no-fallback", false, "fail with exit 125 instead of running here when kran cannot place the job")
+	fs.BoolVar(&f.NoFallback, "no-fallback", false, "exit 125 instead of running here when kran cannot place the job")
 	fs.StringArrayVar(&f.ExtraEnv, "env", nil, "also forward this environment variable, even if it looks secret (repeatable)")
 	fs.StringVar(&f.Sh, "sh", "", "run this string with your shell instead of a command")
 	return cmd

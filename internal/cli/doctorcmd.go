@@ -13,7 +13,7 @@ import (
 func (a *App) doctorCommand() *cobra.Command {
 	var fix, asJSON bool
 	cmd := &cobra.Command{
-		Use:   "doctor [node]",
+		Use:   "doctor [machine]",
 		Short: "Check this machine and its links; fix common problems",
 		Long: `Check the service, keys, permissions, linked machines, versions, disk, container
 runtime and clocks. Every finding says what to do. With --fix, kran repairs what

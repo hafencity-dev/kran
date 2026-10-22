@@ -96,8 +96,8 @@ const RunningRow = memo(function RunningRow({ job: j, onOpen }: { job: Job; onOp
         <LiveUse job={j} />
       </td>
       <td class="cell-actions">
-        <button type="button" class="btn btn-small btn-quiet" onClick={() => cancelJob(j)} aria-label={`Stop ${cmd}`}>
-          Stop
+        <button type="button" class="btn btn-small btn-quiet" onClick={() => cancelJob(j)} aria-label={`Cancel ${cmd}`}>
+          Cancel
         </button>
       </td>
     </tr>
@@ -204,8 +204,8 @@ const QueueItem = memo(function QueueItem({ job: j, pos, onOpen }: { job: Job; p
       </div>
       <div class="qactions">
         <PrioritySelect job={j} />
-        <button type="button" class="btn btn-small btn-quiet" onClick={() => cancelJob(j)} aria-label={`Remove ${cmd} from the queue`}>
-          Remove
+        <button type="button" class="btn btn-small btn-quiet" onClick={() => cancelJob(j)} aria-label={`Cancel ${cmd}`}>
+          Cancel
         </button>
       </div>
     </li>

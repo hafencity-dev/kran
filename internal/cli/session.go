@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"syscall"
@@ -142,7 +143,7 @@ func (r *runner) event(name string, fields map[string]any) {
 // pendNote holds a waiting/progress message until it has lasted NoticeDelay,
 // then prints it; changes afterwards print immediately.
 func (r *runner) pendNote(text string) {
-	if text == "" || text == r.lastSaid || r.flags.JSONEvents {
+	if text == "" || sameNote(text, r.lastSaid) || r.flags.JSONEvents {
 		return // JSON mode already gets every notice and phase as an event
 	}
 	if r.noteShown {
@@ -155,6 +156,14 @@ func (r *runner) pendNote(text string) {
 		r.noteC = r.noteTimer.C
 	}
 }
+
+// sameNote compares two waiting messages ignoring numbers: "has 6.8 GiB free"
+// becoming "has 6.6 GiB free" is the same reason, not news worth a new line.
+func sameNote(a, b string) bool {
+	return digitsRe.ReplaceAllString(a, "#") == digitsRe.ReplaceAllString(b, "#")
+}
+
+var digitsRe = regexp.MustCompile(`[0-9]+(\.[0-9]+)?`)
 
 func (r *runner) printNote(text string) {
 	r.lastSaid = text
@@ -221,12 +230,22 @@ func (r *runner) noSession(ctx context.Context, why string, cause error) int {
 		if cause != nil && !errors.Is(cause, client.ErrNoDaemon) {
 			msg += " (" + cause.Error() + ")"
 		}
-		r.sayAlways("%s, and --remote/--no-fallback forbids running locally; check the daemon with `kran doctor` or start it with `kran service start`", msg)
+		flag := "--no-fallback"
+		if r.spec.Req.Prefer == proto.PreferRemote {
+			flag = "--remote"
+		}
+		hint := "check: kran doctor"
+		if i := strings.LastIndex(why, "("); i >= 0 && strings.HasSuffix(why, ")") {
+			hint = why[i+1 : len(why)-1] // the "start it: …" advice of the original message
+		}
+		r.sayAlways("%s; %s forbids running here (%s)", msg, flag, hint)
 		r.event("exit", map[string]any{"code": proto.ExitInfra, "state": proto.JobInfraErr})
 		return proto.ExitInfra
 	}
 	r.event("fallback", map[string]any{"reason": why})
-	r.say("%s", why)
+	if !r.flags.JSONEvents { // the fallback event already carries the reason
+		r.say("%s", why)
+	}
 	return r.standalone(ctx)
 }
 

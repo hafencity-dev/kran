@@ -9,13 +9,15 @@
 #   gh api repos/hafencity-dev/kran/contents/install.sh -H 'Accept: application/vnd.github.raw' | sh -s -- --version 0.3.0
 #
 # Options (or environment): --version X (VERSION), --no-setup (KRAN_NO_SETUP=1),
-# KRAN_INSTALL_DIR (default ~/.local/bin).
+# --yes (accept setup's defaults without asking; also the default when there is
+# no terminal), KRAN_INSTALL_DIR (default ~/.local/bin).
 set -eu
 
 REPO="hafencity-dev/kran"
 VERSION="${VERSION:-}"
 INSTALL_DIR="${KRAN_INSTALL_DIR:-$HOME/.local/bin}"
 NO_SETUP="${KRAN_NO_SETUP:-0}"
+YES=0
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'install: %s\n' "$*" >&2; exit 1; }
@@ -25,8 +27,9 @@ while [ $# -gt 0 ]; do
 	--version) [ $# -ge 2 ] || die "--version needs a value, e.g. --version 0.3.0"; VERSION="$2"; shift 2 ;;
 	--version=*) VERSION="${1#--version=}"; shift ;;
 	--no-setup) NO_SETUP=1; shift ;;
+	-y | --yes) YES=1; shift ;;
 	-h | --help)
-		say "usage: install.sh [--version X] [--no-setup]   (env: VERSION, KRAN_INSTALL_DIR, KRAN_NO_SETUP, GITHUB_TOKEN)"
+		say "usage: install.sh [--version X] [--no-setup] [--yes]   (env: VERSION, KRAN_INSTALL_DIR, KRAN_NO_SETUP, GITHUB_TOKEN)"
 		exit 0 ;;
 	*) die "unknown option $1 (try --help)" ;;
 	esac
@@ -130,8 +133,14 @@ if [ "$NO_SETUP" = 1 ]; then
 	say "Skipping setup. Run 'kran setup' when you are ready."
 	exit 0
 fi
-if [ -t 0 ]; then
+if [ "$YES" = 1 ]; then
+	"$INSTALL_DIR/kran" setup --yes
+elif [ -t 0 ]; then
 	"$INSTALL_DIR/kran" setup
+elif ( : </dev/tty ) 2>/dev/null; then
+	# Piped into sh: stdin is the script, but the person at the keyboard can
+	# still answer setup's questions.
+	"$INSTALL_DIR/kran" setup </dev/tty
 else
 	"$INSTALL_DIR/kran" setup --yes
 fi

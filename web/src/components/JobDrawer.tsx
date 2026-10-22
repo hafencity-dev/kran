@@ -89,7 +89,7 @@ function Detail({ job: j }: { job: Job }) {
           <div class="detail-actions">
             {j.state === 'queued' && <PrioritySelect job={j} />}
             <button type="button" class="btn btn-small btn-danger-quiet" onClick={() => cancelJob(j)}>
-              {j.state === 'queued' ? 'Remove from queue' : 'Stop job'}
+              Cancel job
             </button>
           </div>
         )}

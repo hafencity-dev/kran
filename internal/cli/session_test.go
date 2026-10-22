@@ -273,6 +273,30 @@ func TestRemoteRunPassthroughAndNotices(t *testing.T) {
 	}
 }
 
+// A wait whose only change is a live number ("3.1 GiB free" -> "3.0 GiB free")
+// is one reason, so it is said once; a different reason is said again.
+func TestWaitingLineIsNotRepeatedForChangingNumbers(t *testing.T) {
+	s := newFakeSession()
+	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s}}, "true")
+	go func() {
+		waitFor(t, func() bool { return s.count(proto.FrameSubmit) == 1 })
+		s.push(proto.FrameNotice, proto.Notice{Kind: "queued", Message: "waiting: needs 6 GiB, devmac has 3.1 GiB free"})
+		time.Sleep(250 * time.Millisecond)
+		s.push(proto.FrameNotice, proto.Notice{Kind: "queued", Message: "waiting: needs 6 GiB, devmac has 3.0 GiB free"})
+		time.Sleep(50 * time.Millisecond)
+		s.push(proto.FrameNotice, proto.Notice{Kind: "queued", Message: "waiting: devmac is draining"})
+		time.Sleep(50 * time.Millisecond)
+		s.push(proto.FrameExit, proto.Exit{JobID: "j1", Code: 0, State: proto.JobSucceeded})
+	}()
+	if code := h.run(t); code != 0 {
+		t.Fatal(code)
+	}
+	se := h.stderr.String()
+	if n := strings.Count(se, "needs 6 GiB"); n != 1 || !strings.Contains(se, "kran: waiting: devmac is draining") {
+		t.Fatalf("stderr:\n%s", se)
+	}
+}
+
 func TestQuickQueueStaysSilent(t *testing.T) {
 	s := newFakeSession()
 	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s}}, "x")
@@ -358,8 +382,19 @@ func TestNoDaemonNoFallback(t *testing.T) {
 	if code := h.run(t); code != 125 {
 		t.Fatal(code)
 	}
-	if !strings.Contains(h.stderr.String(), "no-fallback") {
-		t.Fatalf("%q", h.stderr.String())
+	if want := "kran: daemon not running; --no-fallback forbids running here (start it: kran service start)\n"; h.stderr.String() != want {
+		t.Fatalf("%q, want %q", h.stderr.String(), want)
+	}
+}
+
+func TestNoDaemonJSONEventsSaysItOnce(t *testing.T) {
+	h := newHarness(t, nil, "true")
+	h.r.flags.JSONEvents = true
+	if code := h.run(t); code != 0 {
+		t.Fatal(code)
+	}
+	if n := strings.Count(h.stderr.String(), "daemon not running"); n != 1 {
+		t.Fatalf("the fallback reason appears %d times:\n%s", n, h.stderr.String())
 	}
 }
 

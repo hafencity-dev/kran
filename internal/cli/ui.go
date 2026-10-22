@@ -34,6 +34,11 @@ func (a *App) uiCommand() *cobra.Command {
 				return nil
 			}
 			fmt.Fprintln(a.Out, url)
+			if cl, err := a.Dial(cmd.Context()); err != nil {
+				fmt.Fprintln(a.Err, "kran: the daemon is not running, so this page will not load yet (start it: kran service start)")
+			} else {
+				_ = cl.Close()
+			}
 			if err := openBrowser(url); err != nil {
 				fmt.Fprintln(a.Err, "kran: could not open a browser here; open the URL above.")
 			}

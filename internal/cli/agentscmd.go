@@ -3,6 +3,8 @@ package cli
 import (
 	"fmt"
 	"io"
+	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -22,6 +24,14 @@ through kran automatically. Everything is reversible with "kran agents uninstall
 			self, _ := a.Self()
 			rep, err := fn(agents.Options{KranPath: self})
 			printAgentReport(a.Out, rep)
+			if use == "status" {
+				for _, it := range rep.Items {
+					if it.State != agents.StateInstalled {
+						fmt.Fprintln(a.Out, "\nInstall or update what is missing with `kran agents install`.")
+						break
+					}
+				}
+			}
 			if err != nil {
 				return &ExitError{Code: 1, Msg: err.Error()}
 			}
@@ -37,8 +47,13 @@ through kran automatically. Everything is reversible with "kran agents uninstall
 }
 
 func printAgentReport(w io.Writer, rep agents.Report) {
+	home, _ := os.UserHomeDir()
 	for _, it := range rep.Items {
-		line := fmt.Sprintf("%-16s %-10s %s", it.Name, it.State, it.Path)
+		path := it.Path
+		if home != "" && strings.HasPrefix(path, home+string(os.PathSeparator)) {
+			path = "~" + path[len(home):]
+		}
+		line := fmt.Sprintf("%-16s %-10s %s", it.Name, it.State, path)
 		if it.Detail != "" {
 			line += "  (" + it.Detail + ")"
 		}

@@ -147,29 +147,62 @@ machines has room, and never makes a job worse than running it locally.
 	root.SetVersionTemplate("{{.Version}}\n")
 	root.CompletionOptions.HiddenDefaultCmd = false
 
+	root.RunE = func(c *cobra.Command, args []string) error {
+		if len(args) > 0 {
+			msg := fmt.Sprintf("unknown command %q", args[0])
+			if sug := c.SuggestionsFor(args[0]); len(sug) > 0 {
+				msg += "; did you mean `kran " + sug[0] + "`?"
+			} else {
+				msg += "; see `kran --help`"
+			}
+			return usagef("%s", msg)
+		}
+		return c.Help()
+	}
+	root.AddGroup(
+		&cobra.Group{ID: "jobs", Title: "Run and watch jobs:"},
+		&cobra.Group{ID: "machines", Title: "Your machines:"},
+		&cobra.Group{ID: "here", Title: "This machine:"},
+	)
+	root.SuggestionsMinimumDistance = 2
+	cobra.EnableCommandSorting = false // the help lists commands in the order we add them
+	root.Args = cobra.ArbitraryArgs    // RunE below reports unknown commands, with a suggestion
 	root.AddCommand(
 		a.runCommand(),
 		a.statusCommand(),
 		a.jobsCommand(),
 		a.logsCommand(),
 		a.cancelCommand(),
+		a.topCommand(),
+		a.uiCommand(),
+		a.linkCommand(),
+		a.unlinkCommand(),
 		a.drainCommand("drain"),
 		a.drainCommand("resume"),
-		a.uiCommand(),
-		a.topCommand(),
-		a.versionCommand(),
+		a.upgradeCommand(),
+		a.setupCommand(),
+		a.doctorCommand(),
+		a.serviceCommand(),
+		a.agentsCommand(),
 		a.daemonCommand(),
+		a.versionCommand(),
 		a.serveCommand(),
 		a.internalCommand(),
 		a.hookCommand(),
 	)
-	a.addPlatformCommands(root)
-	root.Args = func(c *cobra.Command, args []string) error {
-		if len(args) > 0 {
-			return usagef("unknown command %q; see `kran --help`", args[0])
+	for id, names := range map[string][]string{
+		"jobs":     {"run", "status", "jobs", "logs", "cancel", "top", "ui"},
+		"machines": {"link", "unlink", "drain", "resume", "upgrade"},
+		"here":     {"setup", "doctor", "service", "agents", "daemon", "version"},
+	} {
+		for _, n := range names {
+			if c, _, err := root.Find([]string{n}); err == nil && c != root {
+				c.GroupID = id
+			}
 		}
-		return nil
 	}
+	root.SetHelpCommandGroupID("here")
+	root.SetCompletionCommandGroupID("here")
 	usageArgs(root)
 	return root
 }
@@ -180,6 +213,10 @@ func usageArgs(c *cobra.Command) {
 	if v := c.Args; v != nil && c.Parent() != nil {
 		c.Args = func(cmd *cobra.Command, args []string) error {
 			if err := v(cmd, args); err != nil {
+				var ue *UsageError
+				if errors.As(err, &ue) {
+					return err
+				}
 				return usagef("%s (see `%s --help`)", err.Error(), cmd.CommandPath())
 			}
 			return nil
@@ -187,5 +224,19 @@ func usageArgs(c *cobra.Command) {
 	}
 	for _, sub := range c.Commands() {
 		usageArgs(sub)
+	}
+}
+
+// oneArg requires exactly one argument and says what it is and where to find
+// it, instead of cobra's "accepts 1 arg(s), received 0".
+func oneArg(what, hint string) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, args []string) error {
+		switch {
+		case len(args) == 0:
+			return usagef("%s needs a %s (%s)", cmd.Name(), what, hint)
+		case len(args) > 1:
+			return usagef("%s takes one %s, got %d (see `%s --help`)", cmd.Name(), what, len(args), cmd.CommandPath())
+		}
+		return nil
 	}
 }

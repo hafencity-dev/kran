@@ -315,7 +315,7 @@ func (d *Daemon) handleDrain(on bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
 		if !d.peers.setDrained(name, on) {
-			writeAPIError(w, http.StatusNotFound, "no node "+name, "see linked nodes: kran status")
+			writeAPIError(w, http.StatusNotFound, "no machine named "+name, "machine names are in `kran status`")
 			return
 		}
 		if name == d.self {
