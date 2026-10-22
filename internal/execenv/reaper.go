@@ -55,8 +55,8 @@ func (m *manager) pruneJobs() {
 	}
 }
 
-// jobOrphaned: the job has a supervised job dir here and no live
-// supervisor. Jobs unknown to this state dir are never touched.
+// jobOrphaned: the job has a supervised job dir here and has ended or has
+// no live supervisor. Jobs unknown to this state dir are never touched.
 func (m *manager) jobOrphaned(id string) bool {
 	if validJobID(id) != nil {
 		return false
@@ -64,6 +64,12 @@ func (m *manager) jobOrphaned(id string) bool {
 	dir := m.l.job(id)
 	if _, err := os.Stat(filepath.Join(dir, fileSpec)); err != nil {
 		return false
+	}
+	// The supervisor cleans up before it writes the status, so anything
+	// still around after that is left over, even while the supervisor
+	// process itself is still exiting.
+	if _, err := os.Stat(filepath.Join(dir, fileStatus)); err == nil {
+		return true
 	}
 	return !supervisorAlive(dir)
 }

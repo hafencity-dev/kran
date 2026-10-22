@@ -57,7 +57,8 @@ type supervisor struct {
 	cg    *jobCgroup
 
 	mu         sync.Mutex
-	cmd        *exec.Cmd // running step, nil between steps
+	cmd        *exec.Cmd     // running step, nil between steps
+	exited     chan struct{} // closed when cmd has been waited for
 	pgid       int
 	ptmx       *os.File // job terminal (TTY jobs), created before the job starts
 	ptySlave   *os.File
@@ -343,8 +344,9 @@ func (s *supervisor) runStep(setup bool) stepResult {
 		readers.Add(1)
 		go s.pump(&readers, s.ptmx, proto.FrameStdout, false)
 	}
+	exited := make(chan struct{})
 	s.mu.Lock()
-	s.cmd, s.pgid, s.container = cmd, cmd.Process.Pid, name
+	s.cmd, s.exited, s.pgid, s.container = cmd, exited, cmd.Process.Pid, name
 	killing := s.killReason != ""
 	s.mu.Unlock()
 	if killing {
@@ -355,6 +357,7 @@ func (s *supervisor) runStep(setup bool) stepResult {
 	}
 
 	werr := cmd.Wait()
+	close(exited)
 	res := stepResult{}
 	if ps := cmd.ProcessState; ps != nil {
 		if ws, ok := ps.Sys().(syscall.WaitStatus); ok {
@@ -504,12 +507,19 @@ func (s *supervisor) terminate(reason string, grace time.Duration) {
 
 func (s *supervisor) killTree(grace time.Duration) {
 	s.mu.Lock()
-	cmd, pgid, container := s.cmd, s.pgid, s.container
+	cmd, exited, pgid, container := s.cmd, s.exited, s.pgid, s.container
 	s.mu.Unlock()
 	if cmd == nil {
 		return
 	}
-	done := func() bool { return cmd.ProcessState != nil || !alive(cmd.Process.Pid) }
+	done := func() bool {
+		select {
+		case <-exited:
+			return true
+		default:
+			return false
+		}
+	}
 	switch {
 	case container != "":
 		if grace > 0 {
