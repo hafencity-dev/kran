@@ -213,6 +213,10 @@ func usageArgs(c *cobra.Command) {
 	if v := c.Args; v != nil && c.Parent() != nil {
 		c.Args = func(cmd *cobra.Command, args []string) error {
 			if err := v(cmd, args); err != nil {
+				var ue *UsageError
+				if errors.As(err, &ue) {
+					return err
+				}
 				return usagef("%s (see `%s --help`)", err.Error(), cmd.CommandPath())
 			}
 			return nil
@@ -220,5 +224,19 @@ func usageArgs(c *cobra.Command) {
 	}
 	for _, sub := range c.Commands() {
 		usageArgs(sub)
+	}
+}
+
+// oneArg requires exactly one argument and says what it is and where to find
+// it, instead of cobra's "accepts 1 arg(s), received 0".
+func oneArg(what, hint string) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, args []string) error {
+		switch {
+		case len(args) == 0:
+			return usagef("%s needs a %s (%s)", cmd.CommandPath(), what, hint)
+		case len(args) > 1:
+			return usagef("%s takes one %s, got %d (see `%s --help`)", cmd.CommandPath(), what, len(args), cmd.CommandPath())
+		}
+		return nil
 	}
 }

@@ -218,7 +218,7 @@ func (a *App) unlinkCommand() *cobra.Command {
 		Use:               "unlink <machine>",
 		Short:             "Undo a link: removes the keys and entries `kran link` added, here and there",
 		Example:           "  kran unlink devmac",
-		Args:              cobra.ExactArgs(1),
+		Args:              oneArg("machine", "linked machines are in `kran status`"),
 		ValidArgsFunction: completeNodes,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			o, err := a.linkOptions(f)

@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -262,8 +263,12 @@ func (a *App) logsCommand() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				if err := cl.Log(cmd.Context(), id, follow, a.Out); err != nil {
+				cw := &countWriter{w: a.Out}
+				if err := cl.Log(cmd.Context(), id, follow, cw); err != nil {
 					return &ExitError{Code: 1, Msg: "cannot read the log of " + id + ": " + err.Error()}
+				}
+				if cw.n == 0 {
+					a.explainEmptyLog(cmd, cl, id)
 				}
 				return nil
 			})
@@ -273,12 +278,41 @@ func (a *App) logsCommand() *cobra.Command {
 	return cmd
 }
 
+type countWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *countWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// explainEmptyLog says why there is nothing to show: a job that ran on this
+// machine wrote straight to the terminal that started it, so kran has no copy.
+func (a *App) explainEmptyLog(cmd *cobra.Command, cl client.Client, id string) {
+	jobs, err := cl.Jobs(cmd.Context(), 1000)
+	if err != nil {
+		return
+	}
+	for _, j := range jobs {
+		if j.Spec.ID != id {
+			continue
+		}
+		if j.Local {
+			a.errorf("%s ran on this machine, so its output went to the terminal that ran it; kran keeps output only for jobs that ran elsewhere", id)
+		}
+		return
+	}
+}
+
 func (a *App) cancelCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:     "cancel <job>",
 		Short:   "Cancel a queued or running job",
 		Example: "  kran cancel 01hx2",
-		Args:    cobra.ExactArgs(1),
+		Args:    oneArg("job", "list jobs with `kran jobs`"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return a.withClient(cmd.Context(), func(cl client.Client) error {
 				id, err := a.resolveJob(cmd, cl, args[0])
@@ -304,7 +338,7 @@ func (a *App) drainCommand(verb string) *cobra.Command {
 		Use:               verb + " <machine>",
 		Short:             short,
 		Example:           "  kran " + verb + " devmac",
-		Args:              cobra.ExactArgs(1),
+		Args:              oneArg("machine", "machine names are in `kran status`"),
 		ValidArgsFunction: completeNodes,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return a.withClient(cmd.Context(), func(cl client.Client) error {
@@ -315,7 +349,7 @@ func (a *App) drainCommand(verb string) *cobra.Command {
 					err = cl.Resume(cmd.Context(), args[0])
 				}
 				if err != nil {
-					return &ExitError{Code: 1, Msg: fmt.Sprintf("cannot %s %s: %v (machine names are in `kran status`)", verb, args[0], err)}
+					return &ExitError{Code: 1, Msg: fmt.Sprintf("cannot %s %s: %v", verb, args[0], err)}
 				}
 				if verb == "drain" {
 					fmt.Fprintf(a.Out, "%s is draining: running jobs finish, nothing new starts there. Undo with `kran resume %s`.\n", args[0], args[0])

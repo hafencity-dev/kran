@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"syscall"
@@ -142,7 +143,7 @@ func (r *runner) event(name string, fields map[string]any) {
 // pendNote holds a waiting/progress message until it has lasted NoticeDelay,
 // then prints it; changes afterwards print immediately.
 func (r *runner) pendNote(text string) {
-	if text == "" || text == r.lastSaid || r.flags.JSONEvents {
+	if text == "" || sameNote(text, r.lastSaid) || r.flags.JSONEvents {
 		return // JSON mode already gets every notice and phase as an event
 	}
 	if r.noteShown {
@@ -155,6 +156,14 @@ func (r *runner) pendNote(text string) {
 		r.noteC = r.noteTimer.C
 	}
 }
+
+// sameNote compares two waiting messages ignoring numbers: "has 6.8 GiB free"
+// becoming "has 6.6 GiB free" is the same reason, not news worth a new line.
+func sameNote(a, b string) bool {
+	return digitsRe.ReplaceAllString(a, "#") == digitsRe.ReplaceAllString(b, "#")
+}
+
+var digitsRe = regexp.MustCompile(`[0-9]+(\.[0-9]+)?`)
 
 func (r *runner) printNote(text string) {
 	r.lastSaid = text

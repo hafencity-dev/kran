@@ -110,3 +110,25 @@ func TestStatusDoesNotSayWaitingTwice(t *testing.T) {
 		t.Fatalf("\n%s", out)
 	}
 }
+
+func TestArgumentErrorsSayWhatIsNeeded(t *testing.T) {
+	a, _, errb := testApp(nil)
+	for args, want := range map[string]string{
+		"cancel": "kran cancel needs a job (list jobs with `kran jobs`)",
+		"drain":  "kran drain needs a machine",
+		"unlink": "kran unlink needs a machine",
+	} {
+		errb.Reset()
+		if code := a.Execute(context.Background(), []string{args}); code != 2 || !strings.Contains(errb.String(), want) || strings.Contains(errb.String(), "arg(s)") {
+			t.Errorf("%s: %d %q", args, code, errb.String())
+		}
+	}
+}
+
+func TestLogsOfALocalJobExplainTheEmptyOutput(t *testing.T) {
+	cl := &stateClient{jobs: []proto.Job{{Spec: proto.JobSpec{ID: "j1"}, Local: true}}}
+	a, out, errb := testApp(cl)
+	if code := a.Execute(context.Background(), []string{"logs"}); code != 0 || out.Len() != 0 || !strings.Contains(errb.String(), "ran on this machine") {
+		t.Fatalf("%d out=%q err=%q", code, out, errb)
+	}
+}
