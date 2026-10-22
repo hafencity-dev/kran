@@ -23,16 +23,54 @@ func quoteIfNeeded(s string) string {
 
 // WrapCommand returns `kran run --sh '<cmd>'` when cmd is a heavy command that
 // is safe to move (see shouldWrap), else ok=false and the input is untouched.
+// Leading `cd DIR` commands stay outside: `cd DIR && kran run --sh '<rest>'`.
 func WrapCommand(cmd string) (string, bool) { return wrapWith("kran", cmd) }
 
 func wrapWith(kranPath, cmd string) (string, bool) {
-	if !shouldWrap(cmd) {
+	prefix, rest := hoistCd(cmd)
+	if !shouldWrap(rest) {
 		return "", false
 	}
 	if kranPath == "" {
 		kranPath = "kran"
 	}
-	return quoteIfNeeded(kranPath) + " run --sh " + ShellQuote(cmd), true
+	return prefix + quoteIfNeeded(kranPath) + " run --sh " + ShellQuote(rest), true
+}
+
+// hoistCd splits leading `cd DIR` commands off cmd so they run in the agent's
+// shell. kran takes the workspace from the directory it starts in: wrapped
+// whole, `cd ../other-repo && go test` would sync the shell's directory and
+// then fail its cd on the other machine. The prefix keeps the original text
+// and operators; rest is cmd when nothing is hoisted.
+func hoistCd(cmd string) (prefix, rest string) {
+	cmds, ok := lexShell(cmd)
+	if !ok {
+		return "", cmd
+	}
+	s, n := cmd, 0
+	for ; n < len(cmds)-1; n++ {
+		c, next := cmds[n], cmds[n+1].op
+		if len(c.words) != 2 || c.words[0] != "cd" || (next != "&&" && next != ";" && next != "\n") {
+			break
+		}
+		t := strings.TrimLeft(s, " \t\n")
+		if !strings.HasPrefix(t, c.raw) {
+			return "", cmd
+		}
+		t = strings.TrimLeft(t[len(c.raw):], " \t")
+		if !strings.HasPrefix(t, next) {
+			return "", cmd
+		}
+		s = t[len(next):]
+	}
+	if n == 0 {
+		return "", cmd
+	}
+	prefix = strings.TrimLeft(cmd[:len(cmd)-len(s)], " \t\n")
+	if !strings.HasSuffix(prefix, "\n") {
+		prefix += " "
+	}
+	return prefix, strings.TrimLeft(s, " \t\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -135,7 +173,10 @@ func stripPrefixes(w []string) []string {
 func isBenign(w []string) bool {
 	switch w[0] {
 	case "cd":
-		return len(w) == 2
+		// Leading cds are hoisted (hoistCd); one later in the command must
+		// stay inside the synced workspace, which an absolute or home path
+		// or a variable may leave.
+		return len(w) == 2 && !strings.HasPrefix(w[1], "/") && !strings.HasPrefix(w[1], "~") && !strings.Contains(w[1], "$")
 	case "export":
 		for _, a := range w[1:] {
 			if !assignRe.MatchString(a) || strings.HasPrefix(a, "KRAN_NO_HOOK=") {
