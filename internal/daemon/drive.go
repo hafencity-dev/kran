@@ -91,6 +91,9 @@ func (d *Daemon) drive(ctx context.Context, e *jobEntry, mode driveMode) {
 			// Its kran run did not see the command start, so it ran it
 			// locally when we went away: stop it here before setup ends.
 			e.requestCancel("its kran run ran it locally when the daemon restarted before the job started", "TERM")
+			// Cancel there before reattaching: an attach renews the lease,
+			// which lets a command that waited out a finished setup start.
+			d.cancelOnTarget(job.Node, e.id)
 		} else {
 			go d.cancelWithoutCLI(ctx, e)
 		}
@@ -207,6 +210,16 @@ func (d *Daemon) drive(ctx context.Context, e *jobEntry, mode driveMode) {
 		e.setState(proto.JobQueued, fmt.Sprintf("%s failed before start: %v", p.Node, pe.err))
 		lastFail = pe
 		ticket = d.deps.Sched.Reject(e.id, p.Node, pe.err)
+	}
+}
+
+// cancelOnTarget sends job.cancel (TERM, no lease renewal) to a target;
+// best effort.
+func (d *Daemon) cancelOnTarget(node, id string) {
+	ctx, cancel := context.WithTimeout(d.lifetime(), 5*time.Second)
+	defer cancel()
+	if s, err := d.peers.waitSession(ctx, node); err == nil {
+		peerOneShot(ctx, s, proto.PeerJobCancel, id, nil, nil)
 	}
 }
 
