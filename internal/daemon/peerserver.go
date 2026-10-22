@@ -751,6 +751,14 @@ func (t *targetSide) streamJob(pc *peerConn, j *tjob, proc execenv.Process, offs
 		phMu.Lock()
 		defer phMu.Unlock()
 		ph, _ := j.currentPhase()
+		if ph.State == "" {
+			// Restored after a restart: the phase callback is gone, so ask
+			// the job whether its command started meanwhile.
+			if r, ok := proc.(interface{ Running() bool }); ok && r.Running() {
+				ph = proto.Phase{State: proto.JobRunning}
+				j.setPhase(ph)
+			}
+		}
 		if ph == lastPhase || ph.State == "" {
 			return nil
 		}

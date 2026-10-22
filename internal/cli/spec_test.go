@@ -177,6 +177,43 @@ func TestShellName(t *testing.T) {
 	}
 }
 
+// TestBuildSpecConfigRemoteYieldsToOriginOnly: submit.prefer = "remote" in
+// config.toml is a default; a .kran.toml local rule or a localhost command
+// keeps the job here instead of failing it as if --remote had been given.
+func TestBuildSpecConfigRemoteYieldsToOriginOnly(t *testing.T) {
+	for name, mod := range map[string]func(*SpecInput){
+		"rule": func(in *SpecInput) {
+			in.Project = func(string) (*workspace.ProjectConfig, error) {
+				return &workspace.ProjectConfig{Rules: []workspace.Rule{{Match: "npm run dev*", Local: true}}}, nil
+			}
+		},
+		"localhost": func(in *SpecInput) { in.Argv = []string{"curl", "http://localhost:3000"} },
+	} {
+		in := testInput("npm", "run", "dev")
+		in.Config.Submit.Prefer = "remote"
+		mod(&in)
+		spec, err := BuildSpec(context.Background(), in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !spec.Req.OriginOnly || spec.Req.Prefer != proto.PreferAuto || spec.NoFallback {
+			t.Errorf("%s: req %+v nofallback %v", name, spec.Req, spec.NoFallback)
+		}
+		// An explicit --remote still conflicts (the scheduler says so).
+		in.Flags.Remote = true
+		spec, _ = BuildSpec(context.Background(), in)
+		if spec.Req.Prefer != proto.PreferRemote {
+			t.Errorf("%s: --remote lost: %+v", name, spec.Req)
+		}
+	}
+	// Without an origin-only reason the preference stays.
+	in := testInput("go", "test")
+	in.Config.Submit.Prefer = "remote"
+	if spec, _ := BuildSpec(context.Background(), in); spec.Req.Prefer != proto.PreferRemote {
+		t.Errorf("config prefer remote dropped: %+v", spec.Req)
+	}
+}
+
 func TestBuildSpecNoDocker(t *testing.T) {
 	in := testInput("go", "test", "./...")
 	if spec, _ := BuildSpec(context.Background(), in); spec.Req.NoDocker {

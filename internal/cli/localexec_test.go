@@ -143,7 +143,7 @@ func TestLocalScopeCommandLine(t *testing.T) {
 		t.Fatalf("%+v", ex)
 	}
 	b, _ := os.ReadFile(filepath.Join(bin, "args"))
-	for _, want := range []string{"--user", "--scope", "--slice=kran.slice", "--unit=kran-local-t4", "MemoryMax=4096", "--quiet", "--collect"} {
+	for _, want := range []string{"--user", "--scope", "--slice=kran.slice", "--unit=kran-local-t4", "MemoryMax=4096", "MemorySwapMax=0", "--quiet"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("missing %s in %q", want, b)
 		}

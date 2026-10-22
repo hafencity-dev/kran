@@ -172,7 +172,9 @@ func (d *Daemon) serveRun(conn net.Conn, br *bufio.Reader, clientPID int) {
 	}()
 
 	// CLI → job.
+	readDone := make(chan struct{})
 	go func() {
+		defer close(readDone)
 		defer cancel()
 		var buf []byte
 		for {
@@ -187,6 +189,12 @@ func (d *Daemon) serveRun(conn net.Conn, br *bufio.Reader, clientPID int) {
 		}
 	}()
 	<-ctx.Done()
+	// The session may end on our side first (a write to a CLI that just
+	// quit fails). What that CLI sent before it quit, its exit above all,
+	// is still buffered: read it before the session counts as gone, or
+	// the job would be recorded as canceled.
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	<-readDone
 }
 
 // onCLIFrame applies one frame from the CLI; false ends the session.
@@ -225,12 +233,8 @@ func (d *Daemon) onCLIFrame(ctx context.Context, e *jobEntry, t proto.FrameType,
 		}
 	case proto.FrameStarted:
 		var s proto.Started
-		if json.Unmarshal(p, &s) == nil {
-			select {
-			case e.localCh <- localEvent{started: &s}:
-			case <-ctx.Done():
-				return false
-			}
+		if json.Unmarshal(p, &s) == nil && !d.deliverLocal(e, localEvent{started: &s}) {
+			return false
 		}
 	case proto.FrameExit:
 		var x proto.Exit
@@ -238,14 +242,29 @@ func (d *Daemon) onCLIFrame(ctx context.Context, e *jobEntry, t proto.FrameType,
 			e.mu.Lock()
 			e.exitReported = true
 			e.mu.Unlock()
-			select {
-			case e.localCh <- localEvent{exit: &x}:
-			case <-ctx.Done():
+			if !d.deliverLocal(e, localEvent{exit: &x}) {
 				return false
 			}
 		}
 	}
 	return true
+}
+
+// deliverLocal hands a local job's start or exit to its driver. It does not
+// depend on the session: a CLI that reported its exit and quit at once must
+// still have that exit recorded.
+func (d *Daemon) deliverLocal(e *jobEntry, ev localEvent) bool {
+	t := time.NewTimer(10 * time.Second)
+	defer t.Stop()
+	select {
+	case e.localCh <- ev:
+		return true
+	case <-e.done:
+	case <-d.lifetime().Done():
+	case <-t.C:
+		d.logf("job %s: nobody took the CLI's report from kran run", e.id)
+	}
+	return false
 }
 
 // localHistoryMax caps what the history keeps of one local job's output,

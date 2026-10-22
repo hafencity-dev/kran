@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -100,10 +101,14 @@ func run(ctx context.Context, opts Options) error {
 	}})
 	sched := scheduler.New(scheduler.Options{Origin: cfg.Name, Speed: est.Speed, Now: time.Now, Logf: logf})
 
+	// KRAN_NAMESPACE (development and test installs next to a real one)
+	// prefixes the systemd slice and scopes and the Docker resources so the
+	// two never touch each other's.
+	ns, slice := namespace(logf)
 	self, _ := os.Executable()
 	var ex execenv.Manager
 	if m, err := execenv.New(execenv.Options{
-		StateDir: dirs.State, NodeName: cfg.Name, Self: self, Logf: logf,
+		StateDir: dirs.State, NodeName: cfg.Name, Self: self, Logf: logf, Namespace: ns,
 		Container: cfg.ContainerEnabled,
 		// Placed there by `kran link`/`kran upgrade`; the Docker VM runs the
 		// host's architecture (Apple Silicon → linux/arm64).
@@ -148,9 +153,10 @@ func run(ctx context.Context, opts Options) error {
 		Peers:   peerSrc,
 		Dialer:  dialer,
 		UI:      ui.Handler(),
-		Slice:   newSliceController(cfg.Accept.ReserveMem, logf),
+		Slice:   newSliceController(slice, cfg.Accept.ReserveMem, logf),
 		Session: transport.SessionConfig{Logf: logf},
 		Logf:    logf,
+		Debug:   os.Getenv("KRAN_DEBUG") == "1",
 
 		Supervisor: supervisor(),
 	})
@@ -226,4 +232,20 @@ func supervisor() string {
 		return "launchd"
 	}
 	return ""
+}
+
+var namespaceRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}$`)
+
+// namespace reads KRAN_NAMESPACE: the execenv namespace and the matching
+// slice ("" both = the defaults).
+func namespace(logf func(string, ...any)) (ns, slice string) {
+	ns = os.Getenv("KRAN_NAMESPACE")
+	if ns == "" {
+		return "", ""
+	}
+	if !namespaceRe.MatchString(ns) {
+		logf("KRAN_NAMESPACE=%q is not a valid namespace (a-z, 0-9, -); using the default", ns)
+		return "", ""
+	}
+	return ns, strings.ReplaceAll(ns, "-", "_") + ".slice"
 }

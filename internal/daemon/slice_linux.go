@@ -27,6 +27,7 @@ import (
 type systemdSlice struct {
 	reserve int64
 	logf    func(string, ...any)
+	name    string // "" = SliceName
 	// injectable for tests
 	run      func(ctx context.Context, args ...string) (string, error)
 	meminfo  func() (total, avail int64, err error)
@@ -40,8 +41,8 @@ type systemdSlice struct {
 
 const sliceStep = 64 << 20 // don't bother systemd for smaller changes
 
-func newSliceController(reserve int64, logf func(string, ...any)) SliceController {
-	s := &systemdSlice{reserve: reserve, logf: logf, run: systemctl, meminfo: procMeminfo, readFile: os.ReadFile}
+func newSliceController(name string, reserve int64, logf func(string, ...any)) SliceController {
+	s := &systemdSlice{name: name, reserve: reserve, logf: logf, run: systemctl, meminfo: procMeminfo, readFile: os.ReadFile}
 	s.available = s.detect()
 	if !s.available {
 		logf("kran.slice: no systemd user session; local jobs run in a plain process group")
@@ -59,7 +60,12 @@ func (s *systemdSlice) detect() bool {
 	return err == nil
 }
 
-func (s *systemdSlice) Name() string { return SliceName }
+func (s *systemdSlice) Name() string {
+	if s.name != "" {
+		return s.name
+	}
+	return SliceName
+}
 
 func (s *systemdSlice) Available() bool {
 	s.mu.Lock()
@@ -73,7 +79,7 @@ func (s *systemdSlice) compute(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	var cur int64
-	if cg, err := s.run(ctx, "show", SliceName, "-p", "ControlGroup", "--value"); err == nil && cg != "" {
+	if cg, err := s.run(ctx, "show", s.Name(), "-p", "ControlGroup", "--value"); err == nil && cg != "" {
 		if b, err := s.readFile("/sys/fs/cgroup" + cg + "/memory.current"); err == nil {
 			cur, _ = strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
 		}
@@ -108,7 +114,7 @@ func (s *systemdSlice) Refresh() {
 	if d := max - s.last; s.last != 0 && d < sliceStep && d > -sliceStep {
 		return
 	}
-	out, err := s.run(ctx, "set-property", "--runtime", SliceName, fmt.Sprintf("MemoryMax=%d", max), "MemoryHigh=infinity")
+	out, err := s.run(ctx, "set-property", "--runtime", s.Name(), fmt.Sprintf("MemoryMax=%d", max), "MemoryHigh=infinity")
 	if err != nil {
 		if !s.failed {
 			s.logf("kran.slice: set MemoryMax: %v %s (retrying every refresh)", err, out)

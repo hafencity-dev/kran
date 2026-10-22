@@ -232,6 +232,11 @@ func (te *testEnv) start(ref proto.SlotRef, argv []string, opts ...jobOpt) Proce
 	if err != nil {
 		te.t.Fatal(err)
 	}
+	// After a setup the command waits for a heartbeat; renew like the
+	// daemon does (lease tests use plain jobs or opt out).
+	if req.Spec.Setup != nil && req.Spec.Labels["test.noheartbeat"] == "" {
+		heartbeat(te.t, p)
+	}
 	return p
 }
 
@@ -697,6 +702,30 @@ func TestSetupStep(t *testing.T) {
 	}
 }
 
+// TestSetupWaitsForHeartbeat: when no heartbeat arrives after the setup
+// (the origin gave up, our daemon died, the link is cut), the command never
+// starts: the origin may already run the job elsewhere.
+func TestSetupWaitsForHeartbeat(t *testing.T) {
+	te := newTestEnv(t)
+	ref := te.slot(testRepo, map[string]string{"lock": "v1"}, proto.RuntimeNative)
+	marker := filepath.Join(t.TempDir(), "ran")
+	p := te.start(ref, sh("echo ran > "+marker), withSetup("sleep 0.3", "lock"),
+		func(r *StartRequest) { r.Spec.Labels = map[string]string{"test.noheartbeat": "1"} })
+	exit := waitExit(t, p, 20*time.Second)
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("the command ran without a heartbeat after setup")
+	}
+	if exit.State != proto.JobLost || !exit.BeforeStart || exit.Code != proto.ExitInfra {
+		t.Fatalf("exit %+v", exit)
+	}
+	// With heartbeats it runs (TestSetupStep covers the rest).
+	te.commit(ref, testRepo, map[string]string{"lock": "v2"})
+	p = te.start(ref, sh("echo ran > "+marker), withSetup("sleep 0.3", "lock"))
+	if exit := waitExit(t, p, 20*time.Second); exit.State != proto.JobSucceeded {
+		t.Fatalf("with heartbeats: %+v", exit)
+	}
+}
+
 func TestSlotPool(t *testing.T) {
 	te := newTestEnv(t)
 	ctx := context.Background()
@@ -923,6 +952,41 @@ func jsonUnmarshal(t *testing.T, s string, v any) {
 	if err := json.Unmarshal([]byte(s), v); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestBusySlots(t *testing.T) {
+	te := newTestEnv(t)
+	if b := te.m.BusySlots(); len(b) != 0 {
+		t.Fatalf("busy before any job: %v", b)
+	}
+	ref := te.slot(testRepo, nil, proto.RuntimeNative)
+	if b := te.m.BusySlots(); len(b) != 1 || !strings.HasPrefix(b[0], testRepo[:12]+"/") {
+		t.Fatalf("busy %v", b)
+	}
+	te.m.ReleaseSlot(ref)
+	if b := te.m.BusySlots(); len(b) != 0 {
+		t.Fatalf("busy after release: %v", b)
+	}
+}
+
+func TestProcessRunning(t *testing.T) {
+	te := newTestEnv(t)
+	ref := te.slot(testRepo, map[string]string{"lock": "v1"}, proto.RuntimeNative)
+	p := te.start(ref, sh("echo ready; sleep 1"), withSetup("sleep 0.5", "lock"))
+	r := p.(interface{ Running() bool })
+	if r.Running() {
+		t.Fatal("running during setup")
+	}
+	waitFor(t, p, "ready", 10*time.Second)
+	// The supervisor's events are polled; the phase lands shortly.
+	deadline := time.Now().Add(5 * time.Second)
+	for !r.Running() && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !r.Running() {
+		t.Fatal("not running after the command printed")
+	}
+	waitExit(t, p, 10*time.Second)
 }
 
 // TestRunningPhaseBeforeOutput: whoever reads a job's output has been told

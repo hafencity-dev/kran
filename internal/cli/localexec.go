@@ -25,6 +25,7 @@ func stdStdio() localStdio { return localStdio{os.Stdin, os.Stdout, os.Stderr} }
 // localJob describes a command the CLI executes itself (SPEC §6.1 step 5).
 type localJob struct {
 	JobID    string
+	Node     string // this node's name, for messages ("" = here)
 	Argv     []string
 	Dir      string
 	Env      []string // full child environment
@@ -48,6 +49,8 @@ type localProc struct {
 	Started  proto.Started
 	start    time.Time
 	scope    string
+	memMax   int64    // the scope's MemoryMax
+	node     string   // for the memory cap message
 	fgTTY    *os.File // terminal we handed to the child; reclaimed after Wait
 	capture  *outputCapture
 	life     *lifeline
@@ -159,9 +162,14 @@ func startLocal(j localJob) (*localProc, *localError) {
 				slice = "kran.slice"
 			}
 			scope = "kran-local-" + id + ".scope"
-			argv = append([]string{"systemd-run", "--user", "--scope", "--quiet", "--collect",
+			// No --collect: a scope the kernel OOM-killed must stay
+			// loaded (failed, Result=oom-kill) until wait has read why.
+			argv = append([]string{"systemd-run", "--user", "--scope", "--quiet",
 				"--slice=" + slice, "--unit=kran-local-" + id,
-				"-p", "MemoryMax=" + strconv.FormatInt(j.Envelope.MemMax, 10), "--"}, argv...)
+				// No swap beyond the cap: a job over it is killed and told so
+				// (SPEC §6.8, as on remote targets), instead of swapping the
+				// machine to a crawl.
+				"-p", "MemoryMax=" + strconv.FormatInt(j.Envelope.MemMax, 10), "-p", "MemorySwapMax=0", "--"}, argv...)
 			if p, e := exec.LookPath("systemd-run"); e == nil {
 				argv[0] = p
 			}
@@ -214,9 +222,12 @@ func startLocal(j localJob) (*localProc, *localError) {
 		capture.started()
 	}
 	p := &localProc{
-		cmd: cmd, start: start, scope: scope, fgTTY: fg, capture: capture, life: startLifeline(cmd.Process.Pid, j.Watcher),
+		cmd: cmd, start: start, scope: scope, fgTTY: fg, node: j.Node, capture: capture, life: startLifeline(cmd.Process.Pid, j.Watcher),
 		Started:  proto.Started{JobID: j.JobID, PID: cmd.Process.Pid, PGID: cmd.Process.Pid, Scope: scope},
 		resultCh: make(chan proto.Exit, 1),
+	}
+	if scope != "" {
+		p.memMax = j.Envelope.MemMax
 	}
 	go p.wait()
 	return p, nil
@@ -253,6 +264,13 @@ func (p *localProc) wait() {
 		p.capture.finish(captureGrace)
 	}
 	p.life.release()
+	if p.scope != "" && ex.Signal == "KILL" && scopeOOMKilled(p.scope) {
+		where := "here"
+		if p.node != "" {
+			where = "on " + p.node
+		}
+		ex.Reason = fmt.Sprintf("job hit its %s memory cap %s — rerun with --mem %dG", humanBytes(p.memMax), where, max(2, (2*p.memMax+(1<<30)-1)>>30))
+	}
 	if p.fgTTY != nil {
 		reclaimTerminal(p.fgTTY)
 	}

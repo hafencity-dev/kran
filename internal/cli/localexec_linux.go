@@ -95,3 +95,16 @@ func totalMemory() int64 {
 	}
 	return 0
 }
+
+// scopeOOMKilled reports whether systemd stopped the scope because the
+// kernel OOM-killed it (the scope then stays failed; reset it so no
+// failed unit is left behind).
+func scopeOOMKilled(scope string) bool {
+	out, err := exec.Command("systemctl", "--user", "show", "-p", "Result", "--value", scope).Output()
+	res := strings.TrimSpace(string(out))
+	if err != nil || res == "" || res == "success" {
+		return false
+	}
+	_ = exec.Command("systemctl", "--user", "reset-failed", scope).Run()
+	return res == "oom-kill"
+}

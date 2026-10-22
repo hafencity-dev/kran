@@ -267,7 +267,10 @@ func (d *Daemon) followRemote(ctx context.Context, e *jobEntry, p scheduler.Plac
 				e.mu.Lock()
 				running := e.started
 				e.mu.Unlock()
-				if !running {
+				// Fall back only when the target confirms that nothing of
+				// the command ran: a running phase can be missed across a
+				// reconnect, and running the job twice is worse than 125.
+				if !running && x.BeforeStart {
 					// Setup failed on the target: the command never ran.
 					return &prestartError{node: node, err: errors.New(firstNonEmpty(x.Reason, "setup failed"))}
 				}

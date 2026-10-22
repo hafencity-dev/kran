@@ -340,3 +340,24 @@ func (p *slotPool) forget(s *slot) error {
 	os.Remove(p.l.repoSlots(s.repo)) // only succeeds when empty
 	return errors.Join(errs...)
 }
+
+// busySlots describes every busy slot as "<repo prefix>/<index> job <id>"
+// (job "" = acquired but not started yet).
+func (p *slotPool) busySlots() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []string
+	for _, ss := range p.repos {
+		for _, s := range ss {
+			if s.busy {
+				out = append(out, fmt.Sprintf("%.12s/%d job %q", s.repo, s.index, s.job))
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// BusySlots lists the slots in use (diagnostics: the daemon's debug
+// endpoint; outside any job every slot must be free).
+func (m *manager) BusySlots() []string { return m.pool.busySlots() }

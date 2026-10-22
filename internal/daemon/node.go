@@ -108,6 +108,9 @@ type Deps struct {
 	Slice   SliceController     // nil: no kran.slice management
 	// Session configures server-side peer sessions (keepalives).
 	Session transport.SessionConfig
+	// Debug serves GET /api/v1/debug/goroutines on the unix socket
+	// (KRAN_DEBUG=1; used by the chaos suite).
+	Debug bool
 	// KillLocal kills a local job's process tree (default: scope or process
 	// group kill with KillGrace).
 	KillLocal func(pid, pgid int, scope string)

@@ -195,7 +195,7 @@ func newHarness(t *testing.T, cl *fakeClient, argv ...string) *harness {
 		env:    os.Environ(),
 		stdout: h.stdout, stderr: &lineWriter{w: h.stderr},
 		stdio: localStdio{Out: outF, Err: errF}, signals: h.sigs,
-		tm:    timing{NoticeDelay: 80 * time.Millisecond, Heartbeat: 20 * time.Millisecond, DeadAfter: time.Second, Reconnect: 600 * time.Millisecond, DoubleInt: time.Second, RetryEvery: 10 * time.Millisecond},
+		tm:    timing{NoticeDelay: 80 * time.Millisecond, Heartbeat: 20 * time.Millisecond, Reconnect: 600 * time.Millisecond, DoubleInt: time.Second, RetryEvery: 10 * time.Millisecond},
 		start: startLocal, probe: func(int64) bool { return false },
 	}
 	h.r.dial = func(ctx context.Context) (client.Client, error) {
@@ -310,6 +310,26 @@ func TestQuickQueueStaysSilent(t *testing.T) {
 	}
 	if strings.Contains(h.stderr.String(), "waiting briefly") {
 		t.Fatalf("%q", h.stderr.String())
+	}
+}
+
+// TestLongQuietQueueKeepsWaiting: the daemon's heartbeats never reach the
+// runner (client.RunSession swallows them), so a long wait without other
+// frames must not look like a dead daemon.
+func TestLongQuietQueueKeepsWaiting(t *testing.T) {
+	s := newFakeSession()
+	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s}}, "sh", "-c", "printf %s \"$KRAN_JOB_ID\"")
+	h.r.flags.Quiet = true
+	go func() {
+		s.push(proto.FrameNotice, proto.Notice{Kind: "queued", Message: "waiting: a is at its limit of 1 jobs"})
+		time.Sleep(1500 * time.Millisecond) // many heartbeat ticks without a frame
+		s.push(proto.FrameDecision, proto.Decision{JobID: "jq", Mode: "local", Envelope: &proto.LocalEnvelope{Env: map[string]string{"KRAN_JOB_ID": "jq"}}})
+	}()
+	if code := h.run(t); code != 0 {
+		t.Fatal(code)
+	}
+	if localOut(t, h) != "jq" {
+		t.Fatalf("ran without the daemon's decision: %q", localOut(t, h))
 	}
 }
 
@@ -541,6 +561,35 @@ func TestStdinForwarding(t *testing.T) {
 	}
 }
 
+// TestStdinKeptForFallback: a remote attempt that fails before the command
+// runs must leave stdin untouched for the local run that follows.
+func TestStdinKeptForFallback(t *testing.T) {
+	pr, pw, _ := os.Pipe()
+	s := newFakeSession()
+	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s}}, "sh", "-c", "cat")
+	h.r.flags.Stdin = true
+	h.r.stdin = pr
+	h.r.stdio.In = pr
+	pw.Write([]byte("all of it"))
+	pw.Close()
+	go func() {
+		s.push(proto.FrameDecision, proto.Decision{JobID: "j", Mode: "remote", Node: "n"})
+		s.push(proto.FramePhase, proto.Phase{State: proto.JobSetup})
+		time.Sleep(100 * time.Millisecond)
+		s.push(proto.FrameNotice, proto.Notice{Kind: "fallback", Message: "n failed before the job started"})
+		s.push(proto.FrameDecision, proto.Decision{JobID: "j", Mode: "local", Envelope: &proto.LocalEnvelope{}})
+	}()
+	if code := h.run(t); code != 0 {
+		t.Fatal(code)
+	}
+	if out := localOut(t, h); out != "all of it" {
+		t.Fatalf("local fallback got %q of stdin", out)
+	}
+	if s.count(proto.FrameStdin) != 0 {
+		t.Fatal("stdin was forwarded to a job that never ran")
+	}
+}
+
 func TestStdinNotConsumedForLocalPlacement(t *testing.T) {
 	pr, pw, _ := os.Pipe()
 	defer pw.Close()
@@ -583,6 +632,36 @@ func TestReattachAfterDrop(t *testing.T) {
 	}
 }
 
+// TestLocalExitReportedAfterReconnect: a local job that ends while the
+// daemon restarts has its exit reported once the daemon is back.
+func TestLocalExitReportedAfterReconnect(t *testing.T) {
+	s1, s2 := newFakeSession(), newFakeSession()
+	cl := &fakeClient{sessions: []*fakeSession{s1}}
+	h := newHarness(t, cl, "sh", "-c", "sleep 0.2; exit 3")
+	go func() {
+		s1.push(proto.FrameDecision, proto.Decision{JobID: "jl", Mode: "local", Envelope: &proto.LocalEnvelope{}})
+		waitFor(t, func() bool { return s1.count(proto.FrameStarted) == 1 })
+		s1.drop()                          // the daemon goes away
+		time.Sleep(400 * time.Millisecond) // the job ends meanwhile
+		cl.mu.Lock()
+		cl.sessions = append(cl.sessions, s2) // and the daemon is back
+		cl.mu.Unlock()
+	}()
+	if code := h.run(t); code != 3 {
+		t.Fatal(code)
+	}
+	types := s2.sentTypes()
+	if len(types) < 2 || types[0] != proto.FrameReattach || types[len(types)-1] != proto.FrameExit {
+		t.Fatalf("frames after reconnect: %v", types)
+	}
+	f, _ := s2.find(proto.FrameExit)
+	var ex proto.Exit
+	json.Unmarshal(f.payload, &ex)
+	if ex.Code != 3 || ex.JobID != "jl" {
+		t.Fatalf("%+v", ex)
+	}
+}
+
 func TestReconnectGivesUpWith125(t *testing.T) {
 	s1 := newFakeSession()
 	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s1}}, "x")
@@ -597,6 +676,23 @@ func TestReconnectGivesUpWith125(t *testing.T) {
 	}
 	if !strings.Contains(h.stderr.String(), "job jr may still be running on devmac") {
 		t.Fatalf("%q", h.stderr.String())
+	}
+}
+
+// TestDropDuringRemoteSetupNoDaemonRunsHere: the daemon goes away while the
+// job is set up on its target: the job runs here (a restarted daemon
+// cancels it there before the setup ends).
+func TestDropDuringRemoteSetupNoDaemonRunsHere(t *testing.T) {
+	s1 := newFakeSession()
+	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s1}}, "sh", "-c", "exit 6")
+	go func() {
+		s1.push(proto.FrameDecision, proto.Decision{JobID: "js", Mode: "remote", Node: "n"})
+		s1.push(proto.FramePhase, proto.Phase{State: proto.JobSetup})
+		time.Sleep(50 * time.Millisecond)
+		s1.drop()
+	}()
+	if code := h.run(t); code != 6 {
+		t.Fatalf("code %d, stderr %q", code, h.stderr.String())
 	}
 }
 
