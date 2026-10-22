@@ -81,6 +81,8 @@ type manager struct {
 	runtimes []proto.Runtime
 	dk       *dockerEnv // nil when Docker is not usable
 	dkReason string     // why not
+
+	img runnerImage
 }
 
 func newManager(opts Options) (Manager, error) { return newManagerWith(opts, defaultTunables()) }
@@ -241,6 +243,9 @@ func (m *manager) Refresh(ctx context.Context) error {
 	native.Docker = dk != nil
 	rts := []proto.Runtime{native}
 	if crt, ok := m.containerRuntime(ctx, dk, reason); ok {
+		if crt.Available {
+			crt.FirstUse = !m.imageBuilt(ctx, dk)
+		}
 		rts = append(rts, crt)
 	}
 	m.rtMu.Lock()
@@ -613,17 +618,10 @@ func (m *manager) Active() []string {
 }
 
 func (m *manager) Run(ctx context.Context) error {
+	// The runner image is built on the first container job (see
+	// ensureImage), not here: most nodes never run one, and a build at
+	// every start would cost minutes of CPU and gigabytes of disk.
 	m.Reap(ctx)
-	// Build the runner image (minutes on first use) in the background so
-	// the first container job does not hit the daemon's prestart timeout;
-	// until it is ready such jobs fall back to running locally.
-	if dk, _ := m.docker(); dk != nil && m.containerSetting() != "off" {
-		go func() {
-			if err := m.ensureContainerReady(ctx, nil); err != nil && ctx.Err() == nil {
-				m.logf("container runtime: %v", err)
-			}
-		}()
-	}
 	reap := time.NewTicker(m.tun.reapEvery)
 	defer reap.Stop()
 	trim := time.NewTicker(m.tun.trimEvery)

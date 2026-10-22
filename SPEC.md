@@ -362,7 +362,12 @@ process tree RSS + CPU time).
   else ineligible with reason.
 * `container`: image `kran-runner:<kran version>` built on the node from an
   embedded Dockerfile (debian stable-slim, git, build-essential,
-  ca-certificates, curl, unzip, xz, pkg-config, mise). Toolchains via mise
+  ca-certificates, curl, unzip, xz, pkg-config, mise). Built lazily by the
+  first container job (phase `setup`, "preparing the Linux runtime (first
+  use, ~30 s)"), one build at a time; until then the runtime reports
+  `first_use` but counts as available whenever Docker is reachable. A job
+  that gives up waiting falls back as any prestart failure; the build goes
+  on. The reaper removes `kran-runner` images of other kran versions. Toolchains via mise
   into volume `kran-tools`; caches in volume `kran-cache`
   (GOCACHE, GOMODCACHE, pnpm store, npm cache, uv cache, mise). Job =
   `docker run --rm --init --network host --name kran-job-<id> --label

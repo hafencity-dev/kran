@@ -79,6 +79,9 @@ type Runtime struct {
 	// Toolchains found on this runtime, e.g. {"go":"1.25.10","node":"24.8.0","mise":"2026.10.1"}.
 	Toolchains map[string]string `json:"toolchains,omitempty"`
 	Docker     bool              `json:"docker"` // jobs can reach a Docker daemon
+	// added by P1: the container runtime's image is not built yet; the
+	// first container job builds it (about 30 s) before it can start.
+	FirstUse bool `json:"first_use,omitempty"`
 }
 
 // NodeMetrics are live measurements (sampled every 2 s, published every 2 s).

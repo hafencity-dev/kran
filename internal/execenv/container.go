@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path"
-	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -223,41 +222,6 @@ func (m *manager) ensureContainerReady(ctx context.Context, onPhase func(proto.P
 		if err := m.ensureSync(ctx, dk); err != nil {
 			return err
 		}
-	}
-	return nil
-}
-
-func (m *manager) ensureImage(ctx context.Context, dk *dockerEnv, onPhase func(proto.Phase)) error {
-	tag := m.imageTag()
-	want := hashString(m.dockerfile())[:16]
-	have := func() bool {
-		out, err := dk.run(ctx, nil, "image", "inspect", "--format", `{{index .Config.Labels "kran.dockerfile"}}`, tag)
-		return err == nil && strings.TrimSpace(string(out)) == want
-	}
-	if have() {
-		return nil
-	}
-	// One build at a time per node, also across daemon restarts and tests.
-	lock, err := os.OpenFile(filepath.Join(m.l.state, "runner-image.lock"), os.O_RDWR|os.O_CREATE, 0o600)
-	if err != nil {
-		return fmt.Errorf("image lock: %w", err)
-	}
-	defer lock.Close()
-	if err := flockCtx(ctx, lock); err != nil {
-		return err
-	}
-	defer unix.Flock(int(lock.Fd()), unix.LOCK_UN)
-	if have() {
-		return nil
-	}
-	if onPhase != nil {
-		onPhase(proto.Phase{State: proto.JobSetup, Message: fmt.Sprintf("building the %s image on %s (first use only, takes a few minutes)", tag, m.opts.NodeName)})
-	}
-	m.logf("building %s", tag)
-	_, err = dk.run(ctx, []byte(m.dockerfile()), "build", "--quiet", "--tag", tag,
-		"--label", "kran.dockerfile="+want, "--label", "kran.ns="+m.ns, "-")
-	if err != nil {
-		return fmt.Errorf("%w: building the runner image failed: %v", ErrRuntimeUnavailable, err)
 	}
 	return nil
 }
