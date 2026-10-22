@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/hafencity-dev/kran/internal/proto"
+	"github.com/hafencity-dev/kran/internal/selfexe"
 	"github.com/hafencity-dev/kran/internal/workspace"
 )
 
@@ -83,6 +84,14 @@ type manager struct {
 	dkReason string     // why not
 
 	img runnerImage
+
+	binMu  sync.Mutex // guards binKey, binSum
+	binKey struct {
+		path  string
+		size  int64
+		mtime time.Time
+	}
+	binSum string
 }
 
 func newManager(opts Options) (Manager, error) { return newManagerWith(opts, defaultTunables()) }
@@ -92,7 +101,7 @@ func newManagerWith(opts Options, tun tunables) (*manager, error) {
 		return nil, errors.New("execenv: StateDir is required")
 	}
 	if opts.Self == "" {
-		self, err := os.Executable()
+		self, err := selfexe.Path()
 		if err != nil {
 			return nil, fmt.Errorf("execenv: locate kran binary: %w", err)
 		}
@@ -237,6 +246,10 @@ func (m *manager) Refresh(ctx context.Context) error {
 		Toolchains: copyMap(env.tools),
 	}
 	dk, reason := m.probeDocker(ctx)
+	if dk != nil {
+		old, _ := m.docker()
+		dk.inherit(old)
+	}
 	native.Docker = dk != nil
 	rts := []proto.Runtime{native}
 	if crt, ok := m.containerRuntime(ctx, dk, reason); ok {
@@ -323,6 +336,11 @@ func (m *manager) ReleaseSlot(ref proto.SlotRef) {
 	m.pool.release(s)
 }
 
+// Diff scans the slot once and plans the update. When the blob store
+// already holds every file the slot lacks (an unchanged repo, or content
+// another worktree sent), it carries the plan out right away and reports
+// Committed: an unchanged sync then costs one scan (one helper run for a
+// slot in the Docker volume), and Commit of the same manifest is a no-op.
 func (m *manager) Diff(ctx context.Context, ref proto.SlotRef, mf *proto.Manifest) (proto.SyncPlan, error) {
 	s, err := m.pool.lookup(ref)
 	if err != nil {
@@ -331,20 +349,46 @@ func (m *manager) Diff(ctx context.Context, ref proto.SlotRef, mf *proto.Manifes
 	if mf.RepoID != "" && mf.RepoID != s.repo {
 		return proto.SyncPlan{}, fmt.Errorf("manifest of repo %s does not belong to slot of %s", short(mf.RepoID), short(s.repo))
 	}
+	if job := m.pool.jobOf(s); job != "" {
+		return proto.SyncPlan{}, fmt.Errorf("slot %s/%d is in use by job %s", short(s.repo), s.index, job)
+	}
+	m.pool.setSynced(s, nil)
 	plan := proto.SyncPlan{Slot: ref}
+	// Shared: no blob the plan relies on is trimmed until it is carried out.
+	m.blobs.trimMu.RLock()
+	defer m.blobs.trimMu.RUnlock()
+	stored := func(needed []string) bool {
+		for _, h := range needed {
+			if !m.blobs.has(h) {
+				return false
+			}
+		}
+		return true
+	}
 	var needed []string
 	if s.loc == locHost {
-		p, err := diffLocal(m.pool.hostPath(s), mf, runtime.GOOS == "darwin")
+		root := m.pool.hostPath(s)
+		p, err := planSlot(root, mf, runtime.GOOS == "darwin")
 		if err != nil {
 			return plan, err
 		}
 		needed, plan.Changed, plan.Deleted = p.needed, p.changed(), len(p.deletes)
+		if stored(needed) {
+			if err := applyPlanLocal(root, p, m.blobs, max(2, runtime.NumCPU()/2)); err != nil {
+				return plan, fmt.Errorf("sync to %s: %w", m.opts.NodeName, err)
+			}
+			plan.Committed = true
+		}
 	} else {
-		need, err := m.volumeApply(ctx, applyReq{Op: "check", Slot: ref.Path, Manifest: mf}, nil)
+		need, done, err := m.volumeSync(ctx, ref.Path, mf, func(n applyNeed) bool { return stored(n.Needed) })
 		if err != nil {
 			return plan, err
 		}
-		needed, plan.Changed, plan.Deleted = need.Needed, need.Changed, need.Deleted
+		needed, plan.Changed, plan.Deleted, plan.Committed = need.Needed, need.Changed, need.Deleted, done
+	}
+	if plan.Committed {
+		m.pool.setSynced(s, mf)
+		return plan, nil
 	}
 	sizes := make(map[string]int64, len(needed))
 	for _, e := range mf.Entries {
@@ -372,6 +416,9 @@ func (m *manager) Commit(ctx context.Context, ref proto.SlotRef, mf *proto.Manif
 	}
 	if job := m.pool.jobOf(s); job != "" {
 		return fmt.Errorf("slot %s/%d is in use by job %s", short(s.repo), s.index, job)
+	}
+	if m.pool.syncedTo(s) == mf {
+		return nil // Diff carried it out already
 	}
 	if s.loc == locHost {
 		if _, err := commitLocal(m.pool.hostPath(s), mf, m.blobs, max(2, runtime.NumCPU()/2), runtime.GOOS == "darwin"); err != nil {

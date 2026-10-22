@@ -24,6 +24,9 @@ type pool struct {
 	cpuPenalty float64
 	holdCPU    float64 // held for a starving job during this pass
 	holdMem    int64
+	// press is contention beyond CPU allocation (memory, I/O, swap): how
+	// much slower a job runs here (pressure.go).
+	press pressure
 }
 
 const unlimited = math.MaxInt64 / 4
@@ -81,7 +84,8 @@ func (s *sched) view(name string, now time.Time) *nodeView {
 	if capMem <= 0 {
 		capMem = info.MemTotal - st.Reserve.Mem
 	}
-	v.host = pool{capCPU: math.Max(0, capCPU), capMem: max(0, capMem), liveMem: unlimited}
+	v.host = pool{capCPU: math.Max(0, capCPU), capMem: max(0, capMem), liveMem: unlimited,
+		press: hostPressure(st.Metrics, info)}
 
 	// Allocations: this scheduler's own (and, on the self node, foreign
 	// admits). A peer's report also counts jobs other origins placed there.
@@ -170,7 +174,7 @@ func (s *sched) view(name string, now time.Time) *nodeView {
 		// The VM keeps some memory for its own kernel and Docker.
 		overhead := max(512*mib, rv.rt.Mem/20)
 		vp := &pool{capCPU: float64(rv.rt.CPUs), capMem: max(0, rv.rt.Mem-overhead), liveMem: unlimited,
-			allocCPU: vmCPU, allocMem: vmMem}
+			allocCPU: vmCPU, allocMem: vmMem, press: vmPressure(v.host.press, 0)}
 		if rm, ok := m.Runtimes[proto.RuntimeContainer]; ok && !m.Time.IsZero() {
 			pending := int64(0)
 			visible := 0.0
@@ -184,6 +188,7 @@ func (s *sched) view(name string, now time.Time) *nodeView {
 				vp.liveMem = rm.MemAvailable - pending
 			}
 			vp.cpuPenalty = math.Max(0, rm.CPUBusy*float64(rv.rt.CPUs)-visible)
+			vp.press = vmPressure(v.host.press, rm.CPUBusy)
 		}
 		v.vm = vp
 	}
@@ -237,6 +242,14 @@ func (v *nodeView) fits(rt rtView, cpu float64, mem int64, ignoreHolds bool) boo
 		return false
 	}
 	return true
+}
+
+// pressure is the contention a job in the runtime would run under.
+func (v *nodeView) pressure(rt rtView) pressure {
+	if rt.vm && v.vm != nil {
+		return v.vm.press
+	}
+	return v.host.press
 }
 
 // capMem is the largest job memory the runtime can ever take.

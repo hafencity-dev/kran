@@ -64,6 +64,11 @@ type simNode struct {
 	bgCPU   float64
 	bgMem   int64
 	vmBgMem int64
+	// slow is how much longer than its CPU share explains every job on
+	// the host takes (memory thrash, I/O); press are the pressure metrics
+	// the node reports meanwhile.
+	slow  float64
+	press proto.NodeMetrics
 }
 
 type simJob struct {
@@ -174,6 +179,12 @@ type simConfig struct {
 	horizon    time.Duration
 	sessions   []sessionMix
 	thinkScale float64 // multiplies think time; < 1 = heavier load
+	// overloaded makes gx10 thrash as on the incident afternoon: memory
+	// PSI 40, swap full, load far above its CPU use; every job there runs
+	// originSlow times longer.
+	overloaded     bool
+	originSlow     float64
+	ignorePressure bool // score as kran did before pressure counted
 }
 
 func newSimulator(t testing.TB, name string, seed int64, withMac bool, horizon time.Duration) *simulator {
@@ -192,12 +203,19 @@ func newSimulatorCfg(t testing.TB, name string, cfg simConfig) *simulator {
 			reasons: map[string]string{}},
 	}
 	sm.s = New(Options{Origin: "gx10", Now: clk.Now}).(*sched)
+	sm.s.ignorePressure = cfg.ignorePressure
 	g := self(gx10(t0))
 	// The agent sessions, their language servers and the IDE live on gx10.
-	sm.nodes["gx10"] = &simNode{st: g, bgCPU: 3, bgMem: 26 * gib}
+	sm.nodes["gx10"] = &simNode{st: g, bgCPU: 3, bgMem: 26 * gib, slow: 1}
+	if cfg.overloaded {
+		gn := sm.nodes["gx10"]
+		gn.bgMem, gn.slow = 80*gib, cfg.originSlow
+		gn.press = proto.NodeMetrics{Load1: 34, CPUPressure: 12, MemPressure: 40, IOPressure: 25,
+			SwapTotal: 16 * gib, SwapUsed: 16*gib - 20*mib}
+	}
 	if withMac {
 		// The Mac also runs a product install.
-		sm.nodes["devmac"] = &simNode{st: devmac(t0), bgCPU: 2, bgMem: 30 * gib, vmBgMem: 2 * gib}
+		sm.nodes["devmac"] = &simNode{st: devmac(t0), bgCPU: 2, bgMem: 30 * gib, vmBgMem: 2 * gib, slow: 1}
 	}
 	for _, name := range sm.nodeNames() {
 		sm.res.capCPU[name] = float64(sm.nodes[name].st.Info.CPUs) - sm.nodes[name].st.Reserve.CPUs
@@ -400,7 +418,7 @@ func (sm *simulator) start(j *simJob) {
 	}
 	// CPU contention stretches the job (fixed at start: a simplification).
 	contention := math.Max(1, demand/cores)
-	d := j.realDur * speed * contention
+	d := j.realDur * speed * contention * n.slow
 	sm.push(&event{at: sm.clk.Now().Add(secs(d)), kind: evFinish, job: j})
 }
 
@@ -448,6 +466,9 @@ func (sm *simulator) publishMetrics() {
 		st.Metrics.Time = now
 		st.Metrics.CPUBusy = math.Min(1, (bg+cpu)/float64(st.Info.CPUs))
 		st.Metrics.MemAvailable = st.Info.MemTotal - n.bgMem - mem
+		st.Metrics.Load1 = n.press.Load1
+		st.Metrics.CPUPressure, st.Metrics.MemPressure, st.Metrics.IOPressure = n.press.CPUPressure, n.press.MemPressure, n.press.IOPressure
+		st.Metrics.SwapTotal, st.Metrics.SwapUsed = n.press.SwapTotal, n.press.SwapUsed
 		if name == "devmac" {
 			vm := st.Info.Runtimes[1]
 			st.Metrics.Runtimes = map[proto.RuntimeKind]proto.RuntimeMetrics{proto.RuntimeContainer: {
@@ -615,6 +636,59 @@ func TestSimulateNoStarvationRandom(t *testing.T) {
 		}
 		if mx := percentile(r.waits, 1); mx > 30*60 {
 			t.Errorf("seed %d: a job waited %s", seed, fmtDur(mx))
+		}
+	}
+}
+
+// TestSimulateOverloadedOrigin replays the incident afternoon: gx10 thrashes
+// on memory (PSI 40, swap full, load 34 at 30% CPU) and every job there
+// takes 2.5x as long, while devmac is idle; two agent sessions submit
+// work. Scoring with pressure must move work off gx10 and finish it sooner.
+// When the metrics overstate the real slowdown (1.5x), it must not cost.
+func TestSimulateOverloadedOrigin(t *testing.T) {
+	horizon, seeds := time.Hour, int64(4)
+	if testing.Short() {
+		horizon, seeds = 20*time.Minute, 2
+	}
+	run := func(name string, slow float64, ignore bool) *simResult {
+		var all *simResult
+		for seed := int64(1); seed <= seeds; seed++ {
+			r := newSimulatorCfg(t, name, simConfig{seed: seed, withMac: true, horizon: horizon, sessions: incidentSessions[:2],
+				thinkScale: 1, overloaded: true, originSlow: slow, ignorePressure: ignore}).run()
+			if r.completed != r.submitted {
+				t.Fatalf("%s seed %d: not drained: %d/%d", name, seed, r.completed, r.submitted)
+			}
+			if r.oomEvents != 0 {
+				t.Errorf("%s seed %d: %d samples with real memory above physical memory", name, seed, r.oomEvents)
+			}
+			if all == nil {
+				all = r
+				continue
+			}
+			all.completed += r.completed
+			all.offloaded += r.offloaded
+			all.turnarounds = append(all.turnarounds, r.turnarounds...)
+			all.waits = append(all.waits, r.waits...)
+		}
+		return all
+	}
+	for _, c := range []struct {
+		slow     float64
+		maxRatio float64 // mean turnaround pressure-aware / cpu-only
+	}{{2.5, 0.85}, {1.5, 1.0}} {
+		before := run(fmt.Sprintf("gx10 %.1fx slow, cpu-only scoring", c.slow), c.slow, true)
+		after := run(fmt.Sprintf("gx10 %.1fx slow, pressure-aware", c.slow), c.slow, false)
+		t.Logf("gx10 %.1fx slower: jobs done %d -> %d, offloaded %d -> %d, turnaround mean %s -> %s, p95 %s -> %s, queue wait p95 %s -> %s",
+			c.slow, before.completed, after.completed, before.offloaded, after.offloaded,
+			fmtDur(mean(before.turnarounds)), fmtDur(mean(after.turnarounds)),
+			fmtDur(percentile(before.turnarounds, .95)), fmtDur(percentile(after.turnarounds, .95)),
+			fmtDur(percentile(before.waits, .95)), fmtDur(percentile(after.waits, .95)))
+		if mean(after.turnarounds) > c.maxRatio*mean(before.turnarounds) {
+			t.Errorf("%.1fx: mean turnaround %s, cpu-only scoring %s", c.slow,
+				fmtDur(mean(after.turnarounds)), fmtDur(mean(before.turnarounds)))
+		}
+		if after.completed < before.completed {
+			t.Errorf("%.1fx: %d jobs done, cpu-only scoring %d", c.slow, after.completed, before.completed)
 		}
 	}
 }

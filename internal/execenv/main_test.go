@@ -9,6 +9,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/hafencity-dev/kran/internal/selfexe"
 )
 
 // TestMain lets the test binary stand in for the kran binary: the manager
@@ -16,6 +18,7 @@ import (
 // `<self> internal apply`, and jobs use `<self> helper …` as a portable
 // toolbox (sleepers, escapees, memory hogs).
 func TestMain(m *testing.M) {
+	selfexe.AllowTest() // dispatched right below
 	if len(os.Args) >= 3 && os.Args[1] == "internal" {
 		switch os.Args[2] {
 		case "supervise":
@@ -32,7 +35,7 @@ func TestMain(m *testing.M) {
 	if os.Getenv("KRAN_TEST_DOCKER") == "1" && os.Getenv("KRAN_TEST_KEEP_IMAGE") != "1" {
 		// The runner image is the only Docker resource that outlives a
 		// test; drop it so test runs leave nothing behind.
-		exec.Command(dockerCLIForTests(), "image", "rm", "--force", "kran-test-runner:dev").Run()
+		exec.Command(dockerCLIForTests(), "image", "rm", "--force", "kran-test-runner:dev", runnerTestNS+"-runner:dev").Run()
 	}
 	if applyBin.path != "" {
 		os.RemoveAll(filepath.Dir(applyBin.path))

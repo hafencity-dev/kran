@@ -2,6 +2,16 @@
 
 All notable changes to kran. Versions follow [semantic versioning](https://semver.org/).
 
+## Unreleased
+
+### Robustness
+
+- Links between machines survive an overloaded peer: any data counts as a sign of life, a calm peer may stay silent for 45 s and a heavily loaded one up to 2 minutes; a dead link is still noticed. Sync and setup in flight are no longer thrown away when a machine is starved.
+- The daemon runs with priority over the jobs it manages (systemd: CPU/IO weight, best-effort I/O, memory protection; launchd: no low-priority I/O). `kran upgrade` and `kran doctor --fix` rewrite older service definitions.
+- Under load the metrics probes fork `nvidia-smi` and `docker` less often and back off after failures; one failed probe no longer makes the container runtime disappear.
+- Reconnects back off up to 20 s and start over when the peer connects or the network changes; the log says what changed instead of repeating itself.
+- One daemon per machine: a second one started by launchd or systemd waits instead of restarting every few seconds. The daemon log is written once (`daemon.log`); `daemon.out.log` keeps only crash output.
+
 ## 0.1.0 - first release
 
 kran moves heavy dev jobs to whichever of your machines has room, and never makes a job worse than running it locally.

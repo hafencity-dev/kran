@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hafencity-dev/kran/internal/proto"
@@ -75,14 +76,19 @@ type prober struct {
 	benchDone bool
 	score     float64
 
-	mu   sync.RWMutex
-	last proto.NodeMetrics
+	mu       sync.RWMutex
+	last     proto.NodeMetrics
+	stressed atomic.Bool // the last sample showed an overloaded node
 
 	logMu  sync.Mutex
 	logged map[string]bool
 }
 
-func newProber(opts Options) Prober { return newProberWith(opts, execRunner) }
+func newProber(opts Options) Prober {
+	p := newProberWith(opts, execRunner)
+	p.docker.api = dockerAPIInfo
+	return p
+}
 
 func newProberWith(opts Options, run runner) *prober {
 	p := &prober{
@@ -245,7 +251,9 @@ func (p *prober) sampleOnce(ctx context.Context) {
 	} else {
 		p.logOnce("statfs", "metrics: free disk of %s unknown: %v", p.opts.StateDir, err)
 	}
-	p.nvidia.sample(ctx, &m)
+	stressed := Stressed(m, proto.NodeInfo{OS: runtime.GOOS, CPUs: runtime.NumCPU()})
+	p.stressed.Store(stressed)
+	p.nvidia.sample(ctx, &m, stressed)
 	m.Runtimes = map[proto.RuntimeKind]proto.RuntimeMetrics{
 		proto.RuntimeNative: {CPUBusy: m.CPUBusy, MemAvailable: m.MemAvailable},
 	}

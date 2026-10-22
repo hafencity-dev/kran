@@ -169,7 +169,10 @@ func startLocal(j localJob) (*localProc, *localError) {
 				// No swap beyond the cap: a job over it is killed and told so
 				// (SPEC §6.8, as on remote targets), instead of swapping the
 				// machine to a crawl.
-				"-p", "MemoryMax=" + strconv.FormatInt(j.Envelope.MemMax, 10), "-p", "MemorySwapMax=0", "--"}, argv...)
+				"-p", "MemoryMax=" + strconv.FormatInt(j.Envelope.MemMax, 10), "-p", "MemorySwapMax=0",
+				// A runaway fork loop stops at the cap instead of taking
+				// the machine with it.
+				"-p", "TasksMax=" + strconv.Itoa(proto.JobTasksMax), "--"}, argv...)
 			if p, e := exec.LookPath("systemd-run"); e == nil {
 				argv[0] = p
 			}

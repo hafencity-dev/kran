@@ -10,7 +10,7 @@
 
 ## The hook
 
-Claude Code passes each Bash tool call to `kran hook claude`. For a long-running test, check, lint or build that is safe to move, the hook returns `updatedInput` with the command replaced by `kran run --sh '<original>'` (correctly quoted; other fields such as `description` and `timeout` are preserved) and a one-sentence note telling the agent the output is the command's own and that files a remote run writes stay there.
+Claude Code passes each Bash tool call to `kran hook claude`. For a long-running test, check, lint or build that is safe to move, the hook returns `updatedInput` with the command replaced by `kran run --sh '<original>'` (correctly quoted; other fields such as `description` and `timeout` are preserved). Leading `cd DIR` steps stay outside, `cd DIR && kran run --sh '<rest>'`, so kran syncs the directory the command really runs in; a later `cd` to an absolute or home path keeps the command unwrapped and a one-sentence note telling the agent the output is the command's own and that files a remote run writes stay there.
 
 Your Claude Code permission rules keep working as if the command had not been wrapped. The hook reads them (managed policy, `~/.claude/settings.json` or `$CLAUDE_CONFIG_DIR/settings.json`, and the project's `.claude/settings.json` and `.claude/settings.local.json`) and checks the original command:
 

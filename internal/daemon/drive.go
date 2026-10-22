@@ -44,6 +44,9 @@ func (d *Daemon) submit(spec proto.JobSpec) (*jobEntry, error) {
 	if spec.Req.Prefer == "" {
 		spec.Req.Prefer = proto.PreferAuto
 	}
+	if spec.OriginEnv == nil {
+		spec.OriginEnv = originEnv(d.nodeInfo().Runtimes)
+	}
 	fp := d.deps.Est.Fingerprint(&spec)
 	est := d.deps.Est.Estimate(&spec, fp, d.nodeInfo().CPUs)
 	job := proto.Job{

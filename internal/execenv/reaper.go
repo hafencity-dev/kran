@@ -229,7 +229,7 @@ func (m *manager) trimBlobs() {
 func (m *manager) gcSlots(ctx context.Context) error {
 	var errs []error
 	for _, s := range m.pool.stale(m.tun.slotMaxIdle) {
-		m.logf("removing slot %s/%d unused since %s", short(s.repo), s.index, s.meta.LastUsed.Format(time.DateOnly))
+		m.logf("removing slot %s/%d unused since %s", short(s.repo), s.index, s.meta.LastUsed.Format(time.DateTime))
 		if s.loc == locHost {
 			if err := os.RemoveAll(m.pool.hostPath(s)); err != nil {
 				errs = append(errs, err)

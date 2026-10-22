@@ -9,11 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/klauspost/compress/zstd"
-
 	"github.com/hafencity-dev/kran/internal/proto"
 	"github.com/hafencity-dev/kran/internal/scheduler"
-	"github.com/hafencity-dev/kran/internal/transport"
 )
 
 // prestartError: the remote placement failed before the command started;
@@ -99,17 +96,18 @@ func (d *Daemon) runRemote(ctx context.Context, e *jobEntry, p scheduler.Placeme
 	// On macOS the first container job prepares the runtime while it
 	// acquires a slot, on Linux when it starts: say why it takes a while.
 	d.noteFirstUse(e, node, p.Runtime)
-	var slot proto.SlotRef
+	var acq slotAcquireReply
 	sctx, cancel := rpc(d.t.SlotWait + 10*time.Second)
 	err = peerOneShot(sctx, sess, proto.PeerSlotAcquire, e.id,
-		slotAcquireBody{RepoID: repoID, Hint: spec.Workspace.Root, Runtime: p.Runtime}, &slot)
+		slotAcquireBody{RepoID: repoID, Hint: spec.Workspace.Root, Runtime: p.Runtime}, &acq)
+	slot := acq.SlotRef
 	cancel()
 	if err != nil {
 		abandon()
 		return fail(fmt.Errorf("workspace slot: %w", err))
 	}
 
-	plan, err := d.remoteDiff(pctx, sess, e.id, m)
+	plan, err := d.remoteDiff(pctx, sess, e.id, node, acq.Sync, m)
 	if err != nil {
 		abandon()
 		return fail(fmt.Errorf("sync: %w", err))
@@ -119,13 +117,15 @@ func (d *Daemon) runRemote(ctx context.Context, e *jobEntry, p scheduler.Placeme
 		abandon()
 		return fail(fmt.Errorf("sync: %w", err))
 	}
-	e.phase(proto.Phase{State: proto.JobSyncing, Message: "updating the workspace on " + node, Progress: 1})
-	cctx, cancel := rpc(d.t.PrestartTimeout)
-	err = peerOneShot(cctx, sess, proto.PeerSlotCommit, e.id, nil, nil)
-	cancel()
-	if err != nil {
-		abandon()
-		return fail(fmt.Errorf("sync: %w", err))
+	if !plan.Committed { // a 1.1 target that had every blob already committed
+		e.phase(proto.Phase{State: proto.JobSyncing, Message: "updating the workspace on " + node, Progress: 1})
+		cctx, cancel := rpc(d.t.PrestartTimeout)
+		err = peerOneShot(cctx, sess, proto.PeerSlotCommit, e.id, nil, nil)
+		cancel()
+		if err != nil {
+			abandon()
+			return fail(fmt.Errorf("sync: %w", err))
+		}
 	}
 	syncSecs := d.now().Sub(syncStart).Seconds()
 	e.update(func(j *proto.Job) {
@@ -200,38 +200,6 @@ func mustJSON(v any) []byte {
 	return b
 }
 
-// remoteDiff sends the manifest (zstd JSON) and returns the target's plan.
-func (d *Daemon) remoteDiff(ctx context.Context, sess transport.Session, id string, m *proto.Manifest) (proto.SyncPlan, error) {
-	var plan proto.SyncPlan
-	dctx, cancel := context.WithTimeout(ctx, d.t.PrestartTimeout)
-	defer cancel()
-	pc, err := peerCall(dctx, sess, proto.PeerSlotDiff, id, nil, nil)
-	if err != nil {
-		return plan, err
-	}
-	defer pc.Close()
-	stop := context.AfterFunc(dctx, func() { pc.SetDeadline(time.Unix(1, 0)) })
-	defer stop()
-	enc, err := zstd.NewWriter(frameWriter{pc}, zstd.WithEncoderLevel(zstd.SpeedDefault), zstd.WithEncoderConcurrency(1))
-	if err != nil {
-		return plan, err
-	}
-	if err := json.NewEncoder(enc).Encode(m); err != nil {
-		enc.Close()
-		return plan, fmt.Errorf("send manifest: %w", ctxErr(dctx, err))
-	}
-	if err := enc.Close(); err != nil {
-		return plan, fmt.Errorf("send manifest: %w", ctxErr(dctx, err))
-	}
-	if err := pc.writeFrame(pfEnd, nil); err != nil {
-		return plan, fmt.Errorf("send manifest: %w", ctxErr(dctx, err))
-	}
-	if err := pc.readResponse(proto.PeerSlotDiff, &plan); err != nil {
-		return plan, ctxErr(dctx, err)
-	}
-	return plan, nil
-}
-
 // followRemote streams the started job until it exits, reattaching after
 // connection loss within the lease window. pc may be nil (attach first).
 // It returns a *prestartError only if the connection was lost for good
@@ -282,7 +250,7 @@ func (d *Daemon) followRemote(ctx context.Context, e *jobEntry, p scheduler.Plac
 				e.finish(proto.Exit{Code: proto.ExitInfra, State: state, Node: node, Reason: err.Error()})
 				return nil
 			}
-			e.update(func(j *proto.Job) { j.Reason = "" })
+			e.update(func(j *proto.Job) { j.Reason = j.PlaceReason }) // reconnected
 		}
 		res := d.pumpJob(ctx, e, node, pc, &lastContact)
 		pc.Close()

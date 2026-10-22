@@ -27,14 +27,22 @@ import (
 // kran-sync container via `docker exec -i` and speaks this protocol over
 // stdin/stdout:
 //
-//	host → apply   'Q' request {op, slot, manifest}
-//	apply → host   'N' {needed hashes, changed, deleted}       (op commit/check)
+//	host → apply   'Q' request {op, slot, manifest | compact}
+//	host → apply   'M' chunks of the compact manifest, then an empty 'M'
+//	               (compact: proto.EncodeManifest, ~4x smaller and much
+//	               cheaper to decode than JSON)
+//	apply → host   'N' {needed hashes, changed, deleted}  (op commit/check/sync)
+//	host → apply   op sync only: 'G' to go on like commit, or 'S' to stop
+//	               without changing anything
 //	host → apply   per needed hash: 'B' {hash,size} then 'D' chunks   (commit)
 //	               or 'A' {error} to abort
 //	apply → host   'R' {ok, error, changed, deleted}
 //
-// Frames are type:u8 | len:u32be | payload. Blob content is verified
-// against its hash on the apply side too.
+// Op sync lets the host decide after one scan of the slot: when it holds
+// every blob the slot needs, the same process commits (an unchanged sync
+// costs one helper run, not a check and a commit). Frames are type:u8 |
+// len:u32be | payload. Blob content is verified against its hash on the
+// apply side too.
 
 const (
 	afReq    = 'Q'
@@ -43,16 +51,24 @@ const (
 	afData   = 'D'
 	afAbort  = 'A'
 	afResult = 'R'
+	afMan    = 'M'
+	afGo     = 'G'
+	afStop   = 'S'
 
 	maxApplyFrame = 64 << 20
 	applyChunk    = 256 << 10
 )
 
 type applyReq struct {
-	Op       string          `json:"op"`   // commit | check | remove
+	Op       string          `json:"op"`   // commit | check | sync | remove
 	Slot     string          `json:"slot"` // "<repo>/<n>" below base
 	Manifest *proto.Manifest `json:"manifest,omitempty"`
+	// Compact: the manifest follows in 'M' frames instead of Manifest.
+	Compact bool `json:"compact,omitempty"`
 }
+
+// maxManifestEntries bounds a decoded manifest.
+const maxManifestEntries = 4 << 20
 
 type applyNeed struct {
 	Needed  []string `json:"needed"`
@@ -163,7 +179,19 @@ func serveApply(base string, r io.Reader, w io.Writer) error {
 		return fmt.Errorf("decode request: %w", err)
 	}
 	res := applyResult{}
-	err = handleApply(base, &req, r, w, &res)
+	if req.Compact {
+		mr := &manReader{r: r}
+		req.Manifest, err = proto.DecodeManifest(mr, maxManifestEntries)
+		if derr := mr.drain(); err == nil {
+			err = derr
+		}
+		if err != nil {
+			err = fmt.Errorf("read manifest: %w", err)
+		}
+	}
+	if err == nil {
+		err = handleApply(base, &req, r, w, &res)
+	}
 	if err != nil {
 		res.Error = err.Error()
 	} else {
@@ -185,22 +213,17 @@ func handleApply(base string, req *applyReq, r io.Reader, w io.Writer, res *appl
 	switch req.Op {
 	case "remove":
 		return os.RemoveAll(root)
-	case "commit", "check":
+	case "commit", "check", "sync":
 	default:
 		return fmt.Errorf("unknown op %q", req.Op)
 	}
 	if req.Manifest == nil {
 		return errors.New("request without manifest")
 	}
-	if err := validateManifest(req.Manifest, false); err != nil {
-		return err
-	}
-	keep := keepMatcher(req.Manifest)
-	state, err := scanSlot(root, keep)
+	p, err := planSlot(root, req.Manifest, false)
 	if err != nil {
 		return err
 	}
-	p := computePlan(req.Manifest, state)
 	res.Changed, res.Deleted = p.changed(), len(p.deletes)
 	if err := writeAFJSON(w, afNeed, applyNeed{Needed: p.needed, Changed: res.Changed, Deleted: res.Deleted}); err != nil {
 		return err
@@ -208,6 +231,19 @@ func handleApply(base string, req *applyReq, r io.Reader, w io.Writer, res *appl
 	flush(w)
 	if req.Op == "check" {
 		return nil
+	}
+	if req.Op == "sync" {
+		t, _, err := readAF(r)
+		if err != nil {
+			return fmt.Errorf("read go/stop: %w", err)
+		}
+		switch t {
+		case afStop:
+			return nil
+		case afGo:
+		default:
+			return fmt.Errorf("protocol: expected go or stop, got %q", t)
+		}
 	}
 	s, err := openSlotFS(root)
 	if err != nil {
@@ -330,25 +366,104 @@ func (s *slotFS) copyWithin(srcRel string, e *proto.ManifestEntry) error {
 	return finishFile(fd, tmp, name, e.Mode, e.MTime)
 }
 
+// manReader reads the payload of 'M' frames up to the empty one.
+type manReader struct {
+	r    io.Reader
+	cur  []byte
+	done bool
+}
+
+func (m *manReader) Read(p []byte) (int, error) {
+	for len(m.cur) == 0 {
+		if m.done {
+			return 0, io.EOF
+		}
+		t, b, err := readAF(m.r)
+		if err != nil {
+			return 0, err
+		}
+		if t != afMan {
+			return 0, fmt.Errorf("protocol: expected manifest data, got %q", t)
+		}
+		if len(b) == 0 {
+			m.done = true
+		}
+		m.cur = b
+	}
+	n := copy(p, m.cur)
+	m.cur = m.cur[n:]
+	return n, nil
+}
+
+// drain consumes the rest of the manifest frames (after a decode error).
+func (m *manReader) drain() error {
+	for !m.done {
+		m.cur = nil
+		if _, err := m.Read(make([]byte, 1)); err != nil && err != io.EOF {
+			return err
+		}
+	}
+	return nil
+}
+
+// manWriter sends bytes as 'M' frames.
+type manWriter struct{ w io.Writer }
+
+func (m manWriter) Write(p []byte) (int, error) {
+	n := 0
+	for len(p) > 0 {
+		k := min(len(p), applyChunk)
+		if err := writeAF(m.w, afMan, p[:k]); err != nil {
+			return n, err
+		}
+		n += k
+		p = p[k:]
+	}
+	return n, nil
+}
+
 // blobOpener yields blob content for streaming.
 type blobOpener func(hash string) (io.ReadCloser, int64, error)
 
+// errNoReply: the apply side answered nothing (it never started or died
+// at once), so it changed nothing and the request can be retried.
+var errNoReply = errors.New("no reply from the sync helper")
+
 // driveApply is the host side of the protocol over an apply process's
-// stdin (w) and stdout (r). For op "check" open may be nil. It returns the
-// apply side's need list and result.
-func driveApply(ctx context.Context, w io.Writer, r io.Reader, req applyReq, open blobOpener) (applyNeed, applyResult, error) {
+// stdin (w) and stdout (r). For op "check" open may be nil. For op "sync",
+// proceed decides from the need list whether to commit (true) or stop. It
+// returns the apply side's need list and result.
+func driveApply(ctx context.Context, w io.Writer, r io.Reader, req applyReq, open blobOpener, proceed func(applyNeed) bool) (applyNeed, applyResult, error) {
 	var need applyNeed
 	var res applyResult
 	bw := bufio.NewWriterSize(w, 1<<20)
-	if err := writeAFJSON(bw, afReq, req); err != nil {
-		return need, res, fmt.Errorf("send request: %w", err)
+	head := req
+	if req.Compact {
+		head.Manifest = nil
 	}
-	if err := bw.Flush(); err != nil {
-		return need, res, fmt.Errorf("send request: %w", err)
+	err := writeAFJSON(bw, afReq, head)
+	if err == nil && req.Compact {
+		if err = proto.EncodeManifest(manWriter{bw}, req.Manifest); err == nil {
+			err = writeAF(bw, afMan, nil)
+		}
+	}
+	if err == nil {
+		err = bw.Flush()
+	}
+	if err != nil {
+		if errors.Is(err, proto.ErrUnsorted) {
+			return need, res, fmt.Errorf("send manifest: %w", err)
+		}
+		// An apply side that failed early closed its stdin; its result
+		// says why. Without one it never ran.
+		if t, b, rerr := readAF(r); rerr == nil && t == afResult && json.Unmarshal(b, &res) == nil && res.Error != "" {
+			return need, res, fmt.Errorf("apply: %s", res.Error)
+		}
+		return need, res, fmt.Errorf("%w: send request: %v", errNoReply, err)
 	}
 	t, b, err := readAF(r)
 	if err != nil {
-		return need, res, fmt.Errorf("read apply reply: %w", err)
+		return need, res, fmt.Errorf("%w: %v", errNoReply, err)
 	}
 	if t == afResult {
 		json.Unmarshal(b, &res)
@@ -360,9 +475,10 @@ func driveApply(ctx context.Context, w io.Writer, r io.Reader, req applyReq, ope
 	if t != afNeed || json.Unmarshal(b, &need) != nil {
 		return need, res, fmt.Errorf("apply: unexpected reply %q", t)
 	}
-	if req.Op == "commit" {
-		// The apply side may run where jobs can replace it (the container
-		// helper): send only blobs of this manifest.
+	// The apply side may run where jobs can replace it (the container
+	// helper): send only blobs of this manifest.
+	var unknown error
+	if req.Op == "commit" || req.Op == "sync" {
 		inManifest := map[string]bool{}
 		if req.Manifest != nil {
 			for _, e := range req.Manifest.Entries {
@@ -373,9 +489,35 @@ func driveApply(ctx context.Context, w io.Writer, r io.Reader, req applyReq, ope
 		}
 		for _, h := range need.Needed {
 			if !inManifest[h] {
-				return need, res, abortApply(bw, r, fmt.Errorf("apply asked for blob %q, which is not in the manifest", h))
+				unknown = fmt.Errorf("apply asked for blob %q, which is not in the manifest", h)
+				break
 			}
 		}
+	}
+	commit := req.Op == "commit"
+	if commit && unknown != nil {
+		return need, res, abortApply(bw, r, unknown)
+	}
+	if req.Op == "sync" {
+		commit = unknown == nil && proceed != nil && proceed(need)
+		ctl := byte(afStop)
+		if commit {
+			ctl = afGo
+		}
+		if err := writeAF(bw, ctl, nil); err != nil {
+			return need, res, fmt.Errorf("send go/stop: %w", err)
+		}
+		if !commit {
+			if err := bw.Flush(); err != nil {
+				return need, res, fmt.Errorf("send go/stop: %w", err)
+			}
+			if unknown != nil {
+				readAF(r) // its result; the process exits cleanly
+				return need, res, unknown
+			}
+		}
+	}
+	if commit {
 		buf := make([]byte, applyChunk)
 		for _, h := range need.Needed {
 			if err := ctx.Err(); err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -43,7 +44,9 @@ func newMgr(t *testing.T, goos string, r Runner, env map[string]string, mod func
 	return m, o
 }
 
-const wantUnit = `[Unit]
+const wantUnit = `# Written by kran service install (kran-unit-format: 2); kran upgrade and
+# kran doctor --fix rewrite it.
+[Unit]
 Description=kran daemon
 Documentation=https://github.com/hafencity-dev/kran
 
@@ -55,6 +58,17 @@ RestartSec=2
 # Only the daemon is stopped on restart. Job supervisors and their jobs run
 # in their own transient scopes (kran.slice) and must survive daemon upgrades.
 KillMode=process
+# The daemon keeps the links, leases and heartbeats of the jobs it manages
+# alive, so it must stay responsive while they, or anything else, load the
+# machine: CPU and I/O weight far above the default 100, best-effort I/O at
+# the highest level, and its memory shielded from reclaim (where the parent
+# cgroups pass protection down). Nice= below 0 and a lower OOMScoreAdjust=
+# need privileges a user service does not have.
+CPUWeight=1000
+IOWeight=1000
+IOSchedulingClass=best-effort
+IOSchedulingPriority=0
+MemoryLow=256M
 Environment="PATH=/usr/bin:/opt/go/bin"
 
 [Install]
@@ -86,6 +100,7 @@ func TestSystemdQuoting(t *testing.T) {
 
 const wantPlist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Written by kran service install (kran-unit-format: 2); kran upgrade and kran doctor --fix rewrite it. -->
 <plist version="1.0">
 <dict>
 	<key>Label</key>
@@ -100,9 +115,13 @@ const wantPlist = `<?xml version="1.0" encoding="UTF-8"?>
 	<key>KeepAlive</key>
 	<true/>
 	<key>ThrottleInterval</key>
-	<integer>2</integer>
+	<integer>5</integer>
 	<key>ProcessType</key>
 	<string>Interactive</string>
+	<key>LowPriorityIO</key>
+	<false/>
+	<key>LowPriorityBackgroundIO</key>
+	<false/>
 	<key>AbandonProcessGroup</key>
 	<true/>
 	<key>WorkingDirectory</key>
@@ -500,4 +519,160 @@ func indexPrefix(l []string, p string) int {
 		}
 	}
 	return -1
+}
+
+// An old unit (no format marker, no priority settings) is reported by
+// Status and rewritten by Refresh, keeping the binary path and the
+// environment it was installed with (an upgrade over ssh has a minimal
+// PATH; the user's must survive).
+func TestSystemdRefreshKeepsInstalledEnv(t *testing.T) {
+	r := &fakeRunner{reply: func(cmd string) (string, error) {
+		if strings.Contains(cmd, "show kran.service") {
+			return "ActiveState=active\nSubState=running\nMainPID=42\nUnitFileState=enabled\nLoadState=loaded\n", nil
+		}
+		return "", nil
+	}}
+	m, o := newMgr(t, "linux", r, map[string]string{"PATH": "/usr/bin"}, nil)
+	path := filepath.Join(o.Home, ".config/systemd/user/kran.service")
+	old := `[Unit]
+Description=kran daemon
+
+[Service]
+Type=simple
+ExecStart="/opt/my tools/kran" daemon
+Restart=always
+RestartSec=2
+KillMode=process
+Environment="KRAN_STATE_DIR=/srv/kr 100%%"
+Environment="PATH=/home/u/go/bin:/usr/local/bin:/usr/bin"
+
+[Install]
+WantedBy=default.target
+`
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	os.WriteFile(path, []byte(old), 0o644)
+	ctx := context.Background()
+	st, _ := m.Status(ctx)
+	if !st.Outdated {
+		t.Fatalf("old unit not reported: %+v", st)
+	}
+	r.calls = nil
+	changed, err := m.Refresh(ctx)
+	if err != nil || !changed {
+		t.Fatal(changed, err)
+	}
+	b, _ := os.ReadFile(path)
+	u := string(b)
+	for _, want := range []string{
+		`ExecStart="/opt/my tools/kran" daemon`,
+		`Environment="KRAN_STATE_DIR=/srv/kr 100%%"`,
+		`Environment="PATH=/home/u/go/bin:/usr/local/bin:/usr/bin"`,
+		"CPUWeight=1000", "MemoryLow=",
+	} {
+		if !strings.Contains(u, want) {
+			t.Errorf("missing %s in\n%s", want, u)
+		}
+	}
+	if !contains(r.calls, "systemctl --user daemon-reload") {
+		t.Fatalf("calls %v", r.calls)
+	}
+	if st, _ := m.Status(ctx); st.Outdated {
+		t.Fatal("still outdated after refresh")
+	}
+	r.calls = nil
+	if changed, err := m.Refresh(ctx); err != nil || changed || len(r.calls) != 0 {
+		t.Fatalf("second refresh: %v %v %v", changed, err, r.calls)
+	}
+	// An upgrade's restart refreshes first.
+	os.WriteFile(path, []byte(old), 0o644)
+	r.calls = nil
+	if err := m.Restart(ctx, RestartOptions{Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	if i, j := index(r.calls, "systemctl --user daemon-reload"), index(r.calls, "systemctl --user restart kran.service"); i < 0 || j < i {
+		t.Fatalf("restart must reload the refreshed unit first: %v", r.calls)
+	}
+	if b, _ := os.ReadFile(path); !strings.Contains(string(b), "CPUWeight=1000") {
+		t.Fatal("restart did not refresh the unit")
+	}
+}
+
+func TestLaunchdRefreshKeepsInstalledEnvAndReloads(t *testing.T) {
+	loaded := true
+	r := &fakeRunner{reply: launchdReply(true, &loaded)}
+	m, o := newMgr(t, "darwin", r, map[string]string{"PATH": "/usr/bin"}, nil)
+	path := filepath.Join(o.Home, "Library/LaunchAgents/dev.hafencity.kran.plist")
+	old := `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.hafencity.kran</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/u/bin/k&amp;ran</string>
+		<string>daemon</string>
+	</array>
+	<key>KeepAlive</key>
+	<true/>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/bin</string>
+	</dict>
+</dict>
+</plist>
+`
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	os.WriteFile(path, []byte(old), 0o644)
+	ctx := context.Background()
+	if st, _ := m.Status(ctx); !st.Outdated {
+		t.Fatalf("old plist not reported: %+v", st)
+	}
+	r.calls = nil
+	if err := m.Restart(ctx, RestartOptions{Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(path)
+	p := string(b)
+	for _, want := range []string{"<string>/Users/u/bin/k&amp;ran</string>", "<string>/opt/homebrew/bin:/usr/bin</string>", "<key>LowPriorityIO</key>", "kran-unit-format: 2"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("missing %s in\n%s", want, p)
+		}
+	}
+	// A changed plist only takes effect when launchd loads it again.
+	bo, bs := index(r.calls, "launchctl bootout gui/501/dev.hafencity.kran"), indexPrefix(r.calls, "launchctl bootstrap")
+	if bo < 0 || bs < bo || contains(r.calls, "launchctl kickstart -k gui/501/dev.hafencity.kran") {
+		t.Fatalf("calls %v", r.calls)
+	}
+}
+
+// The rendered unit passes systemd's own checks, without warnings.
+func TestSystemdUnitVerifies(t *testing.T) {
+	sa, err := exec.LookPath("systemd-analyze")
+	if err != nil {
+		t.Skip("systemd-analyze not installed")
+	}
+	m, _ := newMgr(t, "linux", &fakeRunner{}, map[string]string{"PATH": "/usr/bin"}, func(o *Options) { o.KranPath = "/bin/true" })
+	dir := t.TempDir()
+	unit := filepath.Join(dir, "kran-verify-test.service")
+	os.WriteFile(unit, []byte(m.Unit()), 0o644)
+	out, err := exec.Command(sa, "--user", "verify", unit).CombinedOutput()
+	if err != nil || len(strings.TrimSpace(string(out))) > 0 {
+		t.Fatalf("systemd-analyze verify: %v\n%s", err, out)
+	}
+}
+
+// The rendered plist is valid for plutil (macOS only).
+func TestLaunchdPlistLints(t *testing.T) {
+	pl, err := exec.LookPath("plutil")
+	if err != nil {
+		t.Skip("plutil not installed")
+	}
+	m, _ := newMgr(t, "darwin", &fakeRunner{}, map[string]string{"PATH": "/usr/bin"}, nil)
+	f := filepath.Join(t.TempDir(), "kran.plist")
+	os.WriteFile(f, []byte(m.Unit()), 0o644)
+	if out, err := exec.Command(pl, "-lint", f).CombinedOutput(); err != nil {
+		t.Fatalf("plutil -lint: %v\n%s", err, out)
+	}
 }

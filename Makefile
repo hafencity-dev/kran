@@ -32,8 +32,18 @@ build: ## build bin/kran for this machine
 	@mkdir -p bin
 	$(GOBUILD) -o bin/kran ./cmd/kran
 
-test: ## go test -race, gently
-	nice -n 10 go test -race -p 4 ./...
+# On a systemd Linux host the test suites run in a scope capped at
+# TEST_MEM memory and TEST_TASKS processes and threads: a test that goes
+# wrong (a runaway self-start, a leak) fails alone instead of freezing the
+# machine. `make test TEST_CAP=` runs uncapped.
+TEST_MEM   ?= 24G
+TEST_TASKS ?= 8192
+TEST_CAP   ?= $(shell [ "$$(uname -s)" = Linux ] && command -v systemd-run >/dev/null 2>&1 && \
+	systemd-run --user --scope --quiet --collect true >/dev/null 2>&1 && \
+	echo systemd-run --user --scope --quiet --collect -p MemoryMax=$(TEST_MEM) -p MemorySwapMax=0 -p TasksMax=$(TEST_TASKS) --)
+
+test: ## go test -race, gently and capped
+	$(TEST_CAP) nice -n 10 go test -race -p 4 ./...
 
 # third_party holds vendored forks kept byte-identical to upstream.
 fmt-check: ## fail when a Go file needs gofmt
@@ -66,7 +76,7 @@ install: ## install to $(PREFIX) and fill the binary cache for all four platform
 
 # System-level suites (internal/e2e) run the real kran binary, built once
 # with the race detector; output stays visible (-v) for the summaries.
-E2E_GO := nice -n 10 go test -count=1 -v
+E2E_GO = $(TEST_CAP) nice -n 10 go test -count=1 -v
 CHAOS_DURATION ?= 3m
 
 e2e: ## black-box suite on real daemons (KRAN_TEST_DOCKER=1 adds container tests)

@@ -14,8 +14,6 @@ func TestWrapPolicy(t *testing.T) {
 		"go vet ./...",
 		"go build ./...",
 		"go build -o /dev/null ./cmd/kran",
-		"cd /home/me/repo && go test ./...",
-		"cd web && pnpm test && pnpm build",
 		"FOO=1 go test ./...",
 		"CGO_ENABLED=0 GOOS=linux go build ./...",
 		"go test ./... 2>&1 | tail -n 20",
@@ -169,6 +167,60 @@ func TestWrapPolicy(t *testing.T) {
 		if got, ok := WrapCommand(c); ok {
 			t.Errorf("must not wrap %q (got %q)", c, got)
 		}
+	}
+}
+
+func TestWrapHoistsLeadingCd(t *testing.T) {
+	for in, want := range map[string]string{
+		"cd /home/me/repo && go test ./...":                     "cd /home/me/repo && kran run --sh 'go test ./...'",
+		"cd web && pnpm test && pnpm build":                     "cd web && kran run --sh 'pnpm test && pnpm build'",
+		"cd ../other && cd sub; go test ./... | tail -5":        "cd ../other && cd sub; kran run --sh 'go test ./... | tail -5'",
+		"cd 'dir with space'\ngo vet ./...":                     "cd 'dir with space'\nkran run --sh 'go vet ./...'",
+		"cd web && go test ./... && cd ../api && go test ./...": "cd web && kran run --sh 'go test ./... && cd ../api && go test ./...'",
+		"go test ./... && cd sub && go test ./...":              "kran run --sh 'go test ./... && cd sub && go test ./...'",
+	} {
+		if got, ok := WrapCommand(in); !ok || got != want {
+			t.Errorf("WrapCommand(%q) = %q, %v; want %q", in, got, ok, want)
+		}
+	}
+	for _, in := range []string{
+		"cd web", // nothing heavy left
+		"go test ./... && cd /other/repo && go test ./...", // a later cd leaves the workspace
+		"cd web && go test ./... && cd ~/x && go test ./...",
+		"cd web && go test ./... && cd $DIR && go test ./...",
+	} {
+		if got, ok := WrapCommand(in); ok {
+			t.Errorf("must not wrap %q (got %q)", in, got)
+		}
+	}
+}
+
+// The hoisted form must behave like the original in a real shell: the cd
+// happens before kran starts, and kran gets only the rest.
+func TestWrapHoistedCdRunsInShell(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub dir")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fake := filepath.Join(dir, "kran")
+	script := "#!/bin/sh\nprintf '%s|%s' \"$(pwd -P)\" \"$3\" > " + ShellQuote(filepath.Join(dir, "got")) + "\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wrapped, ok := wrapWith(fake, "cd 'sub dir' && go test ./...")
+	if !ok {
+		t.Fatal("not wrapped")
+	}
+	cmd := exec.Command("sh", "-c", wrapped)
+	cmd.Dir = dir
+	if b, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("%v %s", err, b)
+	}
+	got, _ := os.ReadFile(filepath.Join(dir, "got"))
+	real, _ := filepath.EvalSymlinks(sub)
+	if want := real + "|go test ./..."; string(got) != want {
+		t.Fatalf("got %q want %q", got, want)
 	}
 }
 

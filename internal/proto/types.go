@@ -10,7 +10,16 @@ import "time"
 const (
 	APIVersion    = "v1"
 	ProtocolMajor = 1
-	ProtocolMinor = 0
+	ProtocolMinor = 1
+)
+
+// Process caps on Linux (systemd TasksMax, threads included). A job's scope
+// and kran.slice as a whole stop a runaway fork loop at the cap instead of
+// letting it take the machine down; a parallel build with threaded test
+// binaries stays far below either.
+const (
+	JobTasksMax   = 8192
+	SliceTasksMax = 16384
 )
 
 // ---------------------------------------------------------------------------
@@ -278,6 +287,19 @@ type JobSpec struct {
 	SyncExclude []string  `json:"sync_exclude,omitempty"`
 	SubmittedAt time.Time `json:"submitted_at"`
 	ClientPID   int       `json:"client_pid"`
+	// OriginEnv describes the origin's user and tools so a container job
+	// can match them (SPEC §6.8). Filled by the origin daemon.
+	OriginEnv *OriginEnv `json:"origin_env,omitempty"`
+}
+
+// OriginEnv is what a container job needs to look like the origin.
+type OriginEnv struct {
+	User string `json:"user,omitempty"` // login name
+	Home string `json:"home,omitempty"` // home directory
+	TZ   string `json:"tz,omitempty"`   // IANA time zone, e.g. "Europe/Berlin"
+	// Toolchains are the origin's native versions, e.g. {"go":"1.25.3",
+	// "node":"24.8.0"}: the defaults for tools the workspace does not pin.
+	Toolchains map[string]string `json:"toolchains,omitempty"`
 }
 
 type SetupSpec struct {
@@ -290,8 +312,17 @@ type Estimate struct {
 	CPUs     float64 `json:"cpus"`
 	Mem      int64   `json:"mem"`
 	Duration float64 `json:"duration_s"`
-	Samples  int     `json:"samples"` // 0 = default for the command family
-	Source   string  `json:"source"`  // "learned" | "family:go-test" | "flag" | "rule"
+	Samples  int     `json:"samples"` // runs of this fingerprint behind it; 0 = none
+	// Source is where cpu/mem came from: "learned" (this fingerprint's
+	// runs), "repo:go-test" (runs of the family in this repo),
+	// "family:go-test" (static default), "flag" or "rule".
+	Source string `json:"source"`
+	// DurationSource is where Duration came from ("learned",
+	// "repo:go-test", "family:go-test"): flags and rules set only cpu/mem.
+	DurationSource string `json:"duration_source,omitempty"`
+	// RepoSamples counts the runs of the job's family in its repo that a
+	// "repo:" estimate (or duration) is built from.
+	RepoSamples int `json:"repo_samples,omitempty"`
 }
 
 type Usage struct {
@@ -305,25 +336,32 @@ type Usage struct {
 
 // Job is the daemon's view of a job (live and history).
 type Job struct {
-	Spec        JobSpec     `json:"spec"`
-	State       JobState    `json:"state"`
-	Node        string      `json:"node,omitempty"` // target node name once placed
-	Runtime     RuntimeKind `json:"runtime,omitempty"`
-	Local       bool        `json:"local"`            // ran on origin
-	Fallback    bool        `json:"fallback"`         // ran locally after a remote failure
-	Reason      string      `json:"reason,omitempty"` // why queued / why it failed / placement rationale
-	Estimate    Estimate    `json:"estimate"`
-	Alloc       Resources   `json:"alloc"`
-	Usage       Usage       `json:"usage"`
-	Live        *Resources  `json:"live,omitempty"` // current cpu/mem while running
-	ExitCode    *int        `json:"exit_code,omitempty"`
-	Signal      string      `json:"signal,omitempty"`
-	Fingerprint string      `json:"fingerprint"`
-	QueuedAt    time.Time   `json:"queued_at"`
-	StartedAt   time.Time   `json:"started_at,omitempty"`
-	EndedAt     time.Time   `json:"ended_at,omitempty"`
-	Origin      string      `json:"origin"` // origin node name
-	QueuePos    int         `json:"queue_pos,omitempty"`
+	Spec     JobSpec     `json:"spec"`
+	State    JobState    `json:"state"`
+	Node     string      `json:"node,omitempty"` // target node name once placed
+	Runtime  RuntimeKind `json:"runtime,omitempty"`
+	Local    bool        `json:"local"`    // ran on origin
+	Fallback bool        `json:"fallback"` // ran locally after a remote failure
+	// Reason is why the job waits (queued), what it is doing when that
+	// says more (syncing, setup, reconnecting), and once it ended: why it
+	// failed (infra error, memory cap, canceled) or else why it ran where
+	// it ran (PlaceReason).
+	Reason string `json:"reason,omitempty"`
+	// PlaceReason is the scheduler's rationale for the placement ("devmac:
+	// 12 CPUs free, est. 1m vs 3m here"); set once placed, kept for good.
+	PlaceReason string     `json:"place_reason,omitempty"`
+	Estimate    Estimate   `json:"estimate"`
+	Alloc       Resources  `json:"alloc"`
+	Usage       Usage      `json:"usage"`
+	Live        *Resources `json:"live,omitempty"` // current cpu/mem while running
+	ExitCode    *int       `json:"exit_code,omitempty"`
+	Signal      string     `json:"signal,omitempty"`
+	Fingerprint string     `json:"fingerprint"`
+	QueuedAt    time.Time  `json:"queued_at"`
+	StartedAt   time.Time  `json:"started_at,omitempty"`
+	EndedAt     time.Time  `json:"ended_at,omitempty"`
+	Origin      string     `json:"origin"` // origin node name
+	QueuePos    int        `json:"queue_pos,omitempty"`
 	// when the job was placed, when the user's
 	// command started (same as StartedAt), and the last phase report
 	// (sync/setup progress) while it is not running yet.

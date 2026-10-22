@@ -43,4 +43,8 @@ type SyncPlan struct {
 	Changed int      `json:"changed"` // files that will be written
 	Deleted int      `json:"deleted"` // files that will be removed
 	Bytes   int64    `json:"bytes"`   // bytes of Missing
+	// Committed: nothing was missing, so the target already brought the
+	// slot up to date while diffing; slot.commit is not needed (and a
+	// no-op if sent). Protocol 1.1; older targets never set it.
+	Committed bool `json:"committed,omitempty"`
 }

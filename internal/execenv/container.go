@@ -45,9 +45,39 @@ type dockerEnv struct {
 	cliEnv []string
 
 	mu      sync.Mutex
-	ready   bool   // volumes and image verified
-	sockGID int    // group of /var/run/docker.sock inside the Docker host
-	syncBin string // kran binary path inside the sync container
+	ready   bool      // volumes and image verified
+	sockGID int       // group of /var/run/docker.sock inside the Docker host
+	syncBin string    // kran binary path inside the sync container
+	syncAt  time.Time // when the sync helper was last seen running with syncBin
+}
+
+// syncRecheck: how long a verified sync helper is trusted without asking
+// Docker again. Each check is a docker CLI round trip (100 ms or more on a
+// Mac); a helper that vanished meanwhile makes the next run fail without
+// side effects, which re-checks and retries (volumeRun).
+const syncRecheck = time.Minute
+
+// sameDocker reports whether two probes found the same Docker daemon, so
+// what was verified on the first still holds.
+func sameDocker(a, b *dockerEnv) bool {
+	return a != nil && b != nil && a.cli == b.cli && a.host == b.host &&
+		a.info.ID == b.info.ID && a.info.ServerVersion == b.info.ServerVersion
+}
+
+// inherit carries the verified state of an earlier probe of the same
+// Docker daemon over to a fresh one (Refresh probes every few minutes;
+// without this every refresh cost the next container sync a volume setup
+// container and a helper check).
+func (dk *dockerEnv) inherit(old *dockerEnv) {
+	if !sameDocker(old, dk) {
+		return
+	}
+	old.mu.Lock()
+	ready, gid, bin, at := old.ready, old.sockGID, old.syncBin, old.syncAt
+	old.mu.Unlock()
+	dk.mu.Lock()
+	dk.ready, dk.sockGID, dk.syncBin, dk.syncAt = ready, gid, bin, at
+	dk.mu.Unlock()
 }
 
 func (m *manager) containerSetting() string {
@@ -284,14 +314,22 @@ func (m *manager) prepareVolumes(ctx context.Context, dk *dockerEnv) error {
 // still reach it; SPEC §9.)
 func (m *manager) ensureSync(ctx context.Context, dk *dockerEnv) error {
 	name := m.syncName()
-	sum, err := fileHash(m.opts.LinuxBinary)
+	sum, err := m.linuxBinaryHash()
 	if err != nil {
 		return fmt.Errorf("%w: Linux kran binary: %v", ErrRuntimeUnavailable, err)
 	}
 	bin := "/usr/local/bin/kran-sync-" + sum[:16]
+	if dk.syncBin == bin && m.now().Sub(dk.syncAt) < syncRecheck {
+		return nil
+	}
 	out, err := dk.run(ctx, nil, "inspect", "--format", `{{.State.Running}} {{.Config.Image}}`, name)
 	running := err == nil && strings.HasPrefix(string(out), "true ") && strings.TrimSpace(strings.TrimPrefix(string(out), "true ")) == m.imageTag()
 	if !running {
+		// The volumes may be gone with it (docker volume prune, a
+		// reset Docker VM): set them up again first.
+		if err := m.prepareVolumes(ctx, dk); err != nil {
+			return err
+		}
 		dk.run(ctx, nil, "rm", "--force", name)
 		_, err := dk.run(ctx, nil, "run", "--detach", "--name", name, "--label", "kran.ns="+m.ns, "--label", "kran.role=sync",
 			"--restart", "unless-stopped", "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
@@ -316,7 +354,29 @@ func (m *manager) ensureSync(ctx context.Context, dk *dockerEnv) error {
 		dk.run(ctx, nil, "exec", "--user", "0", name, "chmod", "0755", bin)
 	}
 	dk.syncBin = bin
+	dk.syncAt = m.now()
 	return nil
+}
+
+// linuxBinaryHash hashes the Linux kran binary, once per version of the
+// file (it is tens of MB; every container sync needs its name).
+func (m *manager) linuxBinaryHash() (string, error) {
+	p := m.opts.LinuxBinary
+	fi, err := os.Stat(p)
+	if err != nil {
+		return "", err
+	}
+	m.binMu.Lock()
+	defer m.binMu.Unlock()
+	if m.binKey.path == p && m.binKey.size == fi.Size() && m.binKey.mtime.Equal(fi.ModTime()) {
+		return m.binSum, nil
+	}
+	sum, err := fileHash(p)
+	if err != nil {
+		return "", err
+	}
+	m.binKey.path, m.binKey.size, m.binKey.mtime, m.binSum = p, fi.Size(), fi.ModTime(), sum
+	return sum, nil
 }
 
 func fileHash(p string) (string, error) {
@@ -329,6 +389,50 @@ func fileHash(p string) (string, error) {
 
 // volumeApply runs one apply request against a slot in the volume.
 func (m *manager) volumeApply(ctx context.Context, req applyReq, open blobOpener) (applyNeed, error) {
+	return m.volumeRun(ctx, req, open, nil)
+}
+
+// volumeSync runs op sync: one scan of the slot in the volume, then a
+// commit in the same helper run when proceed approves the need list (the
+// blob store holds everything). The caller holds blobs.trimMu (shared).
+func (m *manager) volumeSync(ctx context.Context, slot string, mf *proto.Manifest, proceed func(applyNeed) bool) (applyNeed, bool, error) {
+	committed := false
+	need, err := m.volumeRun(ctx, applyReq{Op: "sync", Slot: slot, Manifest: mf}, m.openBlob, func(n applyNeed) bool {
+		committed = proceed(n)
+		return committed
+	})
+	if err != nil {
+		return need, false, err
+	}
+	return need, committed, nil
+}
+
+// volumeRun runs one helper process for req. The manifest goes in the
+// compact encoding; a helper that answers nothing (its container was
+// gone) is retried once after the helper is checked and restarted.
+func (m *manager) volumeRun(ctx context.Context, req applyReq, open blobOpener, proceed func(applyNeed) bool) (applyNeed, error) {
+	req.Compact = req.Manifest != nil && proto.SortedByPath(req.Manifest.Entries)
+	for attempt := 0; ; attempt++ {
+		need, err := m.volumeExec(ctx, req, open, proceed)
+		switch {
+		case err == nil:
+			return need, nil
+		case attempt == 0 && errors.Is(err, errNoReply) && ctx.Err() == nil:
+			m.logf("sync helper did not answer (%v); checking it and retrying", err)
+			if dk, _ := m.docker(); dk != nil {
+				dk.mu.Lock()
+				dk.syncAt = time.Time{}
+				dk.mu.Unlock()
+			}
+		case attempt == 0 && req.Compact && strings.Contains(err.Error(), "request without manifest"):
+			req.Compact = false // a helper from an older kran: JSON it is
+		default:
+			return need, err
+		}
+	}
+}
+
+func (m *manager) volumeExec(ctx context.Context, req applyReq, open blobOpener, proceed func(applyNeed) bool) (applyNeed, error) {
 	if err := m.ensureContainerReady(ctx, nil); err != nil {
 		return applyNeed{}, err
 	}
@@ -351,7 +455,7 @@ func (m *manager) volumeApply(ctx context.Context, req applyReq, open blobOpener
 	if err := cmd.Start(); err != nil {
 		return applyNeed{}, fmt.Errorf("sync helper: %w", err)
 	}
-	need, _, derr := driveApply(ctx, stdin, stdout, req, open)
+	need, _, derr := driveApply(ctx, stdin, stdout, req, open, proceed)
 	stdin.Close()
 	werr := cmd.Wait()
 	if derr != nil {
@@ -401,35 +505,40 @@ func (m *manager) containerSpec(ctx context.Context, spec *superSpec, req *Start
 		slotMount = fmt.Sprintf("type=bind,src=%s,dst=%s", m.pool.hostPath(s), root)
 	}
 
-	// Toolchains always come from mise in the container (installed once
-	// into the shared tools volume).
-	var miseTools []string
-	keys := make([]string, 0, len(req.Spec.Req.Toolchains))
-	for k := range req.Spec.Req.Toolchains {
-		keys = append(keys, k)
+	// Toolchains come from mise: the origin's versions unless the
+	// workspace pins its own, each installed on first use into the shared
+	// tools volume (SPEC §6.8).
+	oe := req.Spec.OriginEnv
+	if oe == nil {
+		oe = &proto.OriginEnv{}
 	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		if k == "mise" {
-			continue
-		}
-		miseTools = append(miseTools, k+"@"+miseVersion(req.Spec.Req.Toolchains[k]))
-	}
+	tools := containerToolchains(oe.Toolchains, req.Spec.Req.Toolchains)
 	wrap := func(argv []string) []string {
-		if len(miseTools) == 0 {
+		if len(tools.eager) == 0 {
 			return argv
 		}
-		return append(append(append([]string{"mise", "exec"}, miseTools...), "--"), argv...)
+		return append(append(append([]string{"mise", "exec"}, tools.eager...), "--"), argv...)
+	}
+	home, homeMount := ctrHomeFor(root, oe.Home, apiVersionAtLeast(dk.ver.APIVersion, 1, 45))
+	user := ctrUser(oe, m.hostEnv().user)
+	initTools, initShims := tools.initEnv()
+	var groups []string
+	if !req.Spec.Req.NoDocker && dk.sockGID > 0 {
+		groups = append(groups, strconv.Itoa(dk.sockGID))
 	}
 
 	fixed := map[string]string{
-		"HOME": ctrHome, "TMPDIR": "/tmp",
+		"HOME": home, "USER": user, "LOGNAME": user, "SHELL": "/bin/bash", "PATH": ctrPath(home), "TMPDIR": "/tmp",
 		"GOCACHE": ctrCache + "/go-build", "GOMODCACHE": ctrCache + "/gomod",
 		"npm_config_cache": ctrCache + "/npm", "npm_config_store_dir": ctrCache + "/pnpm-store",
 		"UV_CACHE_DIR": ctrCache + "/uv", "PIP_CACHE_DIR": ctrCache + "/pip", "CARGO_HOME": ctrCache + "/cargo",
-		"MISE_DATA_DIR": ctrTools + "/mise", "MISE_CACHE_DIR": ctrCache + "/mise", "MISE_YES": "1",
-		"MISE_TRUSTED_CONFIG_PATHS": root,
-		"KRAN_JOB_ID":               req.Spec.ID, "KRAN_NODE": m.opts.NodeName, "KRAN_ORIGIN": req.Origin, "KRAN_ORIGIN_ROOT": root,
+		"MISE_DATA_DIR": ctrTools + "/mise", "MISE_CACHE_DIR": ctrCache + "/mise", "MISE_STATE_DIR": ctrCache + "/mise-state", "MISE_YES": "1",
+		"MISE_GLOBAL_CONFIG_FILE": ctrMiseConf, "MISE_TRUSTED_CONFIG_PATHS": root,
+		"KRAN_JOB_ID": req.Spec.ID, "KRAN_NODE": m.opts.NodeName, "KRAN_ORIGIN": req.Origin, "KRAN_ORIGIN_ROOT": root,
+		// Read by kran-init, which unsets them before the job starts.
+		"KRAN_INIT_UID": strconv.Itoa(os.Getuid()), "KRAN_INIT_GID": strconv.Itoa(os.Getgid()),
+		"KRAN_INIT_GROUPS": strings.Join(groups, ","), "KRAN_INIT_USER": user, "KRAN_INIT_GROUP": nodeGroupName(),
+		"KRAN_INIT_TOOLS": initTools, "KRAN_INIT_SHIMS": initShims, "KRAN_INIT_TZ": oe.TZ,
 	}
 	if req.Spec.TTY != nil && req.Spec.Env["TERM"] == "" {
 		fixed["TERM"] = "xterm-256color"
@@ -450,7 +559,7 @@ func (m *manager) containerSpec(ctx context.Context, spec *superSpec, req *Start
 	sort.Strings(userKeys)
 	for _, k := range userKeys {
 		v := req.Spec.Env[k]
-		if k == "" || strings.ContainsAny(k, "=\x00") || hostSpecificEnv(k) {
+		if k == "" || strings.ContainsAny(k, "=\x00") || hostSpecificEnv(k) || ctrDropEnv(k, v) {
 			continue
 		}
 		if _, ok := fixed[k]; ok {
@@ -473,21 +582,34 @@ func (m *manager) containerSpec(ctx context.Context, spec *superSpec, req *Start
 	}
 
 	common := func(name string) []string {
+		// kran-init starts as root with only the capabilities it needs to
+		// write the user entry and drop to the job's uid (KILL: tini
+		// forwards signals to it); the job never gains privileges.
 		a := []string{"run", "--name", name, "--label", "kran.job=" + req.Spec.ID, "--label", "kran.ns=" + m.ns,
 			"--init", "--network", "host",
-			"--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
-			"--mount", slotMount,
+			"--user", "0:0", "--entrypoint", ctrInit,
+			"--cap-drop", "ALL", "--cap-add", "SETUID", "--cap-add", "SETGID", "--cap-add", "KILL",
+			"--security-opt", "no-new-privileges",
+			"--shm-size", strconv.FormatInt(ctrShmSize(spec.MemMax), 10),
 			"--mount", "type=volume,src=" + m.volume("cache") + ",dst=" + ctrCache,
 			"--mount", "type=volume,src=" + m.volume("tools") + ",dst=" + ctrTools,
+		}
+		if homeMount {
+			// nocopy: Docker would otherwise hand the home directory to
+			// root when it creates the workdir's mount points in it.
+			a = append(a, "--mount", "type=volume,src="+m.volume("cache")+",dst="+home+",volume-subpath=home,volume-nocopy=true")
+		}
+		a = append(a, "--mount", slotMount)
+		if !dk.info.rootless() {
+			// Docker's default soft limit of 1024 open files breaks file
+			// watchers and big test runs; the hard limit stays Docker's.
+			a = append(a, "--ulimit", "nofile=65536:524288")
 		}
 		// The Docker socket lets testcontainers and docker compose work in
 		// jobs; it is root-equivalent on rootful Docker (SPEC §9), so a
 		// project can opt out.
 		if !req.Spec.Req.NoDocker {
 			a = append(a, "-v", "/var/run/docker.sock:/var/run/docker.sock")
-			if dk.sockGID > 0 {
-				a = append(a, "--group-add", strconv.Itoa(dk.sockGID))
-			}
 		}
 		if spec.MemMax > 0 {
 			a = append(a, "--memory", strconv.FormatInt(spec.MemMax, 10), "--memory-swap", strconv.FormatInt(spec.MemMax, 10))

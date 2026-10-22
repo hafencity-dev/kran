@@ -59,6 +59,20 @@ targets linux/darwin × arm64/amd64.
 
 * One binary `kran`. Long-running role: `kran daemon` (systemd user unit /
   launchd LaunchAgent). Everything else is a short-lived CLI.
+* One daemon per node (per set of `KRAN_*_DIR`s): before it restores jobs,
+  dials peers or logs, the daemon takes a lock (`daemon.lock` in the
+  runtime dir; a daemon already answering on `kran.sock` counts as holding
+  it). Started by hand, a second daemon fails at once; under systemd or
+  launchd it waits and takes over when the first stops, instead of being
+  respawned every few seconds.
+* The daemon runs with priority over the jobs it manages: its unit sets
+  `CPUWeight=1000`, `IOWeight=1000`, best-effort I/O at level 0 and
+  `MemoryLow=256M` (systemd; `Nice` < 0 and a lower `OOMScoreAdjust` need
+  privileges a user unit lacks), `ProcessType Interactive` and
+  `LowPriorityIO false` (launchd). Units carry a format marker
+  (`kran-unit-format: N`); `kran service restart` (and so `kran upgrade`)
+  rewrites an older unit keeping its binary path and environment, and
+  `kran doctor` reports one (`--fix` rewrites it).
 * **CLI ↔ local daemon:** HTTP over unix socket
   `$XDG_RUNTIME_DIR/kran/kran.sock` (fallback `~/.local/state/kran/kran.sock`;
   macOS `~/Library/Application Support/kran/kran.sock`). Same handler also
@@ -77,6 +91,27 @@ targets linux/darwin × arm64/amd64.
   in `peers.toml`.
 * Connections are bidirectional when both sides can reach each other; each
   side dials its own outbound connection (no reliance on reverse tunnels).
+* **Link liveness** (load-tolerant): every inbound byte counts as a sign
+  of life, not only ping replies. A ping goes out every 5 s (it also
+  measures the RTT, an EWMA seeded by a warm ping after the handshake). A
+  peer silent for 45 s is dead; while it last reported heavy load, or this
+  node is overloaded itself (`metrics.Stressed`: load ≥ 1.5 × cores,
+  memory PSI ≥ 20 %, I/O PSI ≥ 40 %, CPU PSI ≥ 80 %, swap full; macOS:
+  memorystatus ≥ 90), or the link is slow (20 × RTT), up to 2 minutes. A
+  keepalive tick that comes late because this process was not scheduled
+  counts as one interval at most. Job-level timers stay shorter on
+  purpose: heartbeats 2 s < stream silence 10 s < lease 15 s (+5 s grace)
+  < link tolerance; a stalled link costs a running job its lease, but not
+  the link itself nor sync and setup in flight (each prestart RPC is
+  bounded by its own 2 min timeout). `KRAN_KEEPALIVE=<interval>,<dead
+  after>,<max dead after>` overrides the timings.
+* **Reconnects**: exponential backoff with jitter from 1 s, capped at
+  20 s; it starts over when the peer dials in or this machine's
+  addresses change. A job waiting for the peer may retry sooner, but never
+  more often than every second. The log records changes (first failure,
+  a different error, the reconnect with the number of failed attempts)
+  and otherwise a summary every 10 minutes ("still unreachable after N
+  attempts").
 
 ### Package layout
 
@@ -118,7 +153,11 @@ another's internals.
 | cache dir (binaries for other platforms) | `~/.cache/kran` | `~/Library/Caches/kran` |
 
 Files: `config.toml`, `peers.toml`, `id_ed25519[.pub]`, `kran.db`,
-`kran.sock`, `kran-peer.sock`, `daemon.log` (rotated, 10 MB × 3),
+`kran.sock`, `kran-peer.sock`, `daemon.lock`, `daemon.log` (the daemon's
+only log, rotated, 10 MB × 3; also mirrored to stderr when that is a
+terminal), `daemon.out.log` (stdout/stderr when launchd or the on-demand
+start runs the daemon: fatal errors and crash traces only, cut to its
+last 64 KiB above 1 MiB; under systemd that goes to the journal),
 `jobs/<id>/` (spool, status), `slots/`, `blobs/`, `bin/<os>-<arch>/kran`.
 
 ## 5. Configuration (all optional)
@@ -263,10 +302,18 @@ Flags: `-l/--local`, `-r/--remote`, `-n/--node NAME`, `--gpu`, `--cpus N`,
   The CLI, if its daemon connection drops after the decision, retries the
   connection for 20 s (as long as a restarted daemon waits for it) and
   resumes via `reattach`; otherwise it exits 125 (§6.1 step 8).
+* Probes that fork a helper (`nvidia-smi`, the docker CLI) back off
+  exponentially after a failure and run at most every 30 s while the node
+  is overloaded (the last reading stands in). The container runtime counts
+  as unavailable only after 3 consecutive failed probes; engine capacity
+  comes from the Engine API when the endpoint is a unix socket.
 * Reaper (every 30 s, and at daemon start): kills scopes/containers/process
   groups labelled kran whose job is not active; deletes job dirs older than
   7 days; trims blob cache (LRU, cap default 20 GiB or 10% of disk) and
-  slots unused for 3 days; enforces disk floor (refuse new remote jobs below
+  slots unused for 3 days (last use = last acquisition or release; a slot
+  whose metadata has none, e.g. written by an older kran, counts from the
+  latest change of its metadata or directory, never as unused since
+  year one); enforces disk floor (refuse new remote jobs below
   max(10 GiB, 5%) free with reason `disk`).
 * Process-tree kill: Linux = scope stop (cgroup kill); macOS native = kill
   process group, then sweep descendants by ppid walk; container =
@@ -301,11 +348,31 @@ any node's total schedulable memory is admitted alone on the largest node
 (reason shown) rather than queued forever.
 
 Scoring among admissible nodes — minimize expected completion:
-`wait + sync_bytes/bandwidth + setup_estimate + duration_estimate × speed(node)`
+`wait + sync_bytes/bandwidth + setup_estimate + duration_estimate × speed(node) × slowdown(node)`
 where `speed` is learned per (fingerprint, node) and starts from the node's
 single-core benchmark ratio; `bandwidth` is measured on blob uploads (EWMA).
+`slowdown` is contention that free CPUs do not show (a node thrashing on
+memory runs every job slower with cores idle): `1 / (1 − stall)`, stall
+combined from independent sources as `1 − Π(1 − s)` and capped at 0.8 (5×).
+Linux: PSI "some" avg10 — memory × 1.0, CPU × 0.5, I/O × 0.5 (with many
+cores or one busy disk "some task waited" overstates what a new job waits);
+swap ≥ 90% used while memory is tight (memory PSI ≥ 10 or < 10% available)
+adds 0.2; without PSI, run-queue oversubscription `1 − cpus/load1`. macOS:
+`1 − cpus/load1` and memory pressure (100 − memorystatus level) above 75
+scaled to at most 0.6; swap is not used (it grows on demand). A Linux VM's
+container runtime takes the host's slowdown plus its own CPU saturation.
+Reasons name a slowdown of 1.2× or more: "devmac (Linux container): 15.8
+CPUs free, est. 1m3s vs 2m32s here (slowed ~2.5x by memory pressure 40%,
+full swap)".
 Tie-break: origin first, then lowest load. Jobs with estimated duration under
 5 s or sync cost greater than estimated savings stay local.
+
+A job's record keeps the placement rationale in `place_reason`. Its
+`reason` is the wait reason while queued, may name the transient phase
+while syncing, in setup or reconnecting, and returns to the placement
+rationale once the command runs; a finished job's `reason` is why it
+failed when kran knows (infra error, memory cap, cancel), else the
+placement rationale (`kran jobs --why`).
 
 Queue: per-owner FIFO, owners served round-robin (weighted by priority:
 high 4, normal 2, low 1). Interactive (tty) jobs default to `high`. Every
@@ -334,9 +401,12 @@ URL with a password, `scheme://user:pass@…`) unless listed in `.kran.toml
 env.forward` or `--env NAME`. `TERM`, `COLORTERM`, `NO_COLOR`,
 `FORCE_COLOR`, `CI`, `LANG`, `LC_*` (unless the name looks like a secret),
 `TZ` are forwarded. The target sets
-`PATH` (runtime default + toolchains), `HOME` (real), `TMPDIR` (per job),
+`PATH` (runtime default + toolchains), `HOME` (native: real; container: the
+origin's home path, §6.8), `USER`/`LOGNAME`, `TMPDIR` (per job),
 `GOCACHE`/`GOMODCACHE`/`npm_config_store_dir` (node-shared caches),
 `KRAN_JOB_ID`, `KRAN_NODE`, `KRAN_ORIGIN`, `KRAN_ORIGIN_ROOT`.
+The origin daemon adds `origin_env` to every job it submits: its user name,
+home directory, time zone (IANA name) and native toolchain versions.
 
 ### 6.6 Estimates (`internal/estimate`)
 
@@ -347,7 +417,33 @@ wall seconds, p90 peak memory (last 20 runs), and per (fingerprint, node)
 speed ratio. Unknown job defaults: by command family (`go test`: cpu = min(8,
 cores), mem 4 GiB; `go build`/`go vet`: 4/2 GiB; `next build`: 4/6 GiB;
 `vitest`/`jest`: 4/4 GiB; `tsc`: 2/3 GiB; `pytest`: 2/2 GiB; `docker build`:
-4/4 GiB; `cargo`: 8/4 GiB; other: 1/1 GiB). Explicit flags and rules win.
+4/4 GiB; `cargo`: 8/4 GiB; other: 1/1 GiB).
+
+Between the two sits a learned **repo-family tier**: agents rarely repeat a
+command exactly, but "go test in this repo" has plenty of history. Per (repo
+ID, family; `-race` is its own variant of `go test`/`go build`; not for
+"other") the last 24 runs are kept (at most 64 groups, least recently
+updated dropped, persisted in the store's KV). From 3 runs on, each quantity
+replaces the family default, blended with it in log space (the default
+counts as 2 runs, 5 for memory):
+* duration: mean of the runs with the outer 10% clamped (median below 5);
+* cpu: that mean of cpu-seconds/wall × 1.5, at most 1.2 × the most any run
+  used, at least 0.5; a container run that used ≥ 85% of its `--cpus` cap
+  counts as 1.5 × its use, so a low allocation can grow;
+* memory: the largest peak (p90 from 10 runs) × 1.25, and at least 0.6 ×
+  the largest peak, so every peak seen stays under the job's cap (§6.8).
+
+Which runs teach what: successful runs everything; failed runs memory, and
+duration/cpu only when they ran at least half the expected duration (the
+best estimate available: fingerprint, then repo-family, then default) —
+and, for the repo-family tier, at most 4 × its usual duration (a hang);
+canceled and lost runs only memory, at most.
+
+Explicit flags and rules set only what they give (`--cpus`, `--mem`);
+everything else still comes from history and defaults. `Estimate.Source`
+says where cpu/mem came from (`learned`, `repo:<family>`,
+`family:<family>`, `flag`, `rule`), `duration_source` where the duration
+came from, `repo_samples` how many runs a `repo:` estimate rests on.
 Usage is measured per job: Linux cgroup (`memory.peak`, `cpu.stat`),
 container (`docker stats` sampling / cgroup), macOS (1 s sampling of the
 process tree RSS + CPU time).
@@ -364,7 +460,7 @@ process tree RSS + CPU time).
   Symlinks preserved as symlinks (never followed out of the workspace).
   Without git: walk with the same hard excludes + `.gitignore` parsing.
 * Manifest entry: path, mode, size, mtime (ns), sha256 (hash cache keyed by
-  dev+inode+size+mtime+ctime in sqlite, so a re-scan of an unchanged 30k-file
+  dev+inode+size+mtime+ctime in a per-worktree cache file, so a re-scan of an unchanged 30k-file
   repo is < 300 ms).
 * Target: `blobs/<sha[:2]>/<sha>` content-addressed store (shared by all
   repos), `slots/<repoID>/<n>/` working dirs. A job takes a free slot of its
@@ -375,6 +471,16 @@ process tree RSS + CPU time).
   the manifest, except dependency and cache dirs that setup or the tools
   maintain themselves (`keep`, default: `node_modules/`, `.next/cache/`,
   `target/`, `.venv/`, `.turbo/`, `.pnpm-store/`). Then set modes + mtimes.
+* Unchanged syncs are cheap (30k files: well under a second): the target
+  scans the slot once per sync (directories listed in parallel, only
+  manifest paths stat'ed) and, when its blob store already holds every
+  file the slot lacks, updates the slot during `slot.diff` and answers
+  `committed` (the origin then skips `slot.commit`). Slots in the Docker
+  volume take one sync-helper run for that (`docker exec`, op `sync`).
+  The manifest travels in a compact binary encoding (`proto.EncodeManifest`;
+  its SHA-256 names it), and once the target holds the manifest this
+  origin last synced from the same worktree, only as a delta against it,
+  or not at all when unchanged (§8.3).
 * Container runtime: slots live in Docker volume `kran-slots` and are
   mounted into the job container **at the origin's absolute path** (volume
   subpath mount), so absolute paths in tests behave identically. Native
@@ -397,18 +503,54 @@ process tree RSS + CPU time).
   satisfies the workspace's pin, else `mise exec tool@ver --` if mise exists,
   else ineligible with reason.
 * `container`: image `kran-runner:<kran version>` built on the node from an
-  embedded Dockerfile (debian stable-slim, git, build-essential,
-  ca-certificates, curl, unzip, xz, pkg-config, mise). Built lazily by the
+  embedded Dockerfile and `kran-init` (debian stable-slim, git,
+  build-essential, ca-certificates, curl, unzip, xz, pkg-config, locales with
+  common UTF-8 locales prebuilt, tzdata, setpriv, mise; git trusts every
+  directory). Built lazily by the
   first container job (phase `setup`, "preparing the Linux runtime (first
   use, ~30 s)"), one build at a time; until then the runtime reports
   `first_use` but counts as available whenever Docker is reachable. A job
   that gives up waiting falls back as any prestart failure; the build goes
-  on. The reaper removes `kran-runner` images of other kran versions. Toolchains via mise
-  into volume `kran-tools`; caches in volume `kran-cache`
-  (GOCACHE, GOMODCACHE, pnpm store, npm cache, uv cache, mise). Job =
-  `docker run --rm --init --network host --name kran-job-<id> --label
-  kran.job=<id> --memory <cap> --cpus <n> -v /var/run/docker.sock:… -e …
-  -w <origin cwd> --user <uid>:<gid>`. The Docker socket is available so
+  on. The reaper removes `kran-runner` images of other kran versions.
+  **Toolchains** via mise into volume `kran-tools`, lazily: the job's mise
+  global config lists the origin's native version of every tool kran knows
+  (go, node, python — same minor, as distribution pythons are patch
+  releases mise cannot verify — pnpm, yarn, bun, deno, rust, uv), overridden
+  by the workspace's pins (§6.7 detection: `.tool-versions`, mise config,
+  `.nvmrc`/`.node-version`, `.python-version`, `go.mod`, `packageManager`,
+  `engines`; a pin the origin's version satisfies keeps that exact version).
+  The repo's own mise config, read by mise itself, wins over the global one.
+  `PATH` starts with a shim for each binary of those tools only (`node`,
+  `npm`, `go`, `python3`, …); the first call installs that tool's version
+  (mise locks the install, so concurrent jobs share it) and later calls run
+  it from the volume (~10 ms). mise's own shim directory is not on `PATH`, so
+  a tool neither the origin nor the repo has is "not found", never "No
+  version is set". Pinned tools kran has no shims for run via `mise exec
+  tool@ver --`. Caches in volume `kran-cache` (GOCACHE, GOMODCACHE, pnpm
+  store, npm cache, uv cache, mise). Job = `docker run --rm --init --network
+  host --name kran-job-<id> --label kran.job=<id> --memory <cap> --cpus <n>
+  --shm-size <cap/2, 2 GiB uncapped> --ulimit nofile=65536:524288 (not on
+  rootless Docker) -v /var/run/docker.sock:… -e … -w <origin cwd> --user 0:0
+  --entrypoint kran-init --cap-drop ALL --cap-add SETUID,SETGID,KILL
+  --security-opt no-new-privileges`. **kran-init** runs as root only to
+  describe the job's machine, then `setpriv`s to the node's `<uid>:<gid>`
+  (plus the Docker socket's group) for good: it writes a passwd entry for
+  the uid named like the origin's user with `HOME` as its home (and a group
+  entry for the gid), the mise config and shims, `/etc/localtime` for the
+  origin's time zone (`TZ` itself is only what the origin forwarded), builds
+  a missing UTF-8 locale named in `LANG`/`LC_*` (≈1 s; one that cannot exist,
+  like macOS's `LC_CTYPE=UTF-8`, becomes `C.UTF-8`) and unsets CA bundle and
+  SDK path variables (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `JAVA_HOME`,
+  `VIRTUAL_ENV`, …) that name files missing in the container. Its inputs
+  come as `KRAN_INIT_*` variables, validated in kran and again in the script,
+  and are unset before the job starts. `HOME` is the origin's home path, a
+  mount of the node's persistent container home (`kran-cache`, subpath
+  `home`); `/kran/cache/home` when that path cannot be mounted (Docker < 26,
+  a reserved path, or inside the workspace) and the workspace itself when
+  it is the home directory. `USER`/`LOGNAME` match the passwd entry. The
+  origin's `DOCKER_HOST` (unix sockets), `DOCKER_CONTEXT`, `DOCKER_CONFIG`
+  and `DOCKER_CERT_PATH` are dropped: the job's Docker is the mounted
+  socket. The Docker socket is available so
   testcontainers / `docker compose` in tests work (not with `.kran.toml
   docker = false` or `kran run --no-docker`); host networking makes
   `localhost:<published port>` work as on Linux. The slot sync helper lives
@@ -480,6 +622,19 @@ target side delegates to `execenv.Manager` (§10). Methods: `hello`,
 `job.cancel`, `slot.release`, `mesh.peers`. Version negotiation in `hello`
 (major must match; minor may differ).
 
+Workspace sync (protocol 1.1, `internal/daemon/syncproto.go`): a 1.1
+target adds `"sync": 1` to its `slot.acquire` answer. The origin then
+sends a `slot.diff` body `{format, hash, base}`: `kmf1` (the compact
+manifest, zstd), `kmd1` (a delta against manifest `base`, zstd) or `same`
+(no data; `base` = `hash`). The target keeps recent manifests by origin
+and hash (it hashes them itself; an origin can only refer to its own) and
+answers code `manifest_base` when it lacks the base or the result does not
+hash to `hash`; the origin then sends `kmf1`. `SyncPlan.committed` tells
+the origin the slot is already up to date. A 1.0 target (no `sync`) gets
+zstd JSON and `slot.commit` as before; a 1.0 origin's body-less
+`slot.diff` is read as JSON and its `slot.commit` after a committing diff
+is a no-op.
+
 ## 9. Security
 
 * No listening TCP except the UI on loopback (default). The API on that
@@ -494,7 +649,11 @@ target side delegates to `execenv.Manager` (§10). Methods: `hello`,
 * Secrets never synced (§6.7) nor forwarded (§6.5) by default.
 * Jobs run as the node's user, never root; the daemon refuses to run as
   root (`kran daemon --allow-root` overrides) and `kran service install`
-  never installs one that would.
+  never installs one that would. A container job starts as root in its own
+  container only for kran-init (§6.8), with no capabilities but SETUID,
+  SETGID and KILL, under `no-new-privileges`; it writes only the
+  container's own `/etc` and image files, never the mounted volumes, and the
+  job's process has no capabilities and cannot regain any.
 * **Container jobs get the Docker socket by default**, so testcontainers and
   `docker compose` work. With rootful Docker (Linux without rootless mode)
   that is root-equivalent on the node: a job can start a privileged
