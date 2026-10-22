@@ -290,8 +290,17 @@ type Estimate struct {
 	CPUs     float64 `json:"cpus"`
 	Mem      int64   `json:"mem"`
 	Duration float64 `json:"duration_s"`
-	Samples  int     `json:"samples"` // 0 = default for the command family
-	Source   string  `json:"source"`  // "learned" | "family:go-test" | "flag" | "rule"
+	Samples  int     `json:"samples"` // runs of this fingerprint behind it; 0 = none
+	// Source is where cpu/mem came from: "learned" (this fingerprint's
+	// runs), "repo:go-test" (runs of the family in this repo),
+	// "family:go-test" (static default), "flag" or "rule".
+	Source string `json:"source"`
+	// DurationSource is where Duration came from ("learned",
+	// "repo:go-test", "family:go-test"): flags and rules set only cpu/mem.
+	DurationSource string `json:"duration_source,omitempty"`
+	// RepoSamples counts the runs of the job's family in its repo that a
+	// "repo:" estimate (or duration) is built from.
+	RepoSamples int `json:"repo_samples,omitempty"`
 }
 
 type Usage struct {

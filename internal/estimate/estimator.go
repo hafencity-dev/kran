@@ -44,11 +44,13 @@ type Options struct {
 // NewWithOptions is New with node-aware priors. st may be nil (estimates are
 // then kept in memory only).
 func NewWithOptions(st store.Store, opts Options) Estimator {
-	e := &estimator{st: st, opts: opts, cache: map[string]*fpEntry{}, famSpeed: map[string]map[string]*ewma{}}
+	e := &estimator{st: st, opts: opts, cache: map[string]*fpEntry{}, famSpeed: map[string]map[string]*ewma{},
+		groups: map[string]*group{}}
 	if e.opts.Logf == nil {
 		e.opts.Logf = func(string, ...any) {}
 	}
 	e.loadFamilySpeed()
+	e.loadGroups()
 	return e
 }
 
@@ -58,14 +60,21 @@ type estimator struct {
 	st   store.Store
 	opts Options
 
-	mu    sync.Mutex
-	cache map[string]*fpEntry
-	tick  uint64 // LRU clock
+	mu sync.Mutex
+	// saveMu orders KV writes of the repo-family tier: the last write
+	// holds the newest state.
+	saveMu sync.Mutex
+	cache  map[string]*fpEntry
+	tick   uint64 // LRU clock
 	// famSpeed[family][node] is the duration ratio node/origin learned
 	// across all fingerprints of a family: a better prior for a new
 	// fingerprint than the CPU benchmark.
 	famSpeed map[string]map[string]*ewma
 	self     string
+	// groups is the repo-family tier (group.go), keyed by groupID.
+	groups      map[string]*group
+	groupSeq    uint64
+	groupsDirty bool
 }
 
 type fpEntry struct {
@@ -140,38 +149,60 @@ func (e *estimator) evict() {
 	delete(e.cache, oldest)
 }
 
-// Estimate: explicit requirements win, then learned values, then the
+// Estimate: explicit requirements win for what they set (cpu, mem); every
+// other quantity comes from the most specific history that has it: this
+// fingerprint's runs, then the family's runs in this repo, then the
 // command family's defaults scaled to nodeCPUs.
 func (e *estimator) Estimate(spec *proto.JobSpec, fp string, nodeCPUs int) proto.Estimate {
-	fam := family(spec.Argv)
-	if spec.Shell != "" {
-		fam = shellFamily(spec.Shell)
-	}
+	fam, words := specFamily(spec)
 	est := e.familyEstimate(spec, fam, nodeCPUs)
+	prior := familyDefault{CPUs: est.CPUs, Mem: est.Mem, Duration: est.Duration}
+	durSource := est.Source
 
 	if fp == "" {
 		fp = fingerprint(spec)
 	}
+	variant := variantOf(fam, words)
 	e.mu.Lock()
 	en := e.entry(fp)
 	en.family = fam
 	learned := e.learn(en.samples, fam)
+	ge := e.groups[e.groupIDOf(spec, fam, variant)].estimate(prior)
 	e.mu.Unlock()
 
+	capCPUs := func(c float64) float64 {
+		if nodeCPUs > 0 && c > float64(nodeCPUs) {
+			return float64(nodeCPUs)
+		}
+		return c
+	}
+	if ge.duration > 0 || ge.cpus > 0 || ge.mem > 0 {
+		est.Source = "repo:" + variant
+		est.RepoSamples = ge.runs
+		if ge.duration > 0 {
+			est.Duration = ge.duration
+			durSource = est.Source
+		}
+		if ge.cpus > 0 {
+			est.CPUs = capCPUs(ge.cpus)
+		}
+		if ge.mem > 0 {
+			est.Mem = ge.mem
+		}
+	}
 	if learned.samples > 0 {
 		est.Samples = learned.samples
 		est.Source = "learned"
 		if learned.haveRun {
 			est.Duration = learned.duration
-			est.CPUs = learned.cpus
-			if nodeCPUs > 0 && est.CPUs > float64(nodeCPUs) {
-				est.CPUs = float64(nodeCPUs)
-			}
+			durSource = "learned"
+			est.CPUs = capCPUs(learned.cpus)
 		}
 		if learned.mem > 0 {
 			est.Mem = learned.mem
 		}
 	}
+	est.DurationSource = durSource
 
 	explicit := false
 	if spec.Req.CPUs > 0 {
@@ -193,6 +224,23 @@ func (e *estimator) Estimate(spec *proto.JobSpec, fp string, nodeCPUs int) proto
 		est.Mem = minMem
 	}
 	return est
+}
+
+// specFamily returns the job's family and the words it was derived from.
+func specFamily(spec *proto.JobSpec) (string, []string) {
+	if spec.Shell != "" {
+		return shellFamily(spec.Shell), shellWords(spec.Shell)
+	}
+	return family(spec.Argv), spec.Argv
+}
+
+// groupIDOf is the repo-family group of a job; "" for the catch-all
+// family, whose members have nothing in common.
+func (e *estimator) groupIDOf(spec *proto.JobSpec, fam, variant string) string {
+	if fam == "other" {
+		return ""
+	}
+	return groupID(spec.Workspace.RepoID, variant)
 }
 
 // LabelReqSource is the job label the CLI sets to "rule" when Req.CPUs/Mem
@@ -377,10 +425,11 @@ func (e *estimator) Observe(job *proto.Job) {
 	if job.Local || node == "" {
 		node = job.Origin
 	}
-	fam := family(job.Spec.Argv)
-	if job.Spec.Shell != "" {
-		fam = shellFamily(job.Spec.Shell)
-	}
+	fam, words := specFamily(&job.Spec)
+	variant := variantOf(fam, words)
+	gid := e.groupIDOf(&job.Spec, fam, variant)
+	pd := e.familyEstimate(&job.Spec, fam, 0)
+	prior := familyDefault{CPUs: pd.CPUs, Mem: pd.Mem, Duration: pd.Duration}
 	s := store.Sample{
 		Fingerprint: fp, Node: node, Origin: job.Origin, Family: fam,
 		CPUSeconds: u.CPUSeconds, PeakMem: u.PeakMem, WallSeconds: u.WallSeconds,
@@ -396,11 +445,22 @@ func (e *estimator) Observe(job *proto.Job) {
 	}
 	en := e.entry(fp)
 	en.family = fam
+	sp := e.speedLocked(fp, node, en.samples, fam)
 	switch job.State {
 	case proto.JobSucceeded:
 	case proto.JobFailed:
-		l := e.learn(en.samples, fam)
-		if !l.haveRun || u.WallSeconds < 0.5*l.duration*e.speedLocked(fp, node, en.samples, fam) {
+		// A run that failed about as late as a run usually takes (a
+		// failing test in a full suite) teaches duration like a success;
+		// one that failed early (does not compile, OOM kill) only memory.
+		// "Usually" is the best estimate there is: this fingerprint's
+		// runs, else its family's in this repo, else the static default.
+		expected := prior.Duration
+		if l := e.learn(en.samples, fam); l.haveRun {
+			expected = l.duration
+		} else if ge := e.groups[gid].estimate(prior); ge.duration > 0 {
+			expected = ge.duration
+		}
+		if u.WallSeconds < 0.5*expected*sp {
 			s.CPUSeconds, s.WallSeconds = 0, 0
 		}
 	default:
@@ -410,6 +470,26 @@ func (e *estimator) Observe(job *proto.Job) {
 		e.mu.Unlock()
 		return
 	}
+	gr := groupRun{M: s.PeakMem}
+	wall, cpuSec := s.WallSeconds, s.CPUSeconds
+	if job.State == proto.JobFailed {
+		// A failed run far longer than the family's usual hung or hit a
+		// timeout. It stays in this fingerprint's history (the job may
+		// just be slow) but does not speak for the family.
+		if ge := e.groups[gid].estimate(prior); ge.duration > 0 && wall > failedHangFactor*ge.duration*sp {
+			wall, cpuSec = 0, 0
+		}
+	}
+	if wall > 0 {
+		gr.W = wall / sp // origin-equivalent seconds
+		if cpuSec > 0 && wall >= minCPUWall {
+			gr.C = cpuSec / wall
+			// Only container jobs run under a CPU cap (docker --cpus).
+			gr.Capped = !job.Local && job.Runtime == proto.RuntimeContainer &&
+				job.Alloc.CPUs > 0 && gr.C >= cpuCappedShare*job.Alloc.CPUs
+		}
+	}
+	e.addGroupRunLocked(gid, variant, gr)
 	e.updateFamilySpeedLocked(s, en.samples)
 	en.samples = append([]store.Sample{s}, en.samples...)
 	if len(en.samples) > window {
@@ -429,6 +509,7 @@ func (e *estimator) Observe(job *proto.Job) {
 				e.opts.Logf("estimate: save speeds: %v", err)
 			}
 		}
+		e.saveGroups(ctx)
 	}
 }
 

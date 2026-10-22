@@ -318,7 +318,33 @@ wall seconds, p90 peak memory (last 20 runs), and per (fingerprint, node)
 speed ratio. Unknown job defaults: by command family (`go test`: cpu = min(8,
 cores), mem 4 GiB; `go build`/`go vet`: 4/2 GiB; `next build`: 4/6 GiB;
 `vitest`/`jest`: 4/4 GiB; `tsc`: 2/3 GiB; `pytest`: 2/2 GiB; `docker build`:
-4/4 GiB; `cargo`: 8/4 GiB; other: 1/1 GiB). Explicit flags and rules win.
+4/4 GiB; `cargo`: 8/4 GiB; other: 1/1 GiB).
+
+Between the two sits a learned **repo-family tier**: agents rarely repeat a
+command exactly, but "go test in this repo" has plenty of history. Per (repo
+ID, family; `-race` is its own variant of `go test`/`go build`; not for
+"other") the last 24 runs are kept (at most 64 groups, least recently
+updated dropped, persisted in the store's KV). From 3 runs on, each quantity
+replaces the family default, blended with it in log space (the default
+counts as 2 runs, 5 for memory):
+* duration: mean of the runs with the outer 10% clamped (median below 5);
+* cpu: that mean of cpu-seconds/wall × 1.5, at most 1.2 × the most any run
+  used, at least 0.5; a container run that used ≥ 85% of its `--cpus` cap
+  counts as 1.5 × its use, so a low allocation can grow;
+* memory: the largest peak (p90 from 10 runs) × 1.25, and at least 0.6 ×
+  the largest peak, so every peak seen stays under the job's cap (§6.8).
+
+Which runs teach what: successful runs everything; failed runs memory, and
+duration/cpu only when they ran at least half the expected duration (the
+best estimate available: fingerprint, then repo-family, then default) —
+and, for the repo-family tier, at most 4 × its usual duration (a hang);
+canceled and lost runs only memory, at most.
+
+Explicit flags and rules set only what they give (`--cpus`, `--mem`);
+everything else still comes from history and defaults. `Estimate.Source`
+says where cpu/mem came from (`learned`, `repo:<family>`,
+`family:<family>`, `flag`, `rule`), `duration_source` where the duration
+came from, `repo_samples` how many runs a `repo:` estimate rests on.
 Usage is measured per job: Linux cgroup (`memory.peak`, `cpu.stat`),
 container (`docker stats` sampling / cgroup), macOS (1 s sampling of the
 process tree RSS + CPU time).
