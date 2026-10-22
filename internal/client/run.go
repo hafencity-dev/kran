@@ -144,7 +144,17 @@ func (s *runSession) Send(t proto.FrameType, payload []byte) error {
 	}
 	// A daemon that stops reading must not block the CLI forever.
 	s.conn.SetWriteDeadline(time.Now().Add(s.recvTimeout))
-	return proto.WriteFrame(s.conn, t, payload)
+	if err := proto.WriteFrame(s.conn, t, payload); err != nil {
+		// The frame may be half written: anything sent after it would be
+		// parsed out of step. The session is dead (Recv fails too); the
+		// CLI reconnects and reattaches.
+		s.once.Do(func() {
+			close(s.closed)
+			s.conn.Close()
+		})
+		return err
+	}
+	return nil
 }
 
 func (s *runSession) SendJSON(t proto.FrameType, v any) error {
