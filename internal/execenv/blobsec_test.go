@@ -47,7 +47,7 @@ func TestDriveApplyRejectsUnknownNeed(t *testing.T) {
 			opened = true
 			return io.NopCloser(strings.NewReader("a")), 1, nil
 		}
-		if _, _, err := driveApply(context.Background(), io.Discard, &reply, applyReq{Op: "commit", Slot: "r/0", Manifest: m}, open); err == nil || opened {
+		if _, _, err := driveApply(context.Background(), io.Discard, &reply, applyReq{Op: "commit", Slot: "r/0", Manifest: m}, open, nil); err == nil || opened {
 			t.Fatalf("need %q: err=%v opened=%v", need, err, opened)
 		}
 	}
