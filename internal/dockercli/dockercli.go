@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -76,10 +77,41 @@ func Find(pathEnv, home string) string {
 	return ""
 }
 
-// FindHere is Find with this process's PATH and home directory.
+// FindHere is Find with this process's PATH and home directory, then the
+// user's login shell (a daemon under launchd or systemd does not see what
+// ~/.zprofile adds to PATH). The login-shell answer is cached.
 func FindHere() string {
 	home, _ := os.UserHomeDir()
-	return Find(os.Getenv("PATH"), home)
+	if p := Find(os.Getenv("PATH"), home); p != "" {
+		return p
+	}
+	loginOnce.Do(func() { loginDocker = fromLoginShell(os.Getenv("SHELL")) })
+	return loginDocker
+}
+
+var (
+	loginOnce   sync.Once
+	loginDocker string
+)
+
+// fromLoginShell asks the login shell where docker is ("" if nowhere).
+func fromLoginShell(shell string) string {
+	if shell == "" || !filepath.IsAbs(shell) {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, shell, "-lc", "command -v docker")
+	cmd.Stdin = nil
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	p := strings.TrimSpace(string(out))
+	if !filepath.IsAbs(p) || !isExecutable(p) {
+		return ""
+	}
+	return p
 }
 
 // Endpoint picks the Docker endpoint: $DOCKER_HOST wins; then the CLI's

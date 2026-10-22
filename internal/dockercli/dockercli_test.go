@@ -92,3 +92,20 @@ func TestEndpoint(t *testing.T) {
 		})
 	}
 }
+
+func TestFromLoginShell(t *testing.T) {
+	dir := t.TempDir()
+	docker := filepath.Join(dir, "docker")
+	writeExe(t, docker)
+	shell := filepath.Join(dir, "fakesh")
+	// A "login shell" that knows a PATH the daemon does not.
+	if err := os.WriteFile(shell, []byte("#!/bin/sh\nPATH="+dir+":$PATH\nshift\nexec /bin/sh -c \"$1\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := fromLoginShell(shell); got != docker {
+		t.Fatalf("got %q, want %q", got, docker)
+	}
+	if got := fromLoginShell("sh"); got != "" {
+		t.Fatalf("relative shell: %q", got)
+	}
+}
