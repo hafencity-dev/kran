@@ -5,6 +5,10 @@ import (
 	"os"
 
 	"github.com/hafencity-dev/kran/internal/cli"
+	"github.com/hafencity-dev/kran/internal/tui"
 )
 
-func main() { os.Exit(cli.Main(os.Args)) }
+func main() {
+	cli.DefaultHooks.Top = tui.Run
+	os.Exit(cli.Main(os.Args))
+}
