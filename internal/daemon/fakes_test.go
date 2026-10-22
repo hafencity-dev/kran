@@ -418,10 +418,10 @@ type fakeExec struct {
 	// endBeforeStart: Start succeeds but the job ends with this exit
 	// without running the command (setup failed, command not found …).
 	endBeforeStart *proto.Exit
-	starting    int
-	putBlobs    int
-	acquires    int
-	releases    int
+	starting       int
+	putBlobs       int
+	acquires       int
+	releases       int
 }
 
 func newFakeExec(node, dir string, lease time.Duration) *fakeExec {
