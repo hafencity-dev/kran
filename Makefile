@@ -23,7 +23,7 @@ endif
 PREFIX ?= $(HOME)/.local/bin
 PLATFORMS := linux/arm64 linux/amd64 darwin/arm64 darwin/amd64
 
-.PHONY: help build test lint ui release-snapshot install smoke chaos clean
+.PHONY: help build test fmt-check lint ui release-snapshot install smoke chaos clean
 
 help: ## list targets
 	@grep -E "^[a-z-]+:.*## " $(MAKEFILE_LIST) | sed "s/:.*## /\t/" | sort
@@ -35,8 +35,12 @@ build: ## build bin/kran for this machine
 test: ## go test -race, gently
 	nice -n 10 go test -race -p 4 ./...
 
-lint: ## gofmt, vet for linux and darwin, staticcheck when installed
-	@out=$$(gofmt -l .); if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
+# third_party holds vendored forks kept byte-identical to upstream.
+fmt-check: ## fail when a Go file needs gofmt
+	@out=$$(gofmt -l $$(find . -name '*.go' -not -path './third_party/*' -not -path './web/*')); \
+	if [ -n "$$out" ]; then echo "gofmt needed (run gofmt -w on these):"; echo "$$out"; exit 1; fi
+
+lint: fmt-check ## gofmt, vet for linux and darwin, staticcheck when installed
 	GOOS=linux go vet ./...
 	GOOS=darwin go vet ./...
 	@if command -v staticcheck >/dev/null 2>&1; then staticcheck ./...; else echo "staticcheck not installed, skipped"; fi
