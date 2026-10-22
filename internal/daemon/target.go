@@ -99,6 +99,27 @@ func (t *targetSide) restore() {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	active := map[string]bool{}
+	held := map[proto.SlotRef]bool{}
+	slotsKnown := true
+	for _, id := range ex.Active() {
+		active[id] = true
+		if r, ok := recs[id]; ok && r.Slot != nil {
+			held[*r.Slot] = true
+		} else {
+			slotsKnown = false
+		}
+	}
+	// A job can end between the executor's re-index (which marks its slot
+	// busy again) and this restore: it is not active any more and nobody
+	// would release its slot. Only when every active job's slot is known,
+	// so a stale record can never free a slot in use.
+	for id, r := range recs {
+		if slotsKnown && !active[id] && r.Slot != nil && !held[*r.Slot] {
+			ex.ReleaseSlot(*r.Slot)
+			t.d.logf("target: released the slot of job %s, which ended during the restart", id)
+		}
+	}
 	for _, id := range ex.Active() {
 		r := recs[id]
 		j := &tjob{ID: id, Origin: r.Origin, Alloc: r.Alloc, Runtime: r.Runtime, Slot: r.Slot, Owner: r.Owner, Argv: r.Argv,
