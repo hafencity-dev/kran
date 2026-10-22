@@ -256,3 +256,34 @@ func TestParseKVNames(t *testing.T) {
 		}
 	}
 }
+
+// The token must not travel on the browser's command line (visible to every
+// user in ps): kran ui opens a private file that redirects to the URL.
+func TestOpenUIKeepsTokenOffTheCommandLine(t *testing.T) {
+	url := "http://127.0.0.1:7270/#token=" + strings.Repeat("ab", 32)
+	var opened string
+	var mode os.FileMode
+	var content []byte
+	open := func(target string) error {
+		opened = target
+		st, err := os.Stat(strings.TrimPrefix(target, "file://"))
+		if err != nil {
+			return err
+		}
+		mode = st.Mode().Perm()
+		content, _ = os.ReadFile(strings.TrimPrefix(target, "file://"))
+		return nil
+	}
+	if err := openUI(url, open, func() {}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(opened, "token") || strings.Contains(opened, "abab") {
+		t.Fatalf("token on the command line: %q", opened)
+	}
+	if mode != 0o600 || !strings.Contains(string(content), url) || !strings.Contains(string(content), "no-referrer") {
+		t.Fatalf("mode %v content %s", mode, content)
+	}
+	if _, err := os.Stat(strings.TrimPrefix(opened, "file://")); !os.IsNotExist(err) {
+		t.Fatal("redirect file not removed")
+	}
+}
