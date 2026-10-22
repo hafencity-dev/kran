@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -785,7 +786,11 @@ func TestDiskFloorAndValidation(t *testing.T) {
 }
 
 func TestReaper(t *testing.T) {
-	te := newTestEnv(t)
+	modes(t, testReaper)
+}
+
+func testReaper(t *testing.T, opts ...mgrOpt) {
+	te := newTestEnv(t, opts...)
 	ref := te.slot(testRepo, nil, proto.RuntimeNative)
 	pids := t.TempDir()
 	p := te.start(ref, sh(fmt.Sprintf(`%s helper escapee %s/esc.pid; sleep 60`, testBinary(t), pids)))
@@ -810,6 +815,12 @@ func TestReaper(t *testing.T) {
 	if alive(esc) && !isZombie(esc) {
 		syscall.Kill(esc, syscall.SIGKILL)
 		t.Fatal("reaper left the orphaned job process alive")
+	}
+	if te.m.systemdRun != "" {
+		out, _ := exec.Command("systemctl", "--user", "is-active", te.m.scopeName(p.JobID())).Output()
+		if strings.TrimSpace(string(out)) == "active" {
+			t.Fatal("orphan scope still active")
+		}
 	}
 	// Old job dirs go, slots unused for long go, abandoned acquisitions are released.
 	te.m.tun.jobMaxAge = 0

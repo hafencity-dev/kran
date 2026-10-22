@@ -35,7 +35,9 @@ type tunables struct {
 	slotMaxIdle      time.Duration // free slots unused this long are deleted
 	slotHoldIdle     time.Duration // acquired but unused slots are released after this
 	scope            *bool         // nil: probe systemd-run; tests force a mode
-	probe            bool          // probe toolchains and docker
+	probe            bool          // probe the login shell and toolchains
+	probeDocker      bool          // look for a Docker daemon
+	forceVolume      bool          // tests: keep container slots in the volume on Linux too
 	runnerDockerfile string        // tests: a lighter image
 	memMax           int64         // tests: force this memory cap
 }
@@ -54,6 +56,7 @@ func defaultTunables() tunables {
 		slotMaxIdle:   3 * 24 * time.Hour,
 		slotHoldIdle:  30 * time.Minute,
 		probe:         true,
+		probeDocker:   true,
 	}
 }
 
@@ -250,7 +253,7 @@ func (m *manager) docker() (*dockerEnv, string) {
 // slotLocFor maps a runtime to where its slots live: container slots on a
 // macOS node live in the Docker VM's volume; everywhere else on the host.
 func (m *manager) slotLocFor(rt proto.RuntimeKind) slotLoc {
-	if rt == proto.RuntimeContainer && runtime.GOOS != "linux" {
+	if rt == proto.RuntimeContainer && (runtime.GOOS != "linux" || m.tun.forceVolume) {
 		return locVolume
 	}
 	return locHost
@@ -421,6 +424,9 @@ func (m *manager) Start(ctx context.Context, req StartRequest) (Process, error) 
 		MemMax: memCap(req.Alloc.Mem, memAvailable()), CPUs: req.Alloc.CPUs,
 		CtlPath: ctlPath(dir, id), Slot: req.Slot,
 	}
+	if m.tun.memMax > 0 {
+		spec.MemMax = m.tun.memMax
+	}
 	switch req.Runtime {
 	case proto.RuntimeNative, "":
 		spec.Runtime = proto.RuntimeNative
@@ -432,9 +438,6 @@ func (m *manager) Start(ctx context.Context, req StartRequest) (Process, error) 
 	}
 	if err != nil {
 		return nil, err
-	}
-	if m.tun.memMax > 0 {
-		spec.MemMax = m.tun.memMax
 	}
 	if spec.Runtime == proto.RuntimeNative && m.systemdRun != "" {
 		spec.Cgroup, spec.Scope = true, m.scopeName(id)

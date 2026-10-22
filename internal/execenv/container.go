@@ -84,7 +84,7 @@ func (m *manager) probeDocker(ctx context.Context) (*dockerEnv, string) {
 	if m.containerSetting() == "off" {
 		return nil, "container runtime disabled in config (runtime.container.enabled)"
 	}
-	if !m.tun.probe {
+	if !m.tun.probeDocker {
 		return nil, "docker probing disabled"
 	}
 	cli := findDockerCLI(m.env.path, m.env.home)
@@ -138,6 +138,8 @@ func normArch(a string) string {
 }
 
 // containerRuntime describes the container runtime for Runtimes().
+func (m *manager) useVolume() bool { return runtime.GOOS != "linux" || m.tun.forceVolume }
+
 func (m *manager) containerRuntime(ctx context.Context, dk *dockerEnv, reason string) (proto.Runtime, bool) {
 	rt := proto.Runtime{Kind: proto.RuntimeContainer, OS: "linux", Arch: runtime.GOARCH}
 	if dk == nil {
@@ -156,11 +158,11 @@ func (m *manager) containerRuntime(ctx context.Context, dk *dockerEnv, reason st
 	switch {
 	case dk.info.OSType != "" && dk.info.OSType != "linux":
 		rt.Reason = "Docker runs " + dk.info.OSType + " containers; kran needs Linux containers"
-	case runtime.GOOS != "linux" && !apiVersionAtLeast(dk.ver.APIVersion, 1, 45):
+	case m.useVolume() && !apiVersionAtLeast(dk.ver.APIVersion, 1, 45):
 		rt.Reason = fmt.Sprintf("Docker %s is too old: same-path workspace mounts need Docker 26 or newer", dk.ver.Version)
-	case runtime.GOOS != "linux" && m.opts.LinuxBinary == "":
+	case m.useVolume() && m.opts.LinuxBinary == "":
 		rt.Reason = "no Linux kran binary for the sync helper; run `kran upgrade` to fetch it"
-	case runtime.GOOS != "linux" && checkFile(m.opts.LinuxBinary) != nil:
+	case m.useVolume() && checkFile(m.opts.LinuxBinary) != nil:
 		rt.Reason = fmt.Sprintf("Linux kran binary %s is missing; run `kran upgrade`", m.opts.LinuxBinary)
 	default:
 		rt.Available = true
@@ -239,7 +241,7 @@ func (m *manager) ensureContainerReady(ctx context.Context, onPhase func(proto.P
 		}
 		dk.ready = true
 	}
-	if runtime.GOOS != "linux" {
+	if m.useVolume() {
 		if err := m.ensureSync(ctx, dk); err != nil {
 			return err
 		}
@@ -304,7 +306,7 @@ func flockCtx(ctx context.Context, f *os.File) error {
 // the Docker socket inside the Docker host so jobs can use it.
 func (m *manager) prepareVolumes(ctx context.Context, dk *dockerEnv) error {
 	vols := []string{"cache", "tools"}
-	if runtime.GOOS != "linux" {
+	if m.useVolume() {
 		vols = append(vols, "slots")
 	}
 	args := []string{"run", "--rm", "--user", "0", "--label", "kran.ns=" + m.ns,

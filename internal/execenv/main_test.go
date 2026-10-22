@@ -28,7 +28,16 @@ func TestMain(m *testing.M) {
 	if len(os.Args) >= 3 && os.Args[1] == "helper" {
 		os.Exit(helper(os.Args[2], os.Args[3:]))
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	if os.Getenv("KRAN_TEST_DOCKER") == "1" && os.Getenv("KRAN_TEST_KEEP_IMAGE") != "1" {
+		// The runner image is the only Docker resource that outlives a
+		// test; drop it so test runs leave nothing behind.
+		exec.Command(dockerCLIForTests(), "image", "rm", "--force", "kran-test-runner:dev").Run()
+	}
+	if applyBin.path != "" {
+		os.RemoveAll(filepath.Dir(applyBin.path))
+	}
+	os.Exit(code)
 }
 
 func helper(mode string, args []string) int {
