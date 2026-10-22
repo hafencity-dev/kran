@@ -1,0 +1,82 @@
+package agents
+
+import (
+	"encoding/json"
+	"io"
+	"os"
+)
+
+// hookInput is the part of Claude Code's PreToolUse payload we care about.
+// Docs: https://code.claude.com/docs/en/hooks (PreToolUse input and decision control).
+type hookInput struct {
+	ToolName  string                     `json:"tool_name"`
+	ToolInput map[string]json.RawMessage `json:"tool_input"`
+}
+
+type hookOutput struct {
+	HookSpecificOutput hookSpecific `json:"hookSpecificOutput"`
+}
+
+type hookSpecific struct {
+	HookEventName string `json:"hookEventName"`
+	// UpdatedInput replaces the ENTIRE tool input, so it carries every field
+	// of the original (description, timeout, …) next to the new command.
+	UpdatedInput map[string]json.RawMessage `json:"updatedInput"`
+	// No permissionDecision on purpose: kran must not approve commands on the
+	// user's behalf. The user's normal permission flow still applies, now
+	// evaluated against the wrapped command. Verified with claude 2.1.308
+	// (`claude -p --settings`): updatedInput is applied without a decision.
+	AdditionalContext string `json:"additionalContext,omitempty"`
+}
+
+const hookContext = "kran moved this command: it ran as `kran run --sh '…'`. Output and exit code are the command's own; a `kran:` line on stderr is kran talking; exit 125 means kran itself failed (retry with `kran run --local --sh '…'`)."
+
+// HookClaude implements `kran hook claude`, a Claude Code PreToolUse hook. It
+// reads the hook payload from in and, for heavy Bash commands that are safe
+// to move, writes an updatedInput that wraps the command in `kran run --sh`.
+// For everything else it prints nothing. It always returns 0: a hook must
+// never be the reason a tool call fails.
+func HookClaude(in io.Reader, out io.Writer, kranPath string) int {
+	if os.Getenv("KRAN_NO_HOOK") != "" {
+		return 0
+	}
+	raw, err := io.ReadAll(io.LimitReader(in, 4<<20))
+	if err != nil {
+		return 0
+	}
+	var h hookInput
+	if json.Unmarshal(raw, &h) != nil || h.ToolName != "Bash" || h.ToolInput == nil {
+		return 0
+	}
+	var cmd string
+	if json.Unmarshal(h.ToolInput["command"], &cmd) != nil {
+		return 0
+	}
+	var bg bool
+	if b, ok := h.ToolInput["run_in_background"]; ok && json.Unmarshal(b, &bg) == nil && bg {
+		return 0
+	}
+	wrapped, ok := wrapWith(kranPath, cmd)
+	if !ok {
+		return 0
+	}
+	enc, err := json.Marshal(wrapped)
+	if err != nil {
+		return 0
+	}
+	upd := make(map[string]json.RawMessage, len(h.ToolInput))
+	for k, v := range h.ToolInput {
+		upd[k] = v
+	}
+	upd["command"] = enc
+	b, err := json.Marshal(hookOutput{hookSpecific{
+		HookEventName:     "PreToolUse",
+		UpdatedInput:      upd,
+		AdditionalContext: hookContext,
+	}})
+	if err != nil {
+		return 0
+	}
+	_, _ = out.Write(append(b, '\n'))
+	return 0
+}
