@@ -51,6 +51,8 @@ func testTiming() Timing {
 	t.PrestartTimeout = 10 * time.Second
 	t.KillGrace = 300 * time.Millisecond
 	t.CLIDropGrace = 2 * time.Second
+	t.StdinWindow = 64 << 10
+	t.StdinQueue = 256 << 10
 	return t
 }
 
@@ -118,6 +120,9 @@ type testNode struct {
 	rsched scheduler.Scheduler
 	cancel context.CancelFunc
 	done   chan error
+	// stopped is closed when the last stop finished; start waits for it,
+	// so a restart never races the old daemon's socket.
+	stopped chan struct{}
 }
 
 type cluster struct {
@@ -172,6 +177,12 @@ func newCluster(t *testing.T, names ...string) *cluster {
 
 func (n *testNode) start() *Daemon {
 	n.t.Helper()
+	n.mu.Lock()
+	stopped := n.stopped
+	n.mu.Unlock()
+	if stopped != nil {
+		<-stopped
+	}
 	sched := newFakeSched(n.name, n.place)
 	var dialer PeerDialer = memDialer{n.net, n.name}
 	if n.dialer != nil {
@@ -238,10 +249,15 @@ func (n *testNode) stop() {
 	n.mu.Lock()
 	cancel, done := n.cancel, n.done
 	n.cancel = nil
+	stopped := make(chan struct{})
+	if cancel != nil {
+		n.stopped = stopped
+	}
 	n.mu.Unlock()
 	if cancel == nil {
 		return
 	}
+	defer close(stopped)
 	n.net.Unlisten(n.name)
 	start := time.Now()
 	cancel()
@@ -390,16 +406,18 @@ func runCLIInto(ctx context.Context, sock string, spec proto.JobSpec, o cliOpts,
 	if err != nil {
 		return err
 	}
-	if o.stdin != nil {
-		go func() {
-			rs.Send(proto.FrameStdin, o.stdin)
-			rs.Send(proto.FrameStdinEOF, nil)
-		}()
+	// Input as kran run sends it: within the credit, again from Resume.
+	in := &harnessInput{data: o.stdin, rs: rs}
+	if o.reattach != nil {
+		in.started = true // nothing goes out before the daemon's credit
 	}
 	for {
 		t, p, err := rs.Recv()
 		if err != nil {
 			return err
+		}
+		if o.stdin != nil {
+			in.onFrame(t, p)
 		}
 		if o.hook != nil {
 			if err := o.hook(rs, t, p, res); err != nil {
@@ -448,6 +466,58 @@ func runCLIInto(ctx context.Context, sock string, spec proto.JobSpec, o cliOpts,
 			continue
 		}
 		res.mu.Unlock()
+	}
+}
+
+// harnessInput is the test CLI's stdin: everything is kept, so any resume
+// can be served.
+type harnessInput struct {
+	data    []byte
+	rs      client.RunSession
+	sent    int
+	limit   int64 // -1: no limit
+	started bool
+	eofSent bool
+}
+
+func (in *harnessInput) onFrame(t proto.FrameType, p []byte) {
+	switch t {
+	case proto.FrameDecision:
+		var dc proto.Decision
+		json.Unmarshal(p, &dc)
+		if dc.Mode != "remote" || in.started {
+			return
+		}
+		in.started = true
+		in.limit = dc.StdinLimit
+		if in.limit == 0 {
+			in.limit = -1 // a daemon without flow control
+		}
+	case proto.FrameStdinCredit:
+		var c proto.StdinCredit
+		json.Unmarshal(p, &c)
+		in.limit = c.Limit
+		if c.Resume != nil {
+			in.sent = int(*c.Resume)
+			in.eofSent = false
+			in.rs.SendJSON(proto.FrameStdinResume, proto.StdinResume{Offset: *c.Resume})
+		}
+	default:
+		return
+	}
+	for in.sent < len(in.data) && (in.limit < 0 || int64(in.sent) < in.limit) {
+		end := min(len(in.data), in.sent+32<<10)
+		if in.limit >= 0 {
+			end = min(end, int(in.limit))
+		}
+		if in.rs.Send(proto.FrameStdin, in.data[in.sent:end]) != nil {
+			return
+		}
+		in.sent = end
+	}
+	if in.sent == len(in.data) && !in.eofSent {
+		in.eofSent = true
+		in.rs.Send(proto.FrameStdinEOF, nil)
 	}
 }
 
