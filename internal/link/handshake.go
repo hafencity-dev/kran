@@ -38,18 +38,19 @@ func hostKeyAlgs(pk ssh.PublicKey) []string {
 }
 
 // Handshake dials addr, authenticates with signer as user and checks the host
-// key against the pinned key (pinned == "" accepts and reports the key). A
-// completed handshake proves reachability and that the forced-command
-// authorized_keys entry exists; no command is run.
+// key against the pinned key (pinned == "" fails: an unverified server proves
+// nothing). A completed handshake proves reachability and that the
+// forced-command authorized_keys entry exists; no command is run.
 func Handshake(ctx context.Context, addr, user string, signer ssh.Signer, pinned string, timeout time.Duration) ProbeResult {
 	res := ProbeResult{Address: addr}
-	var pin ssh.PublicKey
-	if pinned != "" {
-		var err error
-		if pin, err = parseHostKey(pinned); err != nil {
-			res.Error = fmt.Sprintf("pinned host key is invalid: %v", err)
-			return res
-		}
+	if pinned == "" {
+		res.Error = "no host key to check the server against"
+		return res
+	}
+	pin, err := parseHostKey(pinned)
+	if err != nil {
+		res.Error = fmt.Sprintf("pinned host key is invalid: %v", err)
+		return res
 	}
 	cfg := &ssh.ClientConfig{
 		User:    user,
@@ -57,15 +58,13 @@ func Handshake(ctx context.Context, addr, user string, signer ssh.Signer, pinned
 		Timeout: timeout,
 		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
 			res.HostKey = strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key)))
-			if pin != nil && !bytes.Equal(pin.Marshal(), key.Marshal()) {
+			if !bytes.Equal(pin.Marshal(), key.Marshal()) {
 				return fmt.Errorf("host key changed: expected %s, got %s", ssh.FingerprintSHA256(pin), ssh.FingerprintSHA256(key))
 			}
 			return nil
 		},
 	}
-	if pin != nil {
-		cfg.HostKeyAlgorithms = hostKeyAlgs(pin)
-	}
+	cfg.HostKeyAlgorithms = hostKeyAlgs(pin)
 	start := time.Now()
 	d := net.Dialer{Timeout: timeout}
 	cctx, cancel := context.WithTimeout(ctx, timeout)

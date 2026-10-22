@@ -123,8 +123,9 @@ func TestProbeAndHandshake(t *testing.T) {
 	if !r.OK || r.RTTMs <= 0 {
 		t.Fatalf("%+v", r)
 	}
-	// unpinned: accepts and reports the key
-	if r := Handshake(context.Background(), srv.Addr, "u", signer, "", 3*time.Second); !r.OK || r.HostKey != srv.HostKey {
+	// unpinned: refused (a reverse probe without our host key must not
+	// report a working direction it could not verify)
+	if r := Handshake(context.Background(), srv.Addr, "u", signer, "", 3*time.Second); r.OK || !strings.Contains(r.Error, "host key") {
 		t.Fatalf("%+v", r)
 	}
 	// wrong pinned key is rejected

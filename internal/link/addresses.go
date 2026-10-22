@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"os/user"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -115,13 +116,26 @@ func currentUser() string {
 	return os.Getenv("USER")
 }
 
-// localHostKey returns this machine's sshd ed25519 host key ("type base64"),
-// or "" when it cannot be read. KRAN_SSHD_HOSTKEY overrides the file.
+// localHostKey returns one of this machine's sshd host keys ("type
+// base64"), or "" when none can be read. KRAN_SSHD_HOSTKEY overrides the
+// file. The peer pins it, and learns it over the ssh channel the user's
+// known_hosts already verified, so every key type counts.
 func localHostKey() string {
-	files := []string{"/etc/ssh/ssh_host_ed25519_key.pub"}
 	if f := os.Getenv("KRAN_SSHD_HOSTKEY"); f != "" {
-		files = []string{f}
+		return hostKeyFromFiles(f)
 	}
+	return hostKeyFrom("/etc/ssh")
+}
+
+func hostKeyFrom(dir string) string {
+	var files []string
+	for _, t := range []string{"ed25519", "ecdsa", "rsa"} {
+		files = append(files, filepath.Join(dir, "ssh_host_"+t+"_key.pub"))
+	}
+	return hostKeyFromFiles(files...)
+}
+
+func hostKeyFromFiles(files ...string) string {
 	for _, f := range files {
 		b, err := os.ReadFile(f)
 		if err != nil {
