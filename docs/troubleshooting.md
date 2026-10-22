@@ -7,6 +7,7 @@ Run `kran doctor` first. Add `--fix` to repair permissions, a missing key, and t
 - `kran service status` shows whether it is installed and running. Linux logs: `journalctl --user -u kran`. macOS: `~/Library/Application Support/kran/daemon.out.log`. Both: `daemon.log` in the state dir.
 - `kran service restart` waits for running jobs; `--force` restarts immediately (running remote jobs reattach if the restart is quick).
 - On Linux the service stops at logout unless lingering is on: `loginctl enable-linger $USER`.
+- macOS without a GUI login (a headless Mac Studio): launch agents cannot load there. kran does not need one: its daemon starts on demand when a job or a linked machine connects, and `kran doctor` reports this as `on-demand`. To keep the daemon running permanently, run `kran service install --system` (installs a launch daemon in `/Library/LaunchDaemons` that runs as you; asks for your password once; preview with `--dry-run`).
 - No user systemd bus over SSH ("Failed to connect to bus"): `export XDG_RUNTIME_DIR=/run/user/$(id -u)` and retry.
 
 ## Linking

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -13,12 +14,18 @@ import (
 	"github.com/hafencity-dev/kran/internal/service"
 )
 
-func (a *App) serviceManager() (service.Manager, error) {
+func (a *App) serviceManager() (service.Manager, error) { return a.serviceManagerFor(false) }
+
+const noGUIMessage = "There is no GUI login session on this Mac, so a per-user launch agent cannot load. " +
+	"kran still works: its daemon starts on demand when a job or a linked machine connects. " +
+	"To keep it running permanently, run `kran service install --system` (asks for your password once)."
+
+func (a *App) serviceManagerFor(system bool) (service.Manager, error) {
 	self, err := a.Self()
 	if err != nil {
 		return nil, &ExitError{Code: 1, Msg: "cannot find the kran binary: " + err.Error()}
 	}
-	m, err := service.New(service.Options{KranPath: self, Logf: func(f string, args ...any) { fmt.Fprintf(a.Err, "kran: "+f+"\n", args...) }})
+	m, err := service.New(service.Options{KranPath: self, System: system, Logf: func(f string, args ...any) { fmt.Fprintf(a.Err, "kran: "+f+"\n", args...) }})
 	if err != nil {
 		return nil, &ExitError{Code: 1, Msg: err.Error() + " (run `kran daemon` in a terminal instead)"}
 	}
@@ -67,20 +74,7 @@ func (a *App) serviceCommand() *cobra.Command {
 			return nil
 		}}
 	}
-	svc.AddCommand(
-		simple("install", "Install and start the service (safe to repeat)", func(ctx context.Context, m service.Manager) error {
-			changed, err := m.Install(ctx)
-			if err != nil {
-				return err
-			}
-			if changed {
-				fmt.Fprintln(a.Out, "service installed and started")
-			} else {
-				fmt.Fprintln(a.Out, "service already installed; running")
-			}
-			a.printServiceAdvice(ctx, m)
-			return nil
-		}),
+	svc.AddCommand(a.serviceInstallCommand(),
 		simple("uninstall", "Stop and remove the service", func(ctx context.Context, m service.Manager) error {
 			if err := m.Uninstall(ctx); err != nil {
 				return err
@@ -139,17 +133,19 @@ func (a *App) serviceCommand() *cobra.Command {
 				return json.NewEncoder(a.Out).Encode(st)
 			}
 			switch {
+			case !st.Installed && st.NoGUI:
+				fmt.Fprintln(a.Out, "no background service installed: the daemon starts on demand.")
 			case !st.Installed:
 				fmt.Fprintf(a.Out, "not installed (%s). Install it with `kran service install`.\n", st.Manager)
 			case st.Running:
-				fmt.Fprintf(a.Out, "running under %s (pid %d), unit %s\n", st.Manager, st.PID, st.UnitPath)
+				fmt.Fprintf(a.Out, "running as %s (pid %d), unit %s\n", modeLabel(st.Mode, st.Manager), st.PID, st.UnitPath)
 			default:
 				fmt.Fprintf(a.Out, "installed under %s but not running. Start it with `kran service start`.\n", st.Manager)
 			}
 			for _, adv := range st.Advice {
 				fmt.Fprintln(a.Out, adv)
 			}
-			if !st.Running {
+			if !st.Running && !st.NoGUI {
 				return &ExitError{Code: 3}
 			}
 			return nil
@@ -199,3 +195,71 @@ func (a *App) waitDaemon(ctx context.Context, d time.Duration) (*proto.VersionIn
 }
 
 var _ client.Client
+
+func (a *App) serviceInstallCommand() *cobra.Command {
+	var system, dry bool
+	cmd := &cobra.Command{
+		Use:   "install [--system] [--dry-run]",
+		Short: "Install and start the service (safe to repeat)",
+		Long: `Install the kran daemon as a background service: a systemd user unit on Linux,
+a launchd agent on macOS.
+
+--system (macOS) installs a launch daemon in /Library/LaunchDaemons that runs as
+you. Use it on a Mac without a GUI login (a headless Mac Studio, a build box),
+where launch agents cannot load. It needs sudo once. On Linux,
+"loginctl enable-linger $USER" gives the same effect for the user unit.`,
+		Example: "  kran service install\n  kran service install --system --dry-run",
+		Args:    cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			if system && runtime.GOOS != "darwin" {
+				return &ExitError{Code: 2, Msg: "--system is for macOS. On Linux the user service already survives logout once you run `loginctl enable-linger $USER`."}
+			}
+			m, err := a.serviceManagerFor(system)
+			if err != nil {
+				return err
+			}
+			if dry {
+				fmt.Fprint(a.Out, m.Unit())
+				if p, ok := m.(interface{ Plan() []string }); ok {
+					fmt.Fprintln(a.Out, "\nWould run:")
+					for _, step := range p.Plan() {
+						fmt.Fprintln(a.Out, "  "+step)
+					}
+				}
+				fmt.Fprintln(a.Out, "\nDry run: nothing was changed.")
+				return nil
+			}
+			if runtime.GOOS == "darwin" && !system && service.Mode(service.Options{}) != "launchd-system" &&
+				!service.HasGUISession(ctx, service.Options{}) {
+				return &ExitError{Code: 1, Msg: noGUIMessage}
+			}
+			changed, err := m.Install(ctx)
+			if err != nil {
+				return &ExitError{Code: 1, Msg: err.Error()}
+			}
+			if changed {
+				fmt.Fprintln(a.Out, "service installed and started")
+			} else {
+				fmt.Fprintln(a.Out, "service already installed; running")
+			}
+			a.printServiceAdvice(ctx, m)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&system, "system", false, "macOS: install a system launch daemon (for Macs without a GUI login; needs sudo)")
+	cmd.Flags().BoolVar(&dry, "dry-run", false, "print what would be installed and run, change nothing")
+	return cmd
+}
+
+func modeLabel(mode, manager string) string {
+	switch mode {
+	case "launchd-agent":
+		return "a launchd agent"
+	case "launchd-system":
+		return "a launchd system daemon"
+	case "systemd":
+		return "a systemd user unit"
+	}
+	return manager
+}

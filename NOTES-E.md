@@ -46,7 +46,7 @@ Against `devmac` (Darwin arm64) with `KRAN_*_DIR` overrides on both ends, tag `k
 link (cross-compile darwin + linux binary push, remote setup, key exchange, both-direction handshake,
 rtt/bandwidth), second link (idempotent, "Already linked"), unlink; afterwards `authorized_keys` on both
 machines were byte-identical to before and no launchd job or dev files were left.
-Finding: devmac has no GUI login session (`gui/501` missing), so launchd refuses user agents
+Follow-up done: `kran service install --system [--dry-run]` (LaunchDaemon running as the user, sudo once), no-GUI detection in setup/link/doctor/service status; `kran link` prints a note with `ssh -t <host> <kran> service install --system`. A must auto-start the daemon in `kran serve --stdio` for the on-demand mode. Not installed on devmac (dry-run only). Original finding: devmac has no GUI login session (`gui/501` missing), so launchd refuses user agents
 (`launchctl bootstrap user/501 ...: Input/output error`). `kran setup` then says so and continues; on such a
 headless Mac the daemon needs a console login, auto-login, or `kran daemon` under another supervisor.
 `kran doctor` reports "installed but not running".

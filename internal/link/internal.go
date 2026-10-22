@@ -16,6 +16,7 @@ import (
 
 	"github.com/hafencity-dev/kran/internal/config"
 	"github.com/hafencity-dev/kran/internal/paths"
+	"github.com/hafencity-dev/kran/internal/service"
 	"github.com/hafencity-dev/kran/internal/version"
 )
 
@@ -38,7 +39,12 @@ type Info struct {
 	Addresses []string `json:"addresses"`
 	SSHPort   int      `json:"ssh_port"`
 	HasDaemon bool     `json:"has_daemon"`
-	SHA256    string   `json:"binary_sha256"`
+	// ServiceMode is "launchd-system", "launchd-agent", "systemd" or "" (no
+	// service installed). NoGUI is set on a Mac without a GUI login, where
+	// the daemon can only start on demand or as a system daemon.
+	ServiceMode string `json:"service_mode,omitempty"`
+	NoGUI       bool   `json:"no_gui,omitempty"`
+	SHA256      string `json:"binary_sha256"`
 }
 
 // PeerInfo is what one side tells the other about itself.
@@ -193,13 +199,15 @@ func gatherInfo() (Info, error) {
 	sum, _ := fileSHA256(exe)
 	pub, _ := config.PublicKey()
 	_, statErr := os.Stat(paths.Socket())
+	mode := service.Mode(service.Options{})
+	noGUI := runtime.GOOS == "darwin" && mode != "launchd-system" && !service.HasGUISession(context.Background(), service.Options{})
 	return Info{
 		ID: config.NodeID(), Name: name, OS: runtime.GOOS, Arch: runtime.GOARCH,
 		Version: version.Version, Protocol: version.Info().Protocol,
 		Home: home, User: currentUser(), KranPath: exe,
 		ConfigDir: paths.ConfigDir(), StateDir: paths.StateDir(), CacheDir: paths.CacheDir(),
 		PubKey: pub, HostKey: localHostKey(), Addresses: localAddresses(), SSHPort: sshdPort(),
-		HasDaemon: statErr == nil, SHA256: sum,
+		HasDaemon: statErr == nil, SHA256: sum, ServiceMode: mode, NoGUI: noGUI,
 	}, nil
 }
 

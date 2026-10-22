@@ -246,3 +246,36 @@ func TestDockerProbeWithoutDaemon(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 }
+
+func TestOnDemandModeIsOK(t *testing.T) {
+	o := baseOpts(t)
+	f := &fakeSvc{st: service.Status{Manager: "launchd", Mode: "launchd-agent", NoGUI: true}}
+	o.Service = func() (service.Manager, error) { return f, nil }
+	r := find(Run(context.Background(), o), "service")
+	if r.Level != OK || !strings.Contains(r.Detail, "on-demand") || !strings.Contains(r.Detail, "kran service install --system") {
+		t.Fatalf("%+v", r)
+	}
+	// Installed agent that cannot load without a GUI: same mode.
+	f.st.Installed = true
+	if r := find(Run(context.Background(), o), "service"); r.Level != OK {
+		t.Fatalf("%+v", r)
+	}
+	// With a GUI session the same state is a real failure.
+	f.st.NoGUI = false
+	if r := find(Run(context.Background(), o), "service"); r.Level != Fail {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestSystemDaemonModeReported(t *testing.T) {
+	o := baseOpts(t)
+	f := &fakeSvc{st: service.Status{Manager: "launchd", Mode: "launchd-system", Installed: true, Running: true, PID: 7}}
+	o.Service = func() (service.Manager, error) { return f, nil }
+	o.Dial = func(context.Context) (client.Client, error) {
+		return &fakeClient{ver: proto.VersionInfo{Version: version.Version}, st: &proto.State{}}, nil
+	}
+	r := find(Run(context.Background(), o), "service")
+	if r.Level != OK || !strings.Contains(r.Detail, "launchd system daemon") {
+		t.Fatalf("%+v", r)
+	}
+}
