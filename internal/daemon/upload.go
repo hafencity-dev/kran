@@ -33,6 +33,12 @@ func (d *Daemon) uploadBlobs(ctx context.Context, sess transport.Session, e *job
 			sizes[en.Hash] = en.Size
 		}
 	}
+	for _, h := range plan.Missing {
+		// The scanner can open blobs of every repo; send only this job's.
+		if _, ok := sizes[h]; !ok {
+			return 0, fmt.Errorf("%s asked for a file that is not in this workspace", node)
+		}
+	}
 	total := plan.Bytes
 	if total <= 0 {
 		for _, h := range plan.Missing {

@@ -35,6 +35,7 @@ type tjob struct {
 	Argv       []string
 	Slot       *proto.SlotRef
 	manifest   *proto.Manifest
+	blobs      map[string]int64  // manifest file hash → size: what blob.put takes
 	sess       transport.Session // session that admitted it
 	reservedAt time.Time
 	busy       int // in-flight prestart operations (holds the reservation)

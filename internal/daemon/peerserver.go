@@ -286,9 +286,23 @@ func (t *targetSide) handleSlotAcquire(ps *peerSession, pc *peerConn, req rawPee
 	}
 }
 
+// newZstdDecoder bounds what a peer's stream can make us allocate: our
+// encoders use windows of at most 8 MiB.
 func newZstdDecoder() (*zstd.Decoder, error) {
 	return zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderLowmem(true),
-		zstd.WithDecoderMaxMemory(1<<30))
+		zstd.WithDecoderMaxMemory(1<<30), zstd.WithDecoderMaxWindow(32<<20))
+}
+
+// maxManifest caps a decompressed manifest (a few MB for 30k files).
+var maxManifest int64 = 256 << 20
+
+func decodeManifest(r io.Reader, m *proto.Manifest) error {
+	lr := &io.LimitedReader{R: r, N: maxManifest + 1}
+	err := json.NewDecoder(lr).Decode(m)
+	if lr.N <= 0 {
+		return fmt.Errorf("manifest larger than %d MiB", maxManifest>>20)
+	}
+	return err
 }
 
 func (t *targetSide) handleSlotDiff(ps *peerSession, pc *peerConn, req rawPeerRequest) {
@@ -320,7 +334,7 @@ func (t *targetSide) handleSlotDiff(ps *peerSession, pc *peerConn, req rawPeerRe
 		return
 	}
 	var m proto.Manifest
-	if err := json.NewDecoder(dec).Decode(&m); err != nil {
+	if err := decodeManifest(dec, &m); err != nil {
 		fr.drain()
 		pc.fail(codeBadRequest, "read manifest: %v", err)
 		return
@@ -335,8 +349,14 @@ func (t *targetSide) handleSlotDiff(ps *peerSession, pc *peerConn, req rawPeerRe
 		pc.fail(codeInternal, "diff on %s: %v", t.d.self, err)
 		return
 	}
+	blobs := make(map[string]int64, len(m.Entries))
+	for _, e := range m.Entries {
+		if e.Kind == proto.EntryFile && e.Hash != "" {
+			blobs[e.Hash] = e.Size
+		}
+	}
 	t.mu.Lock()
-	j.manifest = &m
+	j.manifest, j.blobs = &m, blobs
 	t.mu.Unlock()
 	pc.respond(plan)
 }
@@ -373,6 +393,12 @@ func (t *targetSide) handleBlobPut(ps *peerSession, pc *peerConn, req rawPeerReq
 		case pfBlob:
 			var h blobHeader
 			if err := json.Unmarshal(p, &h); err != nil {
+				return
+			}
+			t.mu.Lock()
+			size, ok := j.blobs[h.Hash]
+			t.mu.Unlock()
+			if !ok || h.Size != size { // only the job's files, at their size
 				return
 			}
 			res := t.putBlob(ctx, pc, dec, h)
