@@ -208,3 +208,33 @@ func Update(path string, fn func(*Config) error) error {
 		return Save(path, c)
 	})
 }
+
+// SetName writes only the node name into config.toml, keeping every other
+// key the user set (defaults stay implicit so they can improve later).
+func SetName(path, name string) error {
+	if path == "" {
+		path = paths.ConfigFile()
+	}
+	if !ValidName(name) {
+		return fmt.Errorf("name %q is not valid: use 1-32 chars of a-z, 0-9, - and _ (try %q)", name, SanitizeName(name))
+	}
+	return WithLock(path, func() error {
+		raw := map[string]any{}
+		data, err := os.ReadFile(path)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+		case err != nil:
+			return fmt.Errorf("read %s: %w", path, err)
+		default:
+			if err := toml.Unmarshal(data, &raw); err != nil {
+				return fmt.Errorf("%s is not valid TOML (%v); fix or delete it, then retry", path, err)
+			}
+		}
+		raw["name"] = name
+		out, err := toml.Marshal(raw)
+		if err != nil {
+			return err
+		}
+		return WriteFileAtomic(path, out, 0o600)
+	})
+}

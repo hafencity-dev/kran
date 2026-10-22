@@ -34,7 +34,7 @@ func TestLoadPartialKeepsDefaults(t *testing.T) {
 
 func TestLoadErrorsAreHelpful(t *testing.T) {
 	cases := map[string]string{
-		"name = \"Bad Name\"\n":           "try \"bad-name\"",
+		"name = \"Bad Name\"\n":            "try \"bad-name\"",
 		"[submit]\nprefer = \"sometimes\"": "auto, local or remote",
 		"[accept]\nreserve_mem = \"lots\"": "invalid size",
 		"nme = \"x\"\n":                    "unknown field",
@@ -177,6 +177,25 @@ func TestEnsureKey(t *testing.T) {
 	}
 	s, err := Signer()
 	if err != nil || s.PublicKey() == nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSetNameKeepsOtherKeys(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.toml")
+	os.WriteFile(p, []byte("[accept]\nreserve_cpus = 4\n"), 0o600)
+	if err := SetName(p, "gx10"); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil || c.Name != "gx10" || c.Accept.ReserveCPUs != 4 {
+		t.Fatalf("%+v %v", c, err)
+	}
+	if err := SetName(p, "Bad Name"); err == nil {
+		t.Fatal("must reject")
+	}
+	p2 := filepath.Join(t.TempDir(), "new", "config.toml")
+	if err := SetName(p2, "devmac"); err != nil {
 		t.Fatal(err)
 	}
 }
