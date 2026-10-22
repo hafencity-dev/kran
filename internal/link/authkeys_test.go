@@ -2,6 +2,7 @@ package link
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -32,8 +33,17 @@ func TestAuthorizedKeysLine(t *testing.T) {
 	if got := AuthorizedKeysLine("/k", keyA+" kran-dev", "kran-dev"); strings.Count(got, "kran-dev") != 1 {
 		t.Fatal(got)
 	}
-	if got := AuthorizedKeysLine(`/Users/a b/"x"/kran`, keyA, ""); !strings.Contains(got, `command="/Users/a b/\"x\"/kran serve --stdio"`) {
+	if got := AuthorizedKeysLine(`/Users/a b/"x"/kran`, keyA, ""); !strings.Contains(got, `command="'/Users/a b/\"x\"/kran' serve --stdio"`) {
 		t.Fatal(got)
+	}
+	if AuthorizedKeysLine("/k", keyA+"\n", "t") == "" {
+		t.Fatal("a .pub file's trailing newline is fine")
+	}
+	// A newline in any part would start a second, unrestricted key line.
+	for _, bad := range [][3]string{{"/k\nssh-ed25519 AAAA x", keyA, ""}, {"/k", keyA, "t\nssh-ed25519 AAAA evil"}, {"/k", keyA, "t\rx"}} {
+		if got := AuthorizedKeysLine(bad[0], bad[1], bad[2]); got != "" {
+			t.Fatalf("control character accepted: %q", got)
+		}
 	}
 	if AuthorizedKeysLine("/k", "garbage", "") != "" {
 		t.Fatal("garbage key must give empty line")
@@ -164,5 +174,30 @@ func TestRemoveAuthorizedKey(t *testing.T) {
 	// missing file is fine
 	if r, err := RemoveAuthorizedKey(filepath.Join(t.TempDir(), "nope"), "x"); r || err != nil {
 		t.Fatal(r, err)
+	}
+}
+
+// sshd runs the forced command as `$SHELL -c "<command>"` after undoing only
+// \" in the option value (OpenSSH opt_dequote). The kran path must reach
+// the shell as one word, whatever it contains.
+func TestForcedCommandThroughShell(t *testing.T) {
+	for _, dir := range []string{"plain", "with space", `quote"d`, "it's", `back\slash`, "dollar$HOME", "semi;colon"} {
+		d := filepath.Join(t.TempDir(), dir)
+		os.MkdirAll(d, 0o755)
+		kran := filepath.Join(d, "kran")
+		out := filepath.Join(t.TempDir(), "args")
+		os.WriteFile(kran, []byte("#!/bin/sh\nprintf '%s|' \"$@\" > '"+out+"'\n"), 0o755)
+		al, ok := parseAuthLine(AuthorizedKeysLine(kran, keyA, ""))
+		if !ok {
+			t.Fatalf("%s: unparsable", dir)
+		}
+		v := strings.TrimSuffix(strings.TrimPrefix(al.opts, `command="`), `",restrict`)
+		cmd := strings.ReplaceAll(v, `\"`, `"`)
+		if b, err := exec.Command("sh", "-c", cmd).CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v %s (command %q)", dir, err, b, cmd)
+		}
+		if b, _ := os.ReadFile(out); string(b) != "serve|--stdio|" {
+			t.Fatalf("%s: args %q", dir, b)
+		}
 	}
 }

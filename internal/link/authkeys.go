@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/hafencity-dev/kran/internal/config"
@@ -19,7 +20,7 @@ import (
 // except speak the kran protocol (SPEC §3).
 func AuthorizedKeysLine(kranPath, pubKey, tag string) string {
 	f := strings.Fields(pubKey)
-	if len(f) < 2 {
+	if len(f) < 2 || hasControl(kranPath+tag+strings.Join(f, " ")) { // a newline would start another key line
 		return ""
 	}
 	comment := strings.Join(f[2:], " ")
@@ -29,8 +30,20 @@ func AuthorizedKeysLine(kranPath, pubKey, tag string) string {
 	if tag != "" && !strings.Contains(" "+comment+" ", " "+tag+" ") {
 		comment += " " + tag
 	}
-	esc := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(kranPath)
+	// sshd runs the command with the user's shell and only undoes \" (so
+	// a backslash stays as is); the path must be one word for that shell.
+	cmd := kranPath
+	if !plainPath.MatchString(cmd) {
+		cmd = shq(cmd)
+	}
+	esc := strings.ReplaceAll(cmd, `"`, `\"`)
 	return fmt.Sprintf(`command="%s serve --stdio",restrict %s %s %s`, esc, f[0], f[1], comment)
+}
+
+var plainPath = regexp.MustCompile(`^[A-Za-z0-9_./+:@,=-]+$`)
+
+func hasControl(s string) bool {
+	return strings.IndexFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0
 }
 
 // authLine is a parsed authorized_keys line.
