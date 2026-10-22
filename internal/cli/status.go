@@ -103,7 +103,10 @@ func (a *App) printStatus(st *proto.State, now time.Time) {
 			}
 			reason := ""
 			if j.State == proto.JobQueued && j.Reason != "" {
-				reason = "waiting: " + j.Reason
+				reason = j.Reason
+				if !strings.HasPrefix(reason, "waiting") { // the scheduler's reasons already start with it
+					reason = "waiting: " + reason
+				}
 			}
 			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", j.Spec.ID, j.State, where, age, truncate(jobCommand(j.Spec), 48), reason)
 		}
@@ -149,12 +152,12 @@ func jobCommand(sp proto.JobSpec) string {
 }
 
 func (a *App) jobsCommand() *cobra.Command {
-	var asJSON, all bool
+	var asJSON, all, why bool
 	var limit int
 	cmd := &cobra.Command{
 		Use:     "jobs",
 		Short:   "List recent jobs",
-		Example: "  kran jobs\n  kran jobs -a --json",
+		Example: "  kran jobs\n  kran jobs --why           # why each job ran where it did\n  kran jobs -a --json",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return a.withClient(cmd.Context(), func(cl client.Client) error {
@@ -176,7 +179,11 @@ func (a *App) jobsCommand() *cobra.Command {
 					return nil
 				}
 				w := tabwriter.NewWriter(a.Out, 0, 4, 2, ' ', 0)
-				fmt.Fprintln(w, "ID\tSTATE\tNODE\tTOOK\tOWNER\tCOMMAND")
+				head := "ID\tSTATE\tNODE\tTOOK\tOWNER\tCOMMAND"
+				if why {
+					head += "\tWHY"
+				}
+				fmt.Fprintln(w, head)
 				for _, j := range jobs {
 					node := j.Node
 					if node == "" {
@@ -190,13 +197,18 @@ func (a *App) jobsCommand() *cobra.Command {
 					if j.ExitCode != nil && j.State == proto.JobFailed {
 						state = fmt.Sprintf("failed(%d)", *j.ExitCode)
 					}
-					fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", j.Spec.ID, state, node, dur, truncate(j.Spec.Owner.Name, 22), truncate(jobCommand(j.Spec), 56))
+					row := fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s", j.Spec.ID, state, node, dur, truncate(j.Spec.Owner.Name, 22), truncate(jobCommand(j.Spec), 56))
+					if why {
+						row += "\t" + j.Reason
+					}
+					fmt.Fprintln(w, row)
 				}
 				return w.Flush()
 			})
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "machine-readable output")
+	cmd.Flags().BoolVar(&why, "why", false, "add a column with the scheduler's reason for where each job ran")
 	cmd.Flags().BoolVarP(&all, "all", "a", false, "show up to 1000 jobs instead of the most recent")
 	cmd.Flags().IntVar(&limit, "limit", 20, "number of jobs to show")
 	return cmd

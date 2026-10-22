@@ -85,3 +85,28 @@ func TestStatusTodayLineIsQuietWhenThereIsNothingToSay(t *testing.T) {
 		}
 	}
 }
+
+func TestJobsWhyAddsTheSchedulerReason(t *testing.T) {
+	cl := &stateClient{jobs: []proto.Job{{Spec: proto.JobSpec{ID: "j1", Argv: []string{"true"}}, State: proto.JobSucceeded, Node: "gx10",
+		Reason: "here: est. 0s, too short to send elsewhere"}}}
+	a, out, _ := testApp(cl)
+	if code := a.Execute(context.Background(), []string{"jobs"}); code != 0 || strings.Contains(out.String(), "too short") {
+		t.Fatalf("plain jobs must not show the reason: %d\n%s", code, out)
+	}
+	out.Reset()
+	if code := a.Execute(context.Background(), []string{"jobs", "--why"}); code != 0 || !strings.Contains(out.String(), "WHY") || !strings.Contains(out.String(), "too short to send elsewhere") {
+		t.Fatalf("%d\n%s", code, out)
+	}
+}
+
+func TestStatusDoesNotSayWaitingTwice(t *testing.T) {
+	st := sampleState()
+	st.Jobs[1].Reason = "waiting: needs 6 GiB, devmac has 3.1 GiB free"
+	a, out, _ := testApp(&stateClient{st: st})
+	if code := a.Execute(context.Background(), []string{"status"}); code != 0 {
+		t.Fatal(code)
+	}
+	if strings.Contains(out.String(), "waiting: waiting") || !strings.Contains(out.String(), "waiting: needs 6 GiB") {
+		t.Fatalf("\n%s", out)
+	}
+}

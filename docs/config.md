@@ -44,6 +44,7 @@ match = "go test*"
 cpus = 8
 mem = "6GiB"
 # local = true                 # keep matching commands on this machine
+# gpu = true                   # also: os = "any", priority = "low"
 ```
 
 Flags on `kran run` override rules.
