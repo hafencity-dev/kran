@@ -110,3 +110,7 @@ make install      # install here and fill the binary cache for linux/darwin x ar
 The binary cache (`~/.cache/kran` or `~/Library/Caches/kran`) lets `kran link` install kran on machines of another OS or architecture without network access. Release builds come from tags via GoReleaser. Changes are listed in [CHANGELOG.md](CHANGELOG.md). The engineering contract is in [SPEC.md](SPEC.md); contributor rules in [AGENTS.md](AGENTS.md).
 
 `kran top` uses Bubble Tea v2 and Lip Gloss v2, which do no terminal I/O at package init, so no kran command queries the terminal unless it opens the TUI.
+
+## License
+
+Apache License 2.0, see [LICENSE](LICENSE).
