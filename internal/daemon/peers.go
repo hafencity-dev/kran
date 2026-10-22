@@ -66,6 +66,7 @@ func (m *peerManager) run(ctx context.Context) {
 	}
 	t := time.NewTicker(m.d.t.PeerPoll)
 	defer t.Stop()
+	seen := ""
 	for {
 		select {
 		case <-ctx.Done():
@@ -73,8 +74,14 @@ func (m *peerManager) run(ctx context.Context) {
 			return
 		case <-t.C:
 		}
+		// Apply a change once the file stood still for a poll: a writer
+		// that truncates and then writes (an editor, a non-atomic tool)
+		// must not unlink every peer for a moment.
 		if st := m.d.deps.Peers.Stamp(); st != m.stamp {
-			m.reload()
+			if st == seen {
+				m.reload()
+			}
+			seen = st
 		}
 		for _, p := range m.list() {
 			p.push(false)

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -24,6 +26,15 @@ func counterScript(n int, sleep string) (string, string) {
 		fmt.Fprintf(&want, "%d\n", i)
 	}
 	return script, want.String()
+}
+
+// gatedCounterScript prints 0..n-1 like counterScript but stops after
+// line at until the file gate exists: a disruption the test triggers at
+// that line then always hits a running job, however slow the machine.
+func gatedCounterScript(n, at int, gate string) (string, string) {
+	script := fmt.Sprintf("i=0; while [ $i -lt %d ]; do echo $i; i=$((i+1)); if [ $i -eq %d ]; then while [ ! -f %s ]; do sleep 0.02; done; fi; sleep 0.01; done", n, at+1, gate)
+	_, want := counterScript(n, "")
+	return script, want
 }
 
 func twoNodes(t *testing.T) (*cluster, *testNode, *testNode) {
@@ -266,7 +277,8 @@ func TestLongOutageLosesJob(t *testing.T) {
 func TestOriginDaemonRestartReattach(t *testing.T) {
 	_, a, b := twoNodes(t)
 	ws := workspaceDir(t, map[string]string{"f": "x"})
-	script, want := counterScript(50, "0.05")
+	gate := filepath.Join(t.TempDir(), "gate")
+	script, want := gatedCounterScript(50, 5, gate)
 	ctx, cancel := testContext(40 * time.Second)
 	defer cancel()
 	res := &cliResult{}
@@ -287,6 +299,7 @@ func TestOriginDaemonRestartReattach(t *testing.T) {
 		return a.cancel == nil
 	})
 	a.start()
+	os.WriteFile(gate, nil, 0o600)
 	// The CLI reconnects and resumes at its offset.
 	err = runCLIInto(ctx, a.sock(), proto.JobSpec{}, cliOpts{reattach: &proto.Reattach{JobID: res.jobID, Offset: res.offset}}, res)
 	if err != nil {
