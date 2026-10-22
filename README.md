@@ -68,6 +68,7 @@ Start with `kran doctor` (add `--fix` to repair what is safe to repair; `kran do
 | `kran: daemon not running — running locally` | `kran service start`, or `kran setup` if never installed. Jobs still run, just not offloaded. |
 | Node shows `offline` in `kran status` | `ssh <host>` works? Then `kran link <host>` repairs keys. `kran doctor <node>` shows the reason. |
 | Stops accepting jobs after logout (Linux) | `loginctl enable-linger $USER` |
+| Mac without GUI login: no launch agent | Works on demand; make it permanent with `kran service install --system` |
 | Jobs on a Mac fail with a container error | Start Docker: `colima start` or Docker Desktop. |
 | Slow syncs | `kran doctor` reports link speed; prefer Ethernet or a direct Tailscale path. |
 | Host key changed | Reinstalled machine: `kran link <host>` pins the new key. Otherwise treat it as an attack. |

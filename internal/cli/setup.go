@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/hafencity-dev/kran/internal/agents"
 	"github.com/hafencity-dev/kran/internal/config"
 	"github.com/hafencity-dev/kran/internal/paths"
+	"github.com/hafencity-dev/kran/internal/service"
 )
 
 type setupFlags struct {
@@ -184,6 +186,15 @@ func agentToolsPresent() bool {
 }
 
 func (a *App) setupService(ctx context.Context, say func(string, ...any)) error {
+	switch {
+	case service.Mode(service.Options{}) == "launchd-system":
+		say("service already installed as a launchd system daemon")
+		return nil
+	case runtime.GOOS == "darwin" && !service.HasGUISession(ctx, service.Options{}):
+		// Not an error: incoming connections start the daemon on demand.
+		say("%s", noGUIMessage)
+		return nil
+	}
 	m, err := a.serviceManager()
 	if err != nil {
 		return err

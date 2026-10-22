@@ -142,7 +142,7 @@ func (s *systemd) Restart(ctx context.Context, ro RestartOptions) error {
 }
 
 func (s *systemd) Status(ctx context.Context) (Status, error) {
-	st := Status{Manager: "systemd", UnitPath: s.unitPath(), LogPath: paths.LogFile()}
+	st := Status{Manager: "systemd", Mode: "systemd", UnitPath: s.unitPath(), LogPath: paths.LogFile()}
 	_, ferr := os.Stat(s.unitPath())
 	st.Installed = ferr == nil
 	out, err := s.ctl(ctx, "show", s.unit, "-p", "ActiveState,SubState,MainPID,UnitFileState,LoadState")

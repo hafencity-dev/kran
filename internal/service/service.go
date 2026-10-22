@@ -10,10 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	osuser "os/user"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,6 +48,14 @@ type Options struct {
 	Runner Runner
 	Logf   func(string, ...any)
 
+	// System (macOS only) installs a LaunchDaemon in /Library/LaunchDaemons
+	// that runs as the current user, for Macs without a GUI login where
+	// LaunchAgents cannot load. Installing it needs sudo.
+	System bool
+	// SystemDir, User and Group are test seams for System (defaults:
+	// /Library/LaunchDaemons, the current user and its primary group).
+	SystemDir, User, Group string
+
 	// LogPath is the file launchd captures stdout/stderr into (default
 	// <state dir>/daemon.out.log). Unused on Linux (journald).
 	LogPath string
@@ -72,6 +82,12 @@ type Status struct {
 	// Advice holds plain sentences with the exact command to run next.
 	Advice []string
 	Detail string
+	// Mode is how the daemon is supervised: "systemd", "launchd-agent",
+	// "launchd-system" or "" (nothing installed: on demand / manual).
+	Mode string
+	// NoGUI is set on macOS when no GUI login session exists, so LaunchAgents
+	// cannot load (the daemon then starts on demand or as a system daemon).
+	NoGUI bool
 }
 
 // RestartOptions control Restart.
@@ -114,7 +130,14 @@ func New(opts Options) (Manager, error) {
 	case "linux":
 		return &systemd{o: o, unit: unitName(o.Instance)}, nil
 	case "darwin":
-		return &launchd{o: o, label: launchdLabel(o.Instance)}, nil
+		l := &launchd{o: o, label: launchdLabel(o.Instance)}
+		if o.System {
+			l.o.System = true
+		} else if !fileExists(l.agentPlistPath()) && fileExists(l.systemPlistPath()) {
+			// Already installed as a system daemon: manage that one.
+			l.o.System = true
+		}
+		return l, nil
 	}
 	return nil, fmt.Errorf("service management is not supported on %s; run `kran daemon` yourself", o.GOOS)
 }
@@ -168,6 +191,12 @@ func (o Options) normalize() (Options, error) {
 	}
 	if o.PollInterval <= 0 {
 		o.PollInterval = 2 * time.Second
+	}
+	if o.SystemDir == "" {
+		o.SystemDir = "/Library/LaunchDaemons"
+	}
+	if o.GOOS == "darwin" && (o.User == "" || o.Group == "") {
+		o.User, o.Group = currentUserGroup(o.User, o.Group)
 	}
 	if o.LogPath == "" {
 		o.LogPath = filepath.Join(paths.StateDir(), "daemon.out.log")
@@ -300,4 +329,69 @@ func restartWhenIdle(ctx context.Context, o Options, ro RestartOptions) error {
 			return err
 		}
 	}
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+// currentUserGroup fills in the login name and primary group name.
+func currentUserGroup(user, group string) (string, string) {
+	u, err := osuser.Current()
+	if err != nil {
+		if user == "" {
+			user = os.Getenv("USER")
+		}
+		if group == "" {
+			group = "staff"
+		}
+		return user, group
+	}
+	if user == "" {
+		user = u.Username
+	}
+	if group == "" {
+		group = "staff"
+		if g, err := osuser.LookupGroupId(u.Gid); err == nil {
+			group = g.Name
+		}
+	}
+	return user, group
+}
+
+// Mode reports how the daemon is supervised for the standard instance
+// without touching the service manager: "launchd-system", "launchd-agent",
+// "systemd" or "" when no service is installed.
+func Mode(opts Options) string {
+	o, err := opts.normalize()
+	if err != nil {
+		return ""
+	}
+	switch o.GOOS {
+	case "darwin":
+		l := &launchd{o: o, label: launchdLabel(o.Instance)}
+		switch {
+		case fileExists(l.systemPlistPath()):
+			return "launchd-system"
+		case fileExists(l.agentPlistPath()):
+			return "launchd-agent"
+		}
+	case "linux":
+		if fileExists((&systemd{o: o, unit: unitName(o.Instance)}).unitPath()) {
+			return "systemd"
+		}
+	}
+	return ""
+}
+
+// HasGUISession reports whether LaunchAgents can load here. Always true off
+// macOS (systemd user services do not need a GUI).
+func HasGUISession(ctx context.Context, opts Options) bool {
+	o, err := opts.normalize()
+	if err != nil || o.GOOS != "darwin" {
+		return true
+	}
+	_, err = o.Runner.Run(ctx, "launchctl", "print", "gui/"+strconv.Itoa(o.UID))
+	return err == nil
 }
