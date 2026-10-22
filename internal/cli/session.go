@@ -325,6 +325,7 @@ func (r *runner) loop(ctx context.Context) int {
 	defer hb.Stop()
 	defer r.closeSession()
 	defer r.clearNote()
+	lastTick := time.Now()
 	for {
 		select {
 		case m := <-r.frames:
@@ -336,7 +337,16 @@ func (r *runner) loop(ctx context.Context) int {
 			}
 		case <-hb.C:
 			r.send(proto.FrameHeartbeat, nil)
-			if r.sess != nil && time.Since(r.lastRecv) > r.tm.DeadAfter {
+			now := time.Now()
+			if now.Sub(lastTick) > r.tm.DeadAfter/2 {
+				// This loop itself stood still (blocked writing output to a
+				// slow reader such as a pager, or the process was stopped):
+				// that silence is ours, not the daemon's. Frames may be
+				// waiting; start counting again.
+				r.lastRecv = now
+			}
+			lastTick = now
+			if r.sess != nil && now.Sub(r.lastRecv) > r.tm.DeadAfter {
 				r.closeSession()
 				if code, done := r.onDisconnect(ctx, errors.New("no heartbeat from the daemon")); done {
 					return code

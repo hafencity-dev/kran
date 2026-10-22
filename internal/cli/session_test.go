@@ -81,6 +81,21 @@ func (s *fakeSession) push(t proto.FrameType, v any) {
 
 func (s *fakeSession) drop() { s.once.Do(func() { close(s.toClient) }) }
 
+// tryPush is push for a session the CLI may have closed already.
+func (s *fakeSession) tryPush(t proto.FrameType, v any) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	b, _ := v.([]byte)
+	if v != nil && b == nil {
+		b, _ = json.Marshal(v)
+	}
+	s.toClient <- sentFrame{t, b}
+	return true
+}
+
 func (s *fakeSession) sentTypes() []proto.FrameType {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -599,5 +614,47 @@ func TestLaunchFailureCodes(t *testing.T) {
 	}
 	if !strings.Contains(h.stderr.String(), "command not found") {
 		t.Fatal(h.stderr.String())
+	}
+}
+
+// slowWriter blocks its first write, like a pager nobody scrolls or a full
+// pipe to a slow consumer.
+type slowWriter struct {
+	mu    sync.Mutex
+	buf   bytes.Buffer
+	delay time.Duration
+	once  sync.Once
+}
+
+func (w *slowWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() { time.Sleep(w.delay) })
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+func TestSlowStdoutIsNotADeadDaemon(t *testing.T) {
+	s := newFakeSession()
+	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s}}, "x")
+	out := &slowWriter{delay: 1500 * time.Millisecond} // longer than DeadAfter
+	h.r.stdout = out
+	go func() {
+		s.push(proto.FrameDecision, proto.Decision{JobID: "j", Mode: "remote", Node: "n"})
+		s.push(proto.FramePhase, proto.Phase{State: proto.JobRunning})
+		s.push(proto.FrameStdout, []byte("first"))
+		// The daemon keeps the session alive meanwhile (its heartbeats are
+		// swallowed by the client); the job ends a little after the write.
+		time.Sleep(1700 * time.Millisecond)
+		s.tryPush(proto.FrameStdout, []byte(" second"))
+		s.tryPush(proto.FrameExit, proto.Exit{JobID: "j", Code: 0, State: proto.JobSucceeded})
+	}()
+	if code := h.run(t); code != 0 {
+		t.Fatalf("code %d: %s", code, h.stderr.String())
+	}
+	if got := out.buf.String(); got != "first second" {
+		t.Fatalf("stdout %q", got)
+	}
+	if strings.Contains(h.stderr.String(), "lost the connection") {
+		t.Fatalf("a slow stdout reader was taken for a dead daemon: %q", h.stderr.String())
 	}
 }
