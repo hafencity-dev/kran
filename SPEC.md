@@ -17,7 +17,8 @@ targets linux/darwin × arm64/amd64.
 1. **Never worse than local.** Any kran failure *before the user's command
    starts* falls back to running the command locally (with the local memory
    guard), as long as kran is certain the command cannot also run
-   elsewhere: a job runs exactly once (§6.1 step 8). kran is never on the critical path in a way that loses or hangs work.
+   elsewhere: a job runs exactly once (§6.1 step 8). kran is never on the
+   critical path in a way that loses or hangs work.
    The daemon, the UI and the scheduler are optimizations, not dependencies.
 2. **Plug and play, KISS.** `curl … | sh` → `kran setup` → `kran link devmac`.
    No config files required. No open ports. No new credentials to manage.
