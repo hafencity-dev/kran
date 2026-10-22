@@ -11,6 +11,7 @@ import (
 // hookInput is the part of Claude Code's PreToolUse payload we care about.
 // Docs: https://code.claude.com/docs/en/hooks (PreToolUse input and decision control).
 type hookInput struct {
+	Cwd       string                     `json:"cwd"`
 	ToolName  string                     `json:"tool_name"`
 	ToolInput map[string]json.RawMessage `json:"tool_input"`
 }
@@ -24,11 +25,13 @@ type hookSpecific struct {
 	// UpdatedInput replaces the ENTIRE tool input, so it carries every field
 	// of the original (description, timeout, …) next to the new command.
 	UpdatedInput map[string]json.RawMessage `json:"updatedInput"`
-	// No permissionDecision on purpose: kran must not approve commands on the
-	// user's behalf. The user's normal permission flow still applies, now
-	// evaluated against the wrapped command. Verified with claude 2.1.308
-	// (`claude -p --settings`): updatedInput is applied without a decision.
-	AdditionalContext string `json:"additionalContext,omitempty"`
+	// PermissionDecision is "allow" only when the user's own allow rules
+	// cover the original command (see permissions.go); otherwise it is
+	// absent and Claude Code asks as it would have. updatedInput is applied
+	// without a decision (verified with claude 2.1.308, `claude -p`).
+	PermissionDecision       string `json:"permissionDecision,omitempty"`
+	PermissionDecisionReason string `json:"permissionDecisionReason,omitempty"`
+	AdditionalContext        string `json:"additionalContext,omitempty"`
 }
 
 // hookContext reaches the agent with every wrapped command, so it says only
@@ -73,6 +76,14 @@ func HookClaude(in io.Reader, out io.Writer, kranPath string) int {
 	if !ok || !daemonUp() {
 		return 0
 	}
+	rules, err := loadRules(settingsFiles(h.Cwd))
+	if err != nil {
+		return 0 // rules we cannot read: let Claude Code apply them unwrapped
+	}
+	wrap, allowRule := permissionVerdict(rules, cmd, []string{wrapped, "kran run --sh " + ShellQuote(cmd)})
+	if !wrap {
+		return 0
+	}
 	enc, err := json.Marshal(wrapped)
 	if err != nil {
 		return 0
@@ -82,11 +93,16 @@ func HookClaude(in io.Reader, out io.Writer, kranPath string) int {
 		upd[k] = v
 	}
 	upd["command"] = enc
-	b, err := json.Marshal(hookOutput{hookSpecific{
+	o := hookOutput{hookSpecific{
 		HookEventName:     "PreToolUse",
 		UpdatedInput:      upd,
 		AdditionalContext: hookContext,
-	}})
+	}}
+	if allowRule != "" {
+		o.HookSpecificOutput.PermissionDecision = "allow"
+		o.HookSpecificOutput.PermissionDecisionReason = "allowed by your rule " + allowRule + " (kran runs the same command)"
+	}
+	b, err := json.Marshal(o)
 	if err != nil {
 		return 0
 	}
