@@ -103,6 +103,15 @@ func (c *checker) checkService(ctx context.Context) {
 		return
 	}
 	switch {
+	case st.NoGUI && !st.Running && (!st.Installed || st.Mode == "launchd-agent"):
+		// A LaunchAgent cannot load without a GUI login. kran copes: incoming
+		// connections start the daemon, so this is a mode, not a fault.
+		d := "on-demand: no GUI login session on this Mac, so the daemon starts when a job or a linked machine connects"
+		if c.daemon != nil {
+			d += " (running now)"
+		}
+		c.add(Result{ID: "service", Title: "background service", Level: OK,
+			Detail: d + "; to keep it running permanently: kran service install --system"})
 	case !st.Installed:
 		r := Result{ID: "service", Title: "background service", Level: Fail, Detail: "not installed, so kran stops when you log out or reboot", Fix: "kran service install"}
 		r.fix = func(ctx context.Context) error { _, err := m.Install(ctx); return err }
@@ -116,7 +125,7 @@ func (c *checker) checkService(ctx context.Context) {
 			Detail: fmt.Sprintf("running (pid %d) but the daemon does not answer on %s%s", st.PID, paths.Socket(), logTail(st.LogPath)),
 			Fix:    "kran service restart --force"})
 	default:
-		c.add(Result{ID: "service", Title: "background service", Level: OK, Detail: fmt.Sprintf("%s, pid %d", st.Manager, st.PID)})
+		c.add(Result{ID: "service", Title: "background service", Level: OK, Detail: fmt.Sprintf("%s, pid %d", modeText(st.Mode, st.Manager), st.PID)})
 	}
 	if st.Linger != nil && !*st.Linger {
 		r := Result{ID: "linger", Title: "stays running after logout", Level: Warn,
@@ -168,3 +177,16 @@ func (c *checker) checkLocalResources(ctx context.Context) {
 }
 
 func gib(n int64) string { return fmt.Sprintf("%.1f GiB", float64(n)/(1<<30)) }
+
+// modeText names how the daemon is supervised.
+func modeText(mode, manager string) string {
+	switch mode {
+	case "launchd-agent":
+		return "launchd agent"
+	case "launchd-system":
+		return "launchd system daemon"
+	case "systemd":
+		return "systemd user unit"
+	}
+	return manager
+}

@@ -210,3 +210,38 @@ func TestColorOnlyOnTTYWithoutNoColor(t *testing.T) {
 		t.Fatal("color on a tty")
 	}
 }
+
+func TestServiceInstallSystemOnLinuxExplains(t *testing.T) {
+	if runtimeGOOS() != "linux" {
+		t.Skip("linux-only message")
+	}
+	a, _, errb := testApp(nil)
+	if code := a.Execute(context.Background(), []string{"service", "install", "--system"}); code != 2 || !strings.Contains(errb.String(), "enable-linger") {
+		t.Fatal(code, errb.String())
+	}
+}
+
+func TestServiceInstallDryRunChangesNothing(t *testing.T) {
+	d := t.TempDir()
+	t.Setenv("HOME", d)
+	t.Setenv("XDG_CONFIG_HOME", d+"/xdg")
+	t.Setenv("KRAN_STATE_DIR", d+"/state")
+	a, out, _ := testApp(nil)
+	if code := a.Execute(context.Background(), []string{"service", "install", "--dry-run"}); code != 0 {
+		t.Fatal(code)
+	}
+	if !strings.Contains(out.String(), "daemon") || !strings.Contains(out.String(), "Dry run: nothing was changed") {
+		t.Fatal(out.String())
+	}
+	if _, err := os.Stat(d + "/xdg"); err == nil {
+		t.Fatal("dry run wrote files")
+	}
+}
+
+func TestNoGUIMessageNamesTheCommand(t *testing.T) {
+	for _, want := range []string{"on demand", "kran service install --system", "password"} {
+		if !strings.Contains(noGUIMessage, want) {
+			t.Errorf("message lacks %q", want)
+		}
+	}
+}

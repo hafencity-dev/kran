@@ -272,6 +272,9 @@ func Link(ctx context.Context, o Options) (*Result, error) {
 		res.Notes = append(res.Notes, fmt.Sprintf("%s is already named %q; --name %s was ignored", o.Host, info.Name, o.Name))
 	}
 	res.RemoteVersion = info.Version
+	if info.NoGUI {
+		res.Notes = append(res.Notes, fmt.Sprintf("%s has no GUI login session, so its kran daemon starts on demand when kran connects. To keep it running permanently: ssh -t %s %s service install --system", config.SanitizeName(info.Name), o.Host, kranPath))
+	}
 	if rOS == "darwin" {
 		if note := pushLinuxBinary(ctx, c, src, info, rArch, &changed); note != "" {
 			res.Notes = append(res.Notes, note)
