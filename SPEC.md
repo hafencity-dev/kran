@@ -291,10 +291,12 @@ Forward all env vars **except**: host-specific (`PATH`, `HOME`, `USER`,
 `GOPATH`, `GOCACHE`, `GOMODCACHE`, `GOTOOLCHAIN`, `NVM_*`, `PNPM_HOME`,
 `npm_config_cache`, `*_SOCK`, `*_SOCKET`, `LD_*`, `DYLD_*`, `KRAN_*` except
 `KRAN_OWNER`) and secrets (name matches `/(TOKEN|SECRET|PASSWORD|PASSWD|
-PRIVATE|CREDENTIAL|API_KEY|APIKEY|ACCESS_KEY)/i` or `AWS_*`, `GH_*`,
-`GITHUB_*`, `ANTHROPIC_*`, `OPENAI_*`) unless listed in `.kran.toml
+PASSPHRASE|PRIVATE|CREDENTIAL|API_KEY|APIKEY|ACCESS_KEY|(^|_)AUTH(_|$))/i`
+or `AWS_*`, `GH_*`, `GITHUB_*`, `ANTHROPIC_*`, `OPENAI_*`, or the value is a
+URL with a password, `scheme://user:pass@…`) unless listed in `.kran.toml
 env.forward` or `--env NAME`. `TERM`, `COLORTERM`, `NO_COLOR`,
-`FORCE_COLOR`, `CI`, `LANG`, `LC_*`, `TZ` are forwarded. The target sets
+`FORCE_COLOR`, `CI`, `LANG`, `LC_*` (unless the name looks like a secret),
+`TZ` are forwarded. The target sets
 `PATH` (runtime default + toolchains), `HOME` (real), `TMPDIR` (per job),
 `GOCACHE`/`GOMODCACHE`/`npm_config_store_dir` (node-shared caches),
 `KRAN_JOB_ID`, `KRAN_NODE`, `KRAN_ORIGIN`, `KRAN_ORIGIN_ROOT`.
