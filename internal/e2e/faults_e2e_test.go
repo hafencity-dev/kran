@@ -169,7 +169,7 @@ func TestE2EQueueReasonAndCancel(t *testing.T) {
 	repo := makeRepo(t, filepath.Join(c.base, "repo"), map[string]string{"f": "x"})
 
 	first := a.startKran(runOpts{dir: repo}, "run", "--json-events", "--local", "--", "sh", "-c", "echo started; sleep 8")
-	firstID := first.jobID(30 * time.Second)
+	firstID := first.jobID(decisionWait)
 	if !first.waitStdout("started", 30*time.Second) {
 		t.Fatalf("first job: %s", first.wait())
 	}
@@ -220,7 +220,7 @@ func TestE2EQueueReasonAndCancel(t *testing.T) {
 
 	// Cancel while running (remote job): the process tree on b dies.
 	p := a.startKran(runOpts{dir: repo}, "run", "--json-events", "-n", "b", "--", "sh", "-c", "echo started; sleep 60 & wait")
-	id := p.jobID(30 * time.Second)
+	id := p.jobID(decisionWait)
 	if !p.waitStdout("started", 60*time.Second) {
 		t.Fatalf("remote job: %s", p.wait())
 	}
@@ -247,7 +247,7 @@ func TestE2EQueueReasonAndCancel(t *testing.T) {
 	rand.Read(big)
 	must(t, os.WriteFile(filepath.Join(repo, "big.bin"), big, 0o644))
 	p = a.startKran(runOpts{dir: repo}, "run", "--json-events", "-n", "b", "--", "echo", "must not run")
-	id = p.jobID(30 * time.Second)
+	id = p.jobID(decisionWait)
 	if id == "" {
 		t.Fatalf("no decision: %s", p.wait())
 	}
@@ -386,7 +386,7 @@ func TestE2ELeaseExpiryAfterNetworkCut(t *testing.T) {
 	a, b := c.node("a"), c.node("b")
 	repo := makeRepo(t, filepath.Join(c.base, "repo"), map[string]string{"f": "x"})
 	p := a.startKran(runOpts{dir: repo}, "run", "--json-events", "-n", "b", "--", "sh", "-c", "echo started; sleep 300 & wait")
-	id := p.jobID(30 * time.Second)
+	id := p.jobID(decisionWait)
 	if !p.waitStdout("started", 60*time.Second) {
 		t.Fatalf("%s", p.wait())
 	}
@@ -504,7 +504,7 @@ func TestE2ELocalJobEndsWhileDaemonDown(t *testing.T) {
 	a := c.node("a")
 	repo := makeRepo(t, filepath.Join(c.base, "repo"), map[string]string{"f": "x"})
 	p := a.startKran(runOpts{dir: repo}, "run", "--json-events", "--local", "--", "sh", "-c", "echo started; sleep 1; exit 3")
-	id := p.jobID(30 * time.Second)
+	id := p.jobID(decisionWait)
 	if !p.waitStdout("started", 30*time.Second) {
 		t.Fatal(p.wait())
 	}

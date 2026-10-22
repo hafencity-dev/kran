@@ -107,7 +107,7 @@ func TestE2ECLIKilled(t *testing.T) {
 	for _, where := range [][]string{{"-n", "b"}, {"--local"}} {
 		p := a.startKran(runOpts{dir: repo}, append(append([]string{"run", "--json-events"}, where...), "--",
 			"sh", "-c", "echo started; (sleep 300 &) ; sleep 300")...)
-		id := p.jobID(30 * time.Second)
+		id := p.jobID(decisionWait)
 		if !p.waitStdout("started", 60*time.Second) {
 			t.Fatal(p.wait())
 		}

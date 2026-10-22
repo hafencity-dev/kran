@@ -1006,6 +1006,11 @@ func (p *cliProc) waitEvent(kind string, d time.Duration) map[string]any {
 	return ev
 }
 
+// decisionWait bounds the wait for a job's placement. A loaded CI runner
+// (two daemons on three cores) is overloaded by kran's own measure, so a
+// job may rightly wait for CPU a minute or more before it is placed.
+const decisionWait = 150 * time.Second
+
 // jobID is the job ID from the decision event (needs --json-events).
 func (p *cliProc) jobID(d time.Duration) string {
 	if ev := p.waitEvent("decision", d); ev != nil {
