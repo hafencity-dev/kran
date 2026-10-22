@@ -1,0 +1,690 @@
+package cli
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"sort"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/hafencity-dev/kran/internal/client"
+	"github.com/hafencity-dev/kran/internal/proto"
+)
+
+// timing holds the intervals of the run session; tests shorten them.
+type timing struct {
+	NoticeDelay time.Duration // a wait must exceed this before kran says anything
+	Heartbeat   time.Duration // we send a heartbeat this often
+	DeadAfter   time.Duration // no frame for this long = connection lost
+	Reconnect   time.Duration // how long to retry the daemon after a drop
+	DoubleInt   time.Duration // second Ctrl-C within this escalates to KILL
+	RetryEvery  time.Duration
+}
+
+func defaultTiming() timing {
+	return timing{NoticeDelay: 2 * time.Second, Heartbeat: 2 * time.Second, DeadAfter: 10 * time.Second,
+		Reconnect: 10 * time.Second, DoubleInt: 2 * time.Second, RetryEvery: 300 * time.Millisecond}
+}
+
+// runner drives one `kran run` (SPEC §6.1).
+type runner struct {
+	spec    proto.JobSpec
+	flags   RunFlags
+	env     []string // full local environment, for local execution
+	dial    func(ctx context.Context) (client.Client, error)
+	stdin   *os.File
+	stdout  io.Writer
+	stderr  *lineWriter
+	stdio   localStdio
+	signals <-chan os.Signal
+	winch   <-chan os.Signal
+	size    func() *proto.TTY
+	tm      timing
+	start   func(localJob) (*localProc, *localError)
+	probe   func(int64) bool
+	color   style
+
+	// session state
+	cl       client.Client
+	sess     client.RunSession
+	gen      int
+	frames   chan frameMsg
+	jobID    string
+	decision *proto.Decision
+	remote   bool // a remote placement is active
+	started  bool // the user's command has started (remote running, or output seen)
+	offset   int64
+	lastRecv time.Time
+	local    *localProc
+	localCh  <-chan proto.Exit
+	fallback bool
+	lastInt  time.Time
+
+	// notices
+	pending   string
+	lastSaid  string
+	noteTimer *time.Timer
+	noteShown bool
+	noteC     <-chan time.Time
+
+	stdinCh     chan []byte
+	stdinOnce   bool
+	reconnectCh chan reconnectResult
+	reconnectOn bool
+	quit        chan struct{}
+}
+
+type frameMsg struct {
+	gen     int
+	t       proto.FrameType
+	payload []byte
+	err     error
+}
+
+type reconnectResult struct {
+	cl   client.Client
+	sess client.RunSession
+	err  error
+}
+
+// ---------------------------------------------------------------------------
+// output helpers
+
+func (r *runner) say(format string, a ...any) {
+	if r.flags.Quiet {
+		return
+	}
+	r.sayAlways(format, a...)
+}
+
+func (r *runner) sayAlways(format string, a ...any) {
+	msg := fmt.Sprintf(format, a...)
+	if r.flags.JSONEvents {
+		r.event("notice", map[string]any{"message": msg})
+		return
+	}
+	r.stderr.line("kran: " + msg)
+}
+
+// event writes a machine-readable progress line: {"kran":"<name>",…}.
+func (r *runner) event(name string, fields map[string]any) {
+	if !r.flags.JSONEvents {
+		return
+	}
+	head := fmt.Sprintf(`{"kran":%q`, name)
+	if len(fields) == 0 {
+		r.stderr.line(head + "}")
+		return
+	}
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	b.WriteString(head)
+	for _, k := range keys {
+		v, err := json.Marshal(fields[k])
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(&b, ",%q:%s", k, v)
+	}
+	b.WriteString("}")
+	r.stderr.line(b.String())
+}
+
+// pendNote holds a waiting/progress message until it has lasted NoticeDelay,
+// then prints it; changes afterwards print immediately.
+func (r *runner) pendNote(text string) {
+	if text == "" || text == r.lastSaid || r.flags.JSONEvents {
+		return // JSON mode already gets every notice and phase as an event
+	}
+	if r.noteShown {
+		r.printNote(text)
+		return
+	}
+	r.pending = text
+	if r.noteTimer == nil {
+		r.noteTimer = time.NewTimer(r.tm.NoticeDelay)
+		r.noteC = r.noteTimer.C
+	}
+}
+
+func (r *runner) printNote(text string) {
+	r.lastSaid = text
+	r.say("%s", text)
+	r.noteShown = true
+}
+
+func (r *runner) clearNote() {
+	if r.noteTimer != nil {
+		r.noteTimer.Stop()
+		r.noteTimer = nil
+		r.noteC = nil
+	}
+	r.pending = ""
+	r.noteShown = false
+}
+
+// ---------------------------------------------------------------------------
+// entry points
+
+// Run executes the job and returns kran run's exit code.
+func (r *runner) Run(ctx context.Context) int {
+	r.quit = make(chan struct{})
+	defer close(r.quit)
+	r.frames = make(chan frameMsg, 64)
+	r.reconnectCh = make(chan reconnectResult, 1)
+
+	cl, err := r.dial(ctx)
+	if err != nil {
+		return r.noSession(ctx, "daemon not running — running locally (start it: kran service start)", err)
+	}
+	defer func() {
+		if r.cl != nil {
+			_ = r.cl.Close()
+		}
+	}()
+	r.cl = cl
+	vctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	v, verr := cl.Version(vctx)
+	cancel()
+	if verr != nil {
+		return r.noSession(ctx, "daemon not responding — running locally (restart it: kran service restart --force)", verr)
+	}
+	if v.API != proto.APIVersion {
+		return r.noSession(ctx, fmt.Sprintf("daemon %s speaks API %s, this kran speaks %s — running locally (update: kran upgrade)", v.Version, v.API, proto.APIVersion), nil)
+	}
+	sess, err := cl.Run(ctx)
+	if err != nil {
+		return r.noSession(ctx, "could not open a run session — running locally", err)
+	}
+	r.attach(sess)
+	if err := sess.SendJSON(proto.FrameSubmit, r.spec); err != nil {
+		r.closeSession()
+		return r.noSession(ctx, "could not submit the job — running locally", err)
+	}
+	return r.loop(ctx)
+}
+
+// noSession is the path for every failure before a run session exists: run
+// locally unless the user forbade it.
+func (r *runner) noSession(ctx context.Context, why string, cause error) int {
+	if r.spec.NoFallback {
+		msg := strings.SplitN(why, " — ", 2)[0]
+		if cause != nil && !errors.Is(cause, client.ErrNoDaemon) {
+			msg += " (" + cause.Error() + ")"
+		}
+		r.sayAlways("%s, and --remote/--no-fallback forbids running locally; check the daemon with `kran doctor` or start it with `kran service start`", msg)
+		r.event("exit", map[string]any{"code": proto.ExitInfra, "state": proto.JobInfraErr})
+		return proto.ExitInfra
+	}
+	r.event("fallback", map[string]any{"reason": why})
+	r.say("%s", why)
+	return r.standalone(ctx)
+}
+
+// localEnvelope is the memory guard used without a daemon decision: cap the
+// job at 75% of physical memory so a runaway build is killed instead of
+// freezing the machine.
+func defaultEnvelope() *proto.LocalEnvelope {
+	env := &proto.LocalEnvelope{Slice: "kran.slice"}
+	if m := totalMemory(); m > 0 {
+		env.MemMax = m / 4 * 3
+	}
+	return env
+}
+
+func (r *runner) localJob(env *proto.LocalEnvelope) localJob {
+	return localJob{JobID: r.jobID, Argv: r.spec.Argv, Dir: r.spec.Cwd, Env: r.env, Envelope: env,
+		Stdio: r.stdio, ScopeProbe: r.probe}
+}
+
+// standalone runs the command locally with no daemon involvement.
+func (r *runner) standalone(ctx context.Context) int {
+	p, lerr := r.start(r.localJob(defaultEnvelope()))
+	if lerr != nil {
+		return r.launchFailed(lerr)
+	}
+	r.local, r.localCh = p, p.Done()
+	for {
+		select {
+		case ex := <-r.localCh:
+			r.event("exit", map[string]any{"code": ex.Code, "signal": ex.Signal, "state": ex.State, "fallback": true})
+			return ex.Code
+		case sig := <-r.signals:
+			r.forwardLocal(sig)
+		case <-ctx.Done():
+			_ = r.local.Signal("TERM")
+			r.signals = nil
+			r.localCh = r.local.Done()
+		}
+	}
+}
+
+func (r *runner) launchFailed(lerr *localError) int {
+	r.sayAlways("%s", lerr.Msg)
+	r.event("exit", map[string]any{"code": lerr.Code, "state": proto.JobFailed})
+	return lerr.Code
+}
+
+// ---------------------------------------------------------------------------
+// session loop
+
+func (r *runner) attach(s client.RunSession) {
+	r.sess = s
+	r.gen++
+	r.lastRecv = time.Now()
+	gen := r.gen
+	go func() {
+		for {
+			t, p, err := s.Recv()
+			m := frameMsg{gen: gen, t: t, err: err}
+			if err == nil {
+				m.payload = append([]byte(nil), p...)
+			}
+			select {
+			case r.frames <- m:
+			case <-r.quit:
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+}
+
+func (r *runner) closeSession() {
+	if r.sess != nil {
+		_ = r.sess.Close()
+		r.sess = nil
+	}
+}
+
+func (r *runner) send(t proto.FrameType, payload []byte) {
+	if r.sess != nil {
+		_ = r.sess.Send(t, payload)
+	}
+}
+
+func (r *runner) sendJSON(t proto.FrameType, v any) {
+	if r.sess != nil {
+		_ = r.sess.SendJSON(t, v)
+	}
+}
+
+func (r *runner) loop(ctx context.Context) int {
+	hb := time.NewTicker(r.tm.Heartbeat)
+	defer hb.Stop()
+	defer r.closeSession()
+	defer r.clearNote()
+	for {
+		select {
+		case m := <-r.frames:
+			if m.gen != r.gen {
+				continue
+			}
+			if code, done := r.onFrame(ctx, m); done {
+				return code
+			}
+		case <-hb.C:
+			r.send(proto.FrameHeartbeat, nil)
+			if r.sess != nil && time.Since(r.lastRecv) > r.tm.DeadAfter {
+				r.closeSession()
+				if code, done := r.onDisconnect(ctx, errors.New("no heartbeat from the daemon")); done {
+					return code
+				}
+			}
+		case sig := <-r.signals:
+			if code, done := r.onSignal(sig); done {
+				return code
+			}
+		case <-r.winch:
+			if r.remote && r.size != nil {
+				if t := r.size(); t != nil {
+					r.sendJSON(proto.FrameResize, t)
+				}
+			}
+		case b := <-r.stdinCh:
+			if b == nil {
+				r.send(proto.FrameStdinEOF, nil)
+				r.stdinCh = nil
+			} else {
+				r.send(proto.FrameStdin, b)
+			}
+		case ex := <-r.localCh:
+			return r.onLocalDone(ex)
+		case <-r.noteC:
+			r.noteTimer, r.noteC = nil, nil
+			if r.pending != "" {
+				r.printNote(r.pending)
+				r.pending = ""
+			}
+		case rr := <-r.reconnectCh:
+			if code, done := r.onReconnect(ctx, rr); done {
+				return code
+			}
+		case <-ctx.Done():
+			// Context cancelled (SIGTERM at the process level): treat as TERM.
+			if code, done := r.onSignal(syscall.SIGTERM); done {
+				return code
+			}
+		}
+	}
+}
+
+func (r *runner) onFrame(ctx context.Context, m frameMsg) (int, bool) {
+	if m.err != nil {
+		return r.onDisconnect(ctx, m.err)
+	}
+	r.lastRecv = time.Now()
+	switch m.t {
+	case proto.FrameHeartbeat:
+	case proto.FrameStdout:
+		r.started = true
+		r.offset += int64(len(m.payload))
+		_, _ = r.stdout.Write(m.payload)
+	case proto.FrameStderr:
+		r.started = true
+		r.offset += int64(len(m.payload))
+		_, _ = r.stderr.Write(m.payload)
+	case proto.FrameNotice:
+		var n proto.Notice
+		if json.Unmarshal(m.payload, &n) == nil {
+			r.onNotice(n)
+		}
+	case proto.FramePhase:
+		var p proto.Phase
+		if json.Unmarshal(m.payload, &p) == nil {
+			r.onPhase(p)
+		}
+	case proto.FrameStarted:
+		r.started = true
+		r.clearNote()
+	case proto.FrameDecision:
+		var d proto.Decision
+		if err := json.Unmarshal(m.payload, &d); err != nil {
+			return r.fail("the daemon sent an unreadable decision (" + err.Error() + ")")
+		}
+		return r.onDecision(ctx, d)
+	case proto.FrameExit:
+		var ex proto.Exit
+		if err := json.Unmarshal(m.payload, &ex); err != nil {
+			return r.fail("the daemon sent an unreadable exit status")
+		}
+		return r.onExit(ex), true
+	case proto.FrameError:
+		var e proto.APIError
+		_ = json.Unmarshal(m.payload, &e)
+		return r.onErrorFrame(ctx, e)
+	}
+	return 0, false
+}
+
+func (r *runner) onNotice(n proto.Notice) {
+	r.event("notice", map[string]any{"kind": n.Kind, "message": n.Message, "job_id": n.JobID})
+	switch n.Kind {
+	case "queued":
+		r.pendNote(n.Message)
+	case "placed":
+		// The decision frame announces remote placement.
+	default:
+		r.clearNote()
+		r.lastSaid = n.Message
+		if !r.flags.JSONEvents {
+			r.say("%s", n.Message)
+		}
+	}
+}
+
+func (r *runner) onPhase(p proto.Phase) {
+	r.event("phase", map[string]any{"state": p.State, "message": p.Message, "progress": p.Progress})
+	switch p.State {
+	case proto.JobSyncing, proto.JobSetup:
+		text := string(p.State)
+		if p.Message != "" {
+			text += " — " + p.Message
+		}
+		r.pendNote(text)
+	case proto.JobRunning:
+		r.started = true
+		r.clearNote()
+	}
+}
+
+func (r *runner) onDecision(ctx context.Context, d proto.Decision) (int, bool) {
+	r.clearNote()
+	r.jobID = d.JobID
+	r.event("decision", map[string]any{"job_id": d.JobID, "mode": d.Mode, "node": d.Node, "runtime": d.Runtime,
+		"reason": d.Reason, "estimate": d.Estimate})
+	if d.Mode == "remote" {
+		r.remote = true
+		r.decision = &d
+		line := "running on " + d.Node
+		if d.Runtime == proto.RuntimeContainer {
+			line += " (container)"
+		}
+		if d.Reason != "" {
+			line += " — " + d.Reason
+		}
+		if !r.flags.JSONEvents {
+			r.say("%s", line)
+		}
+		r.startStdin()
+		return 0, false
+	}
+	// Local placement (or a fallback after a failed remote attempt).
+	if r.remote {
+		r.fallback = true
+	}
+	r.remote = false
+	p, lerr := r.start(r.localJob(d.Envelope))
+	if lerr != nil {
+		r.sendJSON(proto.FrameExit, proto.Exit{JobID: d.JobID, Code: lerr.Code, State: proto.JobFailed, Reason: lerr.Msg})
+		return r.launchFailed(lerr), true
+	}
+	r.local, r.localCh, r.started = p, p.Done(), true
+	r.sendJSON(proto.FrameStarted, p.Started)
+	r.event("started", map[string]any{"job_id": d.JobID, "pid": p.Started.PID, "scope": p.Started.Scope})
+	return 0, false
+}
+
+func (r *runner) onLocalDone(ex proto.Exit) int {
+	ex.JobID = r.jobID
+	ex.Fallback = r.fallback
+	r.local, r.localCh = nil, nil
+	r.sendJSON(proto.FrameExit, ex)
+	r.event("exit", map[string]any{"code": ex.Code, "signal": ex.Signal, "state": ex.State, "fallback": r.fallback})
+	return ex.Code
+}
+
+func (r *runner) onExit(ex proto.Exit) int {
+	r.event("exit", map[string]any{"code": ex.Code, "signal": ex.Signal, "state": ex.State, "reason": ex.Reason,
+		"node": ex.Node, "usage": ex.Usage, "fallback": ex.Fallback})
+	code := ex.Code
+	if (ex.State == proto.JobInfraErr || ex.State == proto.JobLost) && code == 0 {
+		code = proto.ExitInfra
+	}
+	if ex.Reason != "" {
+		r.sayAlways("%s", ex.Reason)
+	}
+	return code
+}
+
+// onErrorFrame: before the command started, fall back to local; after, exit 125.
+func (r *runner) onErrorFrame(ctx context.Context, e proto.APIError) (int, bool) {
+	msg := e.Error
+	if msg == "" {
+		msg = "the daemon reported an error"
+	}
+	if e.Hint != "" {
+		msg += " (" + e.Hint + ")"
+	}
+	if r.local == nil && !r.started {
+		r.closeSession()
+		return r.noSession(ctx, msg+" — running locally", nil), true
+	}
+	return r.fail(msg)
+}
+
+func (r *runner) fail(msg string) (int, bool) {
+	r.sayAlways("%s", msg)
+	r.event("exit", map[string]any{"code": proto.ExitInfra, "state": proto.JobInfraErr, "reason": msg})
+	return proto.ExitInfra, true
+}
+
+// onDisconnect handles a dropped daemon connection.
+func (r *runner) onDisconnect(ctx context.Context, cause error) (int, bool) {
+	r.closeSession()
+	switch {
+	case r.jobID == "" || (r.remote && !r.started):
+		return r.noSession(ctx, "lost the connection to the daemon before the job started — running locally", cause), true
+	case r.reconnectOn:
+		return 0, false
+	}
+	r.reconnectOn = true
+	go r.reconnect()
+	return 0, false
+}
+
+func (r *runner) reconnect() {
+	deadline := time.Now().Add(r.tm.Reconnect)
+	var last error
+	for time.Now().Before(deadline) {
+		select {
+		case <-r.quit:
+			return
+		case <-time.After(r.tm.RetryEvery):
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		cl, err := r.dial(ctx)
+		if err == nil {
+			var s client.RunSession
+			if s, err = cl.Run(ctx); err == nil {
+				cancel()
+				r.reconnectCh <- reconnectResult{cl: cl, sess: s}
+				return
+			}
+			_ = cl.Close()
+		}
+		cancel()
+		last = err
+	}
+	r.reconnectCh <- reconnectResult{err: last}
+}
+
+func (r *runner) onReconnect(ctx context.Context, rr reconnectResult) (int, bool) {
+	r.reconnectOn = false
+	if rr.err != nil || rr.sess == nil {
+		if r.local != nil {
+			return 0, false // keep running locally; the exit code is still ours
+		}
+		node := "its node"
+		if r.decision != nil {
+			node = r.decision.Node
+		}
+		return r.fail(fmt.Sprintf("lost the connection to the kran daemon; job %s may still be running on %s (check: kran jobs)", r.jobID, node))
+	}
+	if r.cl != nil {
+		_ = r.cl.Close()
+	}
+	r.cl = rr.cl
+	r.attach(rr.sess)
+	r.sendJSON(proto.FrameReattach, proto.Reattach{JobID: r.jobID, Offset: r.offset})
+	return 0, false
+}
+
+// onSignal forwards a signal; a second Ctrl-C within DoubleInt escalates.
+func (r *runner) onSignal(sig os.Signal) (int, bool) {
+	name := sigName(sig)
+	if name == "" {
+		return 0, false
+	}
+	if r.local != nil {
+		r.forwardLocal(sig)
+		return 0, false
+	}
+	if r.remote && r.jobID != "" {
+		if name == "INT" {
+			if !r.lastInt.IsZero() && time.Since(r.lastInt) < r.tm.DoubleInt {
+				name = "KILL"
+			}
+			r.lastInt = time.Now()
+		}
+		r.sendJSON(proto.FrameSignal, proto.Signal{Name: name})
+		return 0, false
+	}
+	// Still waiting in the queue: cancel by leaving.
+	r.sendJSON(proto.FrameSignal, proto.Signal{Name: name})
+	r.event("exit", map[string]any{"code": 128 + sigNum(name), "state": proto.JobCanceled})
+	return 128 + sigNum(name), true
+}
+
+func (r *runner) forwardLocal(sig os.Signal) {
+	name := sigName(sig)
+	if name == "" || r.local == nil {
+		return
+	}
+	if name == "INT" {
+		if !r.lastInt.IsZero() && time.Since(r.lastInt) < r.tm.DoubleInt {
+			name = "KILL"
+		}
+		r.lastInt = time.Now()
+	}
+	_ = r.local.Signal(name)
+}
+
+func sigName(s os.Signal) string {
+	switch s {
+	case syscall.SIGINT:
+		return "INT"
+	case syscall.SIGTERM:
+		return "TERM"
+	case syscall.SIGHUP:
+		return "HUP"
+	case syscall.SIGQUIT:
+		return "QUIT"
+	}
+	return ""
+}
+
+func sigNum(name string) int { return int(signalNames[name]) }
+
+// startStdin forwards stdin to a remote job (-i). It starts only once the job
+// is known to be remote so a local placement keeps the terminal's stdin.
+func (r *runner) startStdin() {
+	if !r.flags.Stdin || r.stdinOnce || r.stdin == nil {
+		return
+	}
+	r.stdinOnce = true
+	ch := make(chan []byte)
+	r.stdinCh = ch
+	in, quit := r.stdin, r.quit
+	go func() {
+		buf := make([]byte, 32<<10)
+		for {
+			n, err := in.Read(buf)
+			if n > 0 {
+				select {
+				case ch <- append([]byte(nil), buf[:n]...):
+				case <-quit:
+					return
+				}
+			}
+			if err != nil {
+				select {
+				case ch <- nil:
+				case <-quit:
+				}
+				return
+			}
+		}
+	}()
+}
