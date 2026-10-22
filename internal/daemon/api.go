@@ -36,6 +36,7 @@ func (d *Daemon) routes(unix bool) http.Handler {
 	mux.HandleFunc("GET /api/v1/jobs/{id}/log", d.handleLog)
 	mux.HandleFunc("POST /api/v1/jobs/{id}/cancel", d.handleCancel)
 	mux.HandleFunc("POST /api/v1/jobs/{id}/priority", d.handlePriority)
+	mux.HandleFunc("GET /api/v1/nodes/{name}/metrics", d.handleMetricsHistory)
 	mux.HandleFunc("POST /api/v1/nodes/{name}/drain", d.handleDrain(true))
 	mux.HandleFunc("POST /api/v1/nodes/{name}/resume", d.handleDrain(false))
 	if unix {
@@ -109,10 +110,14 @@ func (d *Daemon) tokenOK(r *http.Request, allowQuery bool) bool {
 // must be a loopback name (DNS rebinding). Non-loopback: every API call
 // needs the token (header, or ?token= for GETs such as SSE); static UI
 // assets stay public because they carry no data.
-func (d *Daemon) tcpAuth(next http.Handler, loopback bool) http.Handler {
+func (d *Daemon) tcpAuth(next http.Handler, loopback bool, bindHost string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if loopback && !loopbackHost(r.Host) {
 			writeAPIError(w, http.StatusForbidden, "unexpected Host header", "open the UI through 127.0.0.1 or localhost")
+			return
+		}
+		if !loopback && !hostMatches(r.Host, bindHost) && !d.tokenOK(r, true) {
+			writeAPIError(w, http.StatusForbidden, "unexpected Host header", "open the UI with kran ui --print-url")
 			return
 		}
 		isAPI := strings.HasPrefix(r.URL.Path, "/api/")
@@ -127,6 +132,18 @@ func (d *Daemon) tcpAuth(next http.Handler, loopback bool) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// hostMatches accepts the bind address (any host for a wildcard bind).
+func hostMatches(hostport, bindHost string) bool {
+	if bindHost == "" || bindHost == "0.0.0.0" || bindHost == "::" {
+		return true
+	}
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	return strings.EqualFold(strings.Trim(host, "[]"), strings.Trim(bindHost, "[]"))
 }
 
 func loopbackHost(hostport string) bool {
@@ -208,7 +225,8 @@ func (d *Daemon) handleEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleJobs(w http.ResponseWriter, r *http.Request) {
-	q := store.JobQuery{Limit: 50, Owner: r.URL.Query().Get("owner"), Node: r.URL.Query().Get("node")}
+	q := store.JobQuery{Limit: 50, Owner: r.URL.Query().Get("owner"), Node: r.URL.Query().Get("node"),
+		State: proto.JobState(r.URL.Query().Get("state"))}
 	if v := r.URL.Query().Get("limit"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 0 {
@@ -236,6 +254,9 @@ func (d *Daemon) handleJobs(w http.ResponseWriter, r *http.Request) {
 	if jobs == nil {
 		jobs = []proto.Job{}
 	}
+	for i := range jobs {
+		jobs[i] = publicJob(jobs[i])
+	}
 	writeJSON(w, http.StatusOK, jobs)
 }
 
@@ -246,7 +267,7 @@ func (d *Daemon) handleJob(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusNotFound, "no job "+id, "list jobs: kran jobs")
 		return
 	}
-	writeJSON(w, http.StatusOK, j)
+	writeJSON(w, http.StatusOK, publicJob(j))
 }
 
 func (d *Daemon) handleCancel(w http.ResponseWriter, r *http.Request) {
@@ -358,7 +379,7 @@ func (d *Daemon) handleLog(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	if !follow {
 		// Only what exists now.
-		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		for {
 			t, p, err := rd.NextNoWait()
 			if err != nil {
@@ -375,34 +396,63 @@ func (d *Daemon) handleLog(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
+	// Unnamed messages carry proto.OutputChunk; "data" never splits a UTF-8
+	// sequence (incomplete tails wait for the next chunk), "b64" is exact.
 	pos := offset
+	var pending []byte
+	stream := "stdout"
+	emit := func(final bool) bool {
+		n := len(pending)
+		if !final {
+			n = utf8Complete(pending)
+		}
+		if n == 0 {
+			return true
+		}
+		b := pending[:n]
+		pos += int64(n)
+		msg, _ := json.Marshal(proto.OutputChunk{Offset: pos, Data: string(b), Stream: stream, B64: base64.StdEncoding.EncodeToString(b)})
+		pending = append(pending[:0], pending[n:]...)
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", msg); err != nil {
+			return false
+		}
+		return true
+	}
+	end := func(exit json.RawMessage) {
+		emit(true)
+		b, _ := json.Marshal(struct {
+			Offset int64           `json:"offset"`
+			Exit   json.RawMessage `json:"exit,omitempty"`
+		}{pos, exit})
+		fmt.Fprintf(w, "event: end\ndata: %s\n\n", b)
+		if fl != nil {
+			fl.Flush()
+		}
+	}
 	for {
 		t, p, err := rd.Next(ctx)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				fmt.Fprintf(w, "event: end\ndata: {}\n\n")
-				if fl != nil {
-					fl.Flush()
-				}
+				end(nil)
 			}
 			return
 		}
 		switch {
 		case isOutput(t):
-			stream := "stdout"
+			s := "stdout"
 			if t == proto.FrameStderr {
-				stream = "stderr"
+				s = "stderr"
 			}
-			b, _ := json.Marshal(proto.OutputChunk{Stream: stream, Offset: pos, B64: base64.StdEncoding.EncodeToString(p)})
-			pos += int64(len(p))
-			if _, err := fmt.Fprintf(w, "event: output\ndata: %s\n\n", b); err != nil {
+			if s != stream && !emit(true) {
+				return
+			}
+			stream = s
+			pending = append(pending, p...)
+			if !emit(false) {
 				return
 			}
 		case t == proto.FrameExit:
-			fmt.Fprintf(w, "event: exit\ndata: %s\n\n", p)
-			if fl != nil {
-				fl.Flush()
-			}
+			end(append(json.RawMessage(nil), p...))
 			return
 		default:
 			continue
@@ -411,4 +461,29 @@ func (d *Daemon) handleLog(w http.ResponseWriter, r *http.Request) {
 			fl.Flush()
 		}
 	}
+}
+
+// utf8Complete returns the length of b without an incomplete trailing
+// UTF-8 sequence (at most 3 bytes are held back).
+func utf8Complete(b []byte) int {
+	n := len(b)
+	for i := 1; i <= 3 && i <= n; i++ {
+		c := b[n-i]
+		if c < 0x80 || c >= 0xF8 {
+			return n // ASCII or an invalid byte: nothing to wait for
+		}
+		if c >= 0xC0 { // lead byte: complete if the sequence fits
+			need := 2
+			if c >= 0xF0 {
+				need = 4
+			} else if c >= 0xE0 {
+				need = 3
+			}
+			if i >= need {
+				return n
+			}
+			return n - i
+		}
+	}
+	return n
 }

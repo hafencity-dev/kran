@@ -37,6 +37,7 @@ func (d *Daemon) State() proto.State {
 	owners := map[string]*proto.OwnerStat{}
 	var order []string
 	for i := range jobs {
+		jobs[i] = publicJob(jobs[i])
 		j := &jobs[i]
 		if j.State == proto.JobQueued {
 			j.QueuePos = pos[j.Spec.ID]
@@ -142,6 +143,7 @@ func (d *Daemon) selfLoop(ctx context.Context) {
 		d.target.sampleLive()
 		ns := d.selfNodeState(d.deps.Sched.Snapshot())
 		d.deps.Sched.UpdateNode(ns)
+		d.history.add(d.self, ns.Metrics)
 		sig := fmt.Sprintf("%s|%s|%d", ns.Status, ns.Reason, ns.Running)
 		if sig != lastSig {
 			lastSig = sig
@@ -206,10 +208,12 @@ func newStatsTracker(now func() time.Time) *statsTracker {
 }
 
 func (t *statsTracker) rollLocked() {
-	day := t.now().Local().Format("2006-01-02")
+	now := t.now().Local()
+	day := now.Format("2006-01-02")
 	if day != t.day {
 		t.day = day
-		t.s = proto.Stats{CPUSecondsByNode: map[string]float64{}}
+		t.s = proto.Stats{CPUSecondsByNode: map[string]float64{},
+			Since: time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)}
 	}
 }
 

@@ -59,7 +59,8 @@ func (d *Daemon) listen() ([]func(), error) {
 			d.logf("ui: cannot listen on %s: %v; the web UI is off (set ui.listen in config.toml)", addr, err)
 		} else {
 			d.uiAddr = ln.Addr().String()
-			ui := &http.Server{Handler: d.tcpAuth(d.tcpHandler, loopback), ReadHeaderTimeout: 10 * time.Second}
+			bindHost, _, _ := net.SplitHostPort(addr)
+			ui := &http.Server{Handler: d.tcpAuth(d.tcpHandler, loopback, bindHost), ReadHeaderTimeout: 10 * time.Second}
 			go ui.Serve(ln)
 			stops = append(stops, func() { shutdownServer(ui) })
 			d.logf("ui: listening on http://%s", d.uiAddr)

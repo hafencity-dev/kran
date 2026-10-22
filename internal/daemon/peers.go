@@ -137,6 +137,7 @@ func (m *peerManager) reload() {
 		in := p.stop(!still)
 		if !still {
 			m.d.deps.Sched.RemoveNode(p.cfg.Name)
+			m.d.history.remove(p.cfg.Name)
 			m.d.logf("peers: %s removed", p.cfg.Name)
 		} else if in != nil {
 			defer m.attachInbound(p.cfg.Name, in)
@@ -282,7 +283,7 @@ func (m *peerManager) recordFailure(name string, err error) {
 	}
 	p.mu.Unlock()
 	if tripped {
-		m.d.logf("peers: %s failed %d jobs in a row before they started (last: %v); not using it for %s",
+		m.d.notable("warn", name, "", "%s failed %d jobs in a row before they started (last: %v); not using it for %s",
 			name, m.d.t.BreakerThreshold, err, m.d.t.BreakerCooldown)
 	}
 	p.push(true)
@@ -466,7 +467,7 @@ func (p *peer) connectLoop() {
 		p.incompatible = ""
 		p.notifyLocked()
 		p.mu.Unlock()
-		d.logf("peers: connected to %s via %s (rtt %s)", p.cfg.Name, sess.RemoteAddr(), sess.RTT().Round(time.Millisecond))
+		d.notable("info", p.cfg.Name, "", "connected to %s via %s (rtt %s)", p.cfg.Name, sess.RemoteAddr(), sess.RTT().Round(time.Millisecond))
 		go d.servePeerSession(sess, p.cfg.Name)
 		p.ensureSubscription()
 		p.push(true)
@@ -491,7 +492,7 @@ func (p *peer) connectLoop() {
 		if p.ctx.Err() != nil {
 			return
 		}
-		d.logf("peers: %s: %s", p.cfg.Name, reason)
+		d.notable("warn", p.cfg.Name, "", "%s: %s", p.cfg.Name, reason)
 		p.push(true)
 		if d.now().Sub(connected) < 30*time.Second {
 			attempt = 1 // a flapping link backs off; a long-lived one retries at once
@@ -576,6 +577,7 @@ func (p *peer) subscribe(s transport.Session) {
 			p.lastSeen = d.now()
 			p.mu.Unlock()
 			p.push(false)
+			d.history.add(p.cfg.Name, st.Metrics)
 			d.applyRemoteLive(p.cfg.Name, st.Allocs)
 		}
 		stop()

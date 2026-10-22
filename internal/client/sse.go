@@ -272,17 +272,21 @@ func (c *httpClient) followLog(ctx context.Context, path string, offset *int64, 
 	}
 	err = readSSE(resp.Body, func(se sseEvent) error {
 		switch se.Event {
-		case "output":
+		case "", "message":
 			var ch proto.OutputChunk
 			if err := json.Unmarshal([]byte(se.Data), &ch); err != nil {
 				return err
 			}
-			b, err := base64.StdEncoding.DecodeString(ch.B64)
-			if err != nil {
-				return err
+			b := []byte(ch.Data)
+			if ch.B64 != "" {
+				var err error
+				if b, err = base64.StdEncoding.DecodeString(ch.B64); err != nil {
+					return err
+				}
 			}
-			// Skip bytes we already wrote (reconnect overlap).
-			if skip := *offset - ch.Offset; skip > 0 {
+			// Offset is after the chunk; skip what we already wrote.
+			start := ch.Offset - int64(len(b))
+			if skip := *offset - start; skip > 0 {
 				if skip >= int64(len(b)) {
 					return nil
 				}
@@ -292,7 +296,7 @@ func (c *httpClient) followLog(ctx context.Context, path string, offset *int64, 
 				return err
 			}
 			*offset += int64(len(b))
-		case "exit", "end":
+		case "end", "exit":
 			return errLogEnd
 		}
 		return nil

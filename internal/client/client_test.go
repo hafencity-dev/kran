@@ -98,8 +98,8 @@ func startFake(t *testing.T) *fakeDaemon {
 		f.mu.Unlock()
 		w.Header().Set("Content-Type", "text/event-stream")
 		chunk := func(off int64, s string) {
-			b, _ := json.Marshal(proto.OutputChunk{Stream: "stdout", Offset: off, B64: base64.StdEncoding.EncodeToString([]byte(s))})
-			fmt.Fprintf(w, "event: output\ndata: %s\n\n", b)
+			b, _ := json.Marshal(proto.OutputChunk{Stream: "stdout", Offset: off + int64(len(s)), Data: s, B64: base64.StdEncoding.EncodeToString([]byte(s))})
+			fmt.Fprintf(w, "data: %s\n\n", b)
 		}
 		if call == 1 {
 			chunk(0, "hello ")
@@ -112,7 +112,7 @@ func startFake(t *testing.T) *fakeDaemon {
 			return
 		}
 		chunk(3, "lo world") // overlapping resend is trimmed
-		fmt.Fprintf(w, "event: exit\ndata: {}\n\n")
+		fmt.Fprintf(w, "event: end\ndata: {\"offset\":11}\n\n")
 	})
 	mux.HandleFunc("POST /api/v1/run", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Upgrade") != UpgradeProtocol {

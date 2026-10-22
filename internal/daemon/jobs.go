@@ -246,7 +246,7 @@ func (e *jobEntry) update(fn func(j *proto.Job)) proto.Job {
 	fn(&e.job)
 	e.persistLocked()
 	snap := cloneJob(e.job)
-	e.d.bus.publish(proto.EventJob, snap)
+	e.d.bus.publish(proto.EventJob, publicJob(snap))
 	return snap
 }
 
@@ -422,7 +422,7 @@ func (e *jobEntry) finish(x proto.Exit) {
 	placed := e.placed
 	e.placed = false
 	e.finished = true
-	d.bus.publish(proto.EventJob, final)
+	d.bus.publish(proto.EventJob, publicJob(final))
 	e.mu.Unlock()
 
 	e.sendFrame(proto.FrameExit, x)
@@ -441,6 +441,13 @@ func (e *jobEntry) finish(x proto.Exit) {
 	close(e.done)
 	d.publishQueue()
 	d.publishSelf()
+}
+
+// publicJob is a job as the API shows it: without the forwarded
+// environment (secret-filtered already, but personal and never shown).
+func publicJob(j proto.Job) proto.Job {
+	j.Spec.Env = nil
+	return j
 }
 
 func stateForExit(x proto.Exit) proto.JobState {

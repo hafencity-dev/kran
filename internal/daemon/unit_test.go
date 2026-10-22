@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -92,6 +93,8 @@ func TestTCPAuth(t *testing.T) {
 		{"remote wrong token", false, "GET", "/api/v1/events?token=nope", "100.1.2.3:7270", "", 401},
 		{"remote assets open", false, "GET", "/index.js", "100.1.2.3:7270", "", 200},
 		{"remote post needs header", false, "POST", "/api/v1/nodes/a/drain", "100.1.2.3:7270", "", 401},
+		{"remote foreign host", false, "GET", "/", "evil.example:7270", "", 403},
+		{"remote foreign host with token", false, "GET", "/api/v1/state", "evil.example:7270", "hdr", 200},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -101,7 +104,7 @@ func TestTCPAuth(t *testing.T) {
 				r.Header.Set("X-Kran-Token", d.token)
 			}
 			w := httptest.NewRecorder()
-			d.tcpAuth(ok, c.loopback).ServeHTTP(w, r)
+			d.tcpAuth(ok, c.loopback, "100.1.2.3").ServeHTTP(w, r)
 			if w.Code != c.want {
 				t.Fatalf("status %d, want %d (%s)", w.Code, c.want, w.Body.String())
 			}
@@ -332,12 +335,24 @@ func TestAPIEventsStateFirstAndUIListener(t *testing.T) {
 		t.Fatalf("first event %+v", first)
 	}
 	ws := workspaceDir(t, map[string]string{"f": "x"})
-	go runCLI(ctx, a.sock(), shSpec(ws, "true"), cliOpts{})
+	spec := shSpec(ws, "true")
+	spec.Env = map[string]string{"SECRETISH": "v"}
+	go runCLI(ctx, a.sock(), spec, cliOpts{})
 	for ev := range evs {
-		if ev.Type == proto.EventJob && ev.Data.(proto.Job).State == proto.JobSucceeded {
-			break
+		if ev.Type == proto.EventJob {
+			j := ev.Data.(proto.Job)
+			if j.Spec.Env != nil {
+				t.Fatal("job env shipped to the API")
+			}
+			if j.State == proto.JobSucceeded {
+				if j.PlacedAt.IsZero() || j.RunningAt.IsZero() {
+					t.Fatalf("timestamps %+v", j)
+				}
+				break
+			}
 		}
 	}
+
 	// Token file written with 0600.
 	stTok, err := os.Stat(filepath.Join(a.dirs.State, "ui.token"))
 	if err != nil || stTok.Mode().Perm() != 0o600 {
@@ -374,10 +389,41 @@ func TestAPIEventsStateFirstAndUIListener(t *testing.T) {
 		ns, _ := a.scheduler().node("a")
 		return ns.Status == proto.NodeDraining
 	})
+	resp, err = http.Get(base + "/api/v1/nodes/a/metrics")
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("metrics history: %v %v", resp, err)
+	}
+	var hist []proto.NodeMetrics
+	json.NewDecoder(resp.Body).Decode(&hist)
+	resp.Body.Close()
+	if len(hist) == 0 {
+		t.Fatal("no metrics history")
+	}
 	if err := cl.Resume(ctx, "a"); err != nil {
 		t.Fatal(err)
 	}
 	if err := cl.Drain(ctx, "nope"); !client.IsNotFound(err) {
 		t.Fatalf("drain unknown node: %v", err)
+	}
+}
+
+func TestUTF8Complete(t *testing.T) {
+	euro := []byte("€") // 3 bytes
+	cases := []struct {
+		in   []byte
+		want int
+	}{
+		{[]byte("abc"), 3},
+		{append([]byte("a"), euro...), 4},
+		{append([]byte("a"), euro[:1]...), 1},
+		{append([]byte("a"), euro[:2]...), 1},
+		{[]byte{0xF0, 0x9F, 0x98}, 0},
+		{[]byte{0xF0, 0x9F, 0x98, 0x80}, 4},
+		{[]byte{0xff}, 1}, // invalid byte: pass through
+	}
+	for _, c := range cases {
+		if got := utf8Complete(c.in); got != c.want {
+			t.Errorf("utf8Complete(%v) = %d, want %d", c.in, got, c.want)
+		}
 	}
 }

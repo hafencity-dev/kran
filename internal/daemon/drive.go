@@ -61,7 +61,7 @@ func (d *Daemon) submit(spec proto.JobSpec) (*jobEntry, error) {
 	d.jobs.add(e)
 	e.mu.Lock()
 	e.persistLocked()
-	d.bus.publish(proto.EventJob, cloneJob(e.job))
+	d.bus.publish(proto.EventJob, publicJob(cloneJob(e.job)))
 	e.mu.Unlock()
 	return e, nil
 }
@@ -161,7 +161,7 @@ func (d *Daemon) drive(ctx context.Context, e *jobEntry, mode driveMode) {
 		if ctx.Err() != nil {
 			return
 		}
-		d.logf("job %s: %s failed before start: %v", e.id, p.Node, pe.err)
+		d.notable("warn", p.Node, e.id, "job %s: %s failed before the job started: %v", e.id, p.Node, pe.err)
 		d.peers.recordFailure(p.Node, pe.err)
 		e.unplace()
 		e.setState(proto.JobQueued, fmt.Sprintf("%s failed before start: %v", p.Node, pe.err))

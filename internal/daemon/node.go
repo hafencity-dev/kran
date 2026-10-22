@@ -113,19 +113,20 @@ type Deps struct {
 
 // Daemon is one node's daemon.
 type Daemon struct {
-	deps   Deps
-	cfg    NodeConfig
-	self   string
-	t      Timing
-	now    func() time.Time
-	logf   func(format string, args ...any)
-	bus    *bus
-	ids    idGen
-	jobs   *jobTable
-	peers  *peerManager
-	target *targetSide
-	stats  *statsTracker
-	token  string
+	deps    Deps
+	cfg     NodeConfig
+	self    string
+	t       Timing
+	now     func() time.Time
+	logf    func(format string, args ...any)
+	bus     *bus
+	ids     idGen
+	jobs    *jobTable
+	peers   *peerManager
+	target  *targetSide
+	stats   *statsTracker
+	history metricsHistory
+	token   string
 
 	draining atomic.Bool
 
@@ -407,6 +408,13 @@ func (d *Daemon) janitorLoop(ctx context.Context) {
 			d.janitor()
 		}
 	}
+}
+
+// notable logs a line and shows it in the UI's event feed.
+func (d *Daemon) notable(level, node, jobID, format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	d.logf("%s", msg)
+	d.bus.publish(proto.EventLog, proto.LogEvent{Level: level, Msg: msg, Time: d.now().UTC(), Node: node, JobID: jobID})
 }
 
 // singleCoreScore is a node's benchmark score (0 when unknown).
