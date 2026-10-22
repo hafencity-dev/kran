@@ -248,7 +248,7 @@ func (s *sched) validate(j *sjob) error {
 	}
 	if r.Node != "" {
 		if _, ok := s.nodes[r.Node]; !ok {
-			return &UnplaceableError{Reason: fmt.Sprintf("no node named %s; known nodes: %s (link it with: kran link %s)",
+			return &UnplaceableError{Reason: fmt.Sprintf("no machine named %q (known: %s). Link it with: kran link %s",
 				r.Node, strings.Join(s.nodeNames(), ", "), r.Node)}
 		}
 	}

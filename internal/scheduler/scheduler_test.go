@@ -563,7 +563,7 @@ func TestValidation(t *testing.T) {
 		req  func(r *proto.Requirements)
 		want string
 	}{
-		{func(r *proto.Requirements) { r.Node = "nope" }, "no node named nope; known nodes: devmac, gx10 (link it with: kran link nope)"},
+		{func(r *proto.Requirements) { r.Node = "nope" }, `no machine named "nope" (known: devmac, gx10). Link it with: kran link nope`},
 		{func(r *proto.Requirements) { r.Prefer = proto.PreferLocal; r.Node = "devmac" }, "--local and --node devmac conflict"},
 		{func(r *proto.Requirements) { r.Prefer = proto.PreferRemote; r.Node = "gx10" }, "--remote and --node gx10 conflict: gx10 is this machine"},
 		{func(r *proto.Requirements) {

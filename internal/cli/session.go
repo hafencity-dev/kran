@@ -210,6 +210,9 @@ func (r *runner) Run(ctx context.Context) int {
 	if v.API != proto.APIVersion {
 		return r.noSession(ctx, fmt.Sprintf("daemon %s speaks API %s, this kran speaks %s — running locally (update: kran upgrade)", v.Version, v.API, proto.APIVersion), nil)
 	}
+	if msg := pinnedNodeNotice(ctx, cl, r.spec.Req.Node); msg != "" {
+		r.say("%s", msg)
+	}
 	sess, err := cl.Run(ctx)
 	if err != nil {
 		return r.noSession(ctx, "could not open a run session — running locally", err)

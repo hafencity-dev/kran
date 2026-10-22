@@ -116,6 +116,10 @@ func (a *App) doRun(ctx context.Context, f RunFlags, args []string) int {
 		a.errorf("%v", err)
 		return proto.ExitInfra
 	}
+	if msg := unknownNodeError(f.Node, cfg.Name, func() (*config.Peers, error) { return config.LoadPeers("") }); msg != "" {
+		a.errorf("%s", msg)
+		return proto.ExitUsage
+	}
 
 	sigs := make(chan os.Signal, 8)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)

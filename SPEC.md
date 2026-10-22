@@ -243,7 +243,10 @@ Flags: `-l/--local`, `-r/--remote`, `-n/--node NAME`, `--gpu`, `--cpus N`,
 
 Eligibility filters, each failing filter gives a reason string:
 * node online, not draining, accept.enabled;
-* `--local` → origin only; `--node` → that node only;
+* `--local` → origin only; `--node` → that node only (a name that is
+  neither this machine nor in `peers.toml` is a usage error, exit 2; a
+  linked node that is offline makes the job wait for it, and the CLI says
+  so right away);
 * OS: `same` → target runtime OS == origin OS (a darwin node offers
   `container` runtime = linux when Docker is reachable); `any` → any;
 * GPU: `--gpu` → node has an NVIDIA GPU (or Apple GPU if origin is darwin);
