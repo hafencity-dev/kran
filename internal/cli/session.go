@@ -36,7 +36,8 @@ func defaultTiming() timing {
 type runner struct {
 	spec    proto.JobSpec
 	flags   RunFlags
-	env     []string // full local environment, for local execution
+	env     []string          // full local environment, for local execution
+	envSet  map[string]string // .kran.toml env.set, applied on top of env
 	dial    func(ctx context.Context) (client.Client, error)
 	stdin   *os.File
 	stdout  io.Writer
@@ -261,7 +262,7 @@ func defaultEnvelope() *proto.LocalEnvelope {
 }
 
 func (r *runner) localJob(env *proto.LocalEnvelope) localJob {
-	return localJob{JobID: r.jobID, Argv: r.spec.Argv, Dir: r.spec.Cwd, Env: r.env, Envelope: env,
+	return localJob{JobID: r.jobID, Argv: r.spec.Argv, Dir: r.spec.Cwd, Env: withEnvSet(r.env, r.envSet), Envelope: env,
 		Stdio: r.stdio, ScopeProbe: r.probe}
 }
 
@@ -729,4 +730,28 @@ func (r *runner) startStdin() {
 			}
 		}
 	}()
+}
+
+// withEnvSet applies .kran.toml env.set to a local environment, as the
+// target does for remote runs.
+func withEnvSet(environ []string, set map[string]string) []string {
+	if len(set) == 0 {
+		return environ
+	}
+	out := make([]string, 0, len(environ)+len(set))
+	for _, kv := range environ {
+		k, _, _ := strings.Cut(kv, "=")
+		if _, ok := set[k]; !ok {
+			out = append(out, kv)
+		}
+	}
+	keys := make([]string, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		out = append(out, k+"="+set[k])
+	}
+	return out
 }

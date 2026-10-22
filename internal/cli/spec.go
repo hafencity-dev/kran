@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -16,10 +17,10 @@ import (
 
 // RunFlags are the parsed flags of `kran run`.
 type RunFlags struct {
-	Local, Remote, AnyOS, Stdin, Quiet, JSONEvents, NoFallback, GPU bool
-	Node, Mem, Priority, Sh                                         string
-	CPUs                                                            float64
-	Labels, ExtraEnv                                                []string
+	Local, Remote, AnyOS, Stdin, Quiet, JSONEvents, NoFallback, GPU, NoDocker bool
+	Node, Mem, Priority, Sh                                                   string
+	CPUs                                                                      float64
+	Labels, ExtraEnv                                                          []string
 }
 
 // SpecInput is everything BuildSpec needs, injectable for tests.
@@ -37,6 +38,8 @@ type SpecInput struct {
 	// Detect / project config are indirections so tests do not need git.
 	Detect  func(ctx context.Context, cwd string) (proto.Workspace, error)
 	Project func(root string) (*workspace.ProjectConfig, error)
+	// Notice receives one-line messages for stderr (nil = dropped).
+	Notice func(string)
 }
 
 var localhostRe = regexp.MustCompile(`(?i)(^|[^a-z0-9.-])(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])([^a-z0-9.-]|$)`)
@@ -140,6 +143,7 @@ func BuildSpec(ctx context.Context, in SpecInput) (proto.JobSpec, error) {
 		req.Node = f.Node
 	}
 	req.Toolchains = workspace.Toolchains(ws.Root)
+	req.NoDocker = f.NoDocker || pc.Docker != nil && !*pc.Docker
 	if reason := originOnlyReason(spec, ws, wsErr, in.Home); reason != "" && !req.OriginOnly {
 		req.OriginOnly, req.OriginOnlyReason = true, reason
 	}
@@ -165,6 +169,11 @@ func BuildSpec(ctx context.Context, in SpecInput) (proto.JobSpec, error) {
 
 	explicit := append(append([]string(nil), pc.Env.Forward...), f.ExtraEnv...)
 	spec.Env = FilterEnv(in.Env, explicit)
+	if in.Notice != nil {
+		for _, name := range forwardedSecrets(in.Env, pc.Env.Forward, f.ExtraEnv) {
+			in.Notice(".kran.toml forwards " + name + " to other machines")
+		}
+	}
 	for k, v := range pc.Env.Set {
 		spec.Env[k] = v
 	}
@@ -272,4 +281,27 @@ func originOnlyReason(spec proto.JobSpec, ws proto.Workspace, wsErr error, home 
 		return "the command refers to localhost, which only exists on this machine"
 	}
 	return ""
+}
+
+// forwardedSecrets lists the variables that a repo's env.forward sends
+// although the filter would drop them as secrets (and the user did not ask
+// with --env): the repo's own file decides that, so the user hears of it.
+func forwardedSecrets(environ, forward, extra []string) []string {
+	byName := map[string]string{}
+	for _, kv := range environ {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			byName[k] = v
+		}
+	}
+	var out []string
+	for _, name := range forward {
+		v, set := byName[name]
+		if !set || slices.Contains(extra, name) || slices.Contains(out, name) {
+			continue
+		}
+		if isSecretEnv(name) || urlCredRe.MatchString(v) {
+			out = append(out, name)
+		}
+	}
+	return out
 }

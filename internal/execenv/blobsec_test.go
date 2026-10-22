@@ -5,8 +5,10 @@ import (
 	"context"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hafencity-dev/kran/internal/proto"
 )
@@ -48,5 +50,35 @@ func TestDriveApplyRejectsUnknownNeed(t *testing.T) {
 		if _, _, err := driveApply(context.Background(), io.Discard, &reply, applyReq{Op: "commit", Slot: "r/0", Manifest: m}, open); err == nil || opened {
 			t.Fatalf("need %q: err=%v opened=%v", need, err, opened)
 		}
+	}
+}
+
+// The forwarded env sits in jobs/<id>/spec.json for days; only the
+// supervisor needs it, and only once.
+func TestSpecFileRedactedAfterStart(t *testing.T) {
+	te := newTestEnv(t)
+	ref, err := te.m.AcquireSlot(context.Background(), testRepo, "wt", proto.RuntimeNative)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := te.start(ref, sh(`echo "secret=$MY_SECRET"`), withEnv("MY_SECRET", "hunter2-value"))
+	waitExit(t, p, 30*time.Second)
+	if out, _ := output(t, p); !strings.Contains(out, "secret=hunter2-value") {
+		t.Fatalf("job did not get its env: %q", out)
+	}
+	b, err := os.ReadFile(filepath.Join(te.dir, "jobs", p.JobID(), fileSpec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "hunter2-value") {
+		t.Fatalf("spec.json still holds the env: %s", b)
+	}
+}
+
+func TestRedactDockerArgs(t *testing.T) {
+	got := redactEnvArgs([]string{"run", "-e", "DOCKER_TOKEN=abc", "-e", "PLAIN", "--env=X=y", "--workdir", "/w", "img", "-e", "ARG=after-image"})
+	want := []string{"run", "-e", "DOCKER_TOKEN", "-e", "PLAIN", "--env=X", "--workdir", "/w", "img", "-e", "ARG=after-image"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("%q", got)
 	}
 }

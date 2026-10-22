@@ -53,6 +53,7 @@ func wrapWith(kranPath, cmd string) (string, bool) {
 type shellCmd struct {
 	words []string
 	op    string // operator joining this command to the previous one ("" first)
+	raw   string // the command's text as written (for permission rules)
 }
 
 func shouldWrap(cmd string) bool {
@@ -502,6 +503,7 @@ func jsToolName(s string) bool { return in(s, "vitest", "jest", "playwright", "t
 // redirects, output redirects other than /dev/null).
 
 func lexShell(s string) ([]shellCmd, bool) {
+	rs := []rune(s)
 	var (
 		cmds      []shellCmd
 		words     []string
@@ -509,6 +511,9 @@ func lexShell(s string) ([]shellCmd, bool) {
 		inWord    bool
 		pendingOp string
 		unq       = true // current word has only unquoted characters so far
+		segStart  int    // rune index where the current command's text starts
+		opAt      int    // rune index of the operator being handled
+		newSeg    bool   // the next rune starts a new command's text
 	)
 	endWord := func() {
 		if inWord {
@@ -520,11 +525,13 @@ func lexShell(s string) ([]shellCmd, bool) {
 	sep := func(op string) bool {
 		endWord()
 		if len(words) > 0 {
-			cmds = append(cmds, shellCmd{words: words, op: pendingOp})
+			cmds = append(cmds, shellCmd{words: words, op: pendingOp, raw: strings.TrimSpace(string(rs[segStart:opAt]))})
 			words = nil
 			pendingOp = op
+			newSeg = true
 			return true
 		}
+		newSeg = true
 		if (op == "\n" || op == ";") && (len(cmds) == 0 || pendingOp == "\n" || pendingOp == ";") {
 			if len(cmds) > 0 {
 				pendingOp = op
@@ -533,8 +540,11 @@ func lexShell(s string) ([]shellCmd, bool) {
 		}
 		return false
 	}
-	rs := []rune(s)
 	for i := 0; i < len(rs); i++ {
+		if newSeg {
+			segStart, newSeg = i, false
+		}
+		opAt = i
 		r := rs[i]
 		switch r {
 		case '\'':
@@ -660,8 +670,11 @@ func lexShell(s string) ([]shellCmd, bool) {
 		}
 	}
 	endWord()
+	if newSeg {
+		segStart = len(rs)
+	}
 	if len(words) > 0 {
-		cmds = append(cmds, shellCmd{words: words, op: pendingOp})
+		cmds = append(cmds, shellCmd{words: words, op: pendingOp, raw: strings.TrimSpace(string(rs[segStart:]))})
 	} else if pendingOp == "&&" || pendingOp == "||" || pendingOp == "|" {
 		return nil, false
 	}

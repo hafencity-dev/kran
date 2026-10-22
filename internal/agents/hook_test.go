@@ -10,7 +10,15 @@ import (
 
 func TestMain(m *testing.M) {
 	daemonUp = func() bool { return true }
-	os.Exit(m.Run())
+	// The hook reads Claude Code settings: never the developer's own.
+	home, _ := os.MkdirTemp("", "kran-agents-home-")
+	os.Setenv("HOME", home)
+	os.Unsetenv("CLAUDE_CONFIG_DIR")
+	os.Unsetenv("CLAUDE_PROJECT_DIR")
+	managedSettings = []string{home + "/managed-settings.json"}
+	code := m.Run()
+	os.RemoveAll(home)
+	os.Exit(code)
 }
 
 func TestHookStaysOutWithoutDaemon(t *testing.T) {

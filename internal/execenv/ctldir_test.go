@@ -3,6 +3,8 @@ package execenv
 import (
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -56,6 +58,29 @@ func TestHostSpecificShellStartupEnv(t *testing.T) {
 	for _, k := range []string{"BASH_ENV", "ENV"} {
 		if !hostSpecificEnv(k) {
 			t.Errorf("%s forwarded to the job", k)
+		}
+	}
+}
+
+// Every node builds the runner image from this file: what it downloads is
+// pinned by version and checksum, and nothing is piped into a shell.
+func TestRunnerDockerfilePinsDownloads(t *testing.T) {
+	df := runnerDockerfile
+	if regexp.MustCompile(`\|\s*(sh|bash)\b`).MatchString(df) {
+		t.Error("runner Dockerfile pipes a download into a shell")
+	}
+	for _, bad := range []string{"mise.run", "latest"} {
+		if strings.Contains(df, bad) {
+			t.Errorf("runner Dockerfile contains %q", bad)
+		}
+	}
+	downloads := strings.Count(df, "curl -fsSL")
+	if downloads == 0 || strings.Count(df, "sha256sum -c") < downloads {
+		t.Errorf("%d downloads, %d checksum checks", downloads, strings.Count(df, "sha256sum -c"))
+	}
+	for _, arch := range []string{"x86_64", "aarch64"} {
+		if !strings.Contains(df, arch) {
+			t.Errorf("no checksums for %s", arch)
 		}
 	}
 }
