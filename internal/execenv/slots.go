@@ -26,8 +26,10 @@ const (
 const maxSlotsPerRepo = 4
 
 type slotMeta struct {
-	Hint     string    `json:"hint"`      // worktree that used the slot last
-	LastUsed time.Time `json:"last_used"` // release time
+	Hint string `json:"hint"` // worktree that used the slot last
+	// LastUsed is the last acquisition or release. Zero in metadata an
+	// older kran wrote at acquisition: see lastUsed.
+	LastUsed time.Time `json:"last_used"`
 }
 
 type slot struct {
@@ -174,6 +176,10 @@ func (p *slotPool) acquire(ctx context.Context, repo, hint string, loc slotLoc) 
 			pick.busy = true
 			pick.job = ""
 			pick.touched = p.now()
+			// Stamped now, not only at release: a slot whose holder never
+			// releases it (daemon restart, crash) must not look unused
+			// since year one to the next reaper.
+			pick.meta.LastUsed = pick.touched
 			if hint != "" {
 				pick.meta.Hint = hint
 			}
@@ -318,7 +324,7 @@ func (p *slotPool) stale(idle time.Duration) []*slot {
 	for key, ss := range p.repos {
 		kept := ss[:0]
 		for _, s := range ss {
-			if !s.busy && s.meta.LastUsed.Before(cut) {
+			if !s.busy && p.lastUsed(s).Before(cut) {
 				out = append(out, s)
 				continue
 			}
@@ -327,6 +333,31 @@ func (p *slotPool) stale(idle time.Duration) []*slot {
 		p.repos[key] = kept
 	}
 	return out
+}
+
+// lastUsed is the slot's last use (caller holds mu). Metadata without one
+// (written by an older kran, or missing) counts from the latest change of
+// the slot's files we can see, else from now: an unknown age never makes
+// a slot look abandoned.
+func (p *slotPool) lastUsed(s *slot) time.Time {
+	if !s.meta.LastUsed.IsZero() {
+		return s.meta.LastUsed
+	}
+	var t time.Time
+	files := []string{p.metaPath(s), p.setupKeyPath(s)}
+	if s.loc == locHost {
+		files = append(files, p.hostPath(s))
+	}
+	for _, f := range files {
+		if fi, err := os.Stat(f); err == nil && fi.ModTime().After(t) {
+			t = fi.ModTime()
+		}
+	}
+	if t.IsZero() {
+		t = p.now()
+	}
+	s.meta.LastUsed = t
+	return t
 }
 
 // forget deletes a GC'd slot's bookkeeping files.
