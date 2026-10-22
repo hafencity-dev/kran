@@ -3,8 +3,8 @@ package client
 import (
 	"bufio"
 	"bytes"
-	"io"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
