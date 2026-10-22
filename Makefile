@@ -71,3 +71,5 @@ chaos: ## randomized failure suite
 
 clean: ## remove build output
 	rm -rf bin dist
+
+include ui.mk
