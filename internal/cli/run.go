@@ -127,11 +127,6 @@ func (a *App) doRun(ctx context.Context, f RunFlags, args []string) int {
 		a.errorf("%v", err)
 		return proto.ExitInfra
 	}
-	if msg := unknownNodeError(f.Node, cfg.Name, func() (*config.Peers, error) { return config.LoadPeers("") }); msg != "" {
-		a.errorf("%s", msg)
-		return proto.ExitUsage
-	}
-
 	sigs := make(chan os.Signal, 8)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	defer signal.Stop(sigs)
@@ -143,6 +138,9 @@ func (a *App) doRun(ctx context.Context, f RunFlags, args []string) int {
 		spec: spec, flags: f, env: env, envSet: envSet, dial: a.Dial, stdin: a.In, stdout: a.Out,
 		stderr: &lineWriter{w: a.Err}, stdio: localStdio{In: a.In, Out: asFile(a.Out, os.Stdout), Err: asFile(a.Err, os.Stderr)},
 		signals: sigs, winch: winch, tm: defaultTiming(), start: startLocal, color: a.styleErr(),
+		unknownNode: func(n string) string {
+			return unknownNodeError(n, cfg.Name, func() (*config.Peers, error) { return config.LoadPeers("") })
+		},
 		size: termSize,
 	}
 	return r.Run(ctx)

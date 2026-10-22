@@ -53,6 +53,9 @@ type runner struct {
 	watcher func(pgid int) *exec.Cmd
 	probe   func(int64) bool
 	color   style
+	// unknownNode explains a --node pin naming no linked machine, from
+	// peers.toml (used when no daemon answers); nil skips the check.
+	unknownNode func(node string) string
 
 	// session state
 	cl       client.Client
@@ -220,8 +223,14 @@ func (r *runner) Run(ctx context.Context) int {
 	if v.API != proto.APIVersion {
 		return r.noSession(ctx, fmt.Sprintf("daemon %s speaks API %s, this kran speaks %s — running locally (update: kran upgrade)", v.Version, v.API, proto.APIVersion), nil)
 	}
-	if msg := pinnedNodeNotice(ctx, cl, r.spec.Req.Node); msg != "" {
-		r.say("%s", msg)
+	usage, notice := pinnedNode(ctx, cl, r.spec.Req.Node)
+	if usage != "" {
+		r.sayAlways("%s", usage)
+		r.event("exit", map[string]any{"code": proto.ExitUsage, "state": proto.JobFailed})
+		return proto.ExitUsage
+	}
+	if notice != "" {
+		r.say("%s", notice)
 	}
 	sess, err := cl.Run(ctx)
 	if err != nil {
@@ -238,6 +247,13 @@ func (r *runner) Run(ctx context.Context) int {
 // noSession is the path for every failure before a run session exists: run
 // locally unless the user forbade it.
 func (r *runner) noSession(ctx context.Context, why string, cause error) int {
+	if r.unknownNode != nil && r.jobID == "" {
+		// No daemon to ask: peers.toml says whether the pin is a typo.
+		if msg := r.unknownNode(r.spec.Req.Node); msg != "" && r.spec.Req.Node != "" {
+			r.sayAlways("%s", msg)
+			return proto.ExitUsage
+		}
+	}
 	if r.spec.NoFallback {
 		msg := strings.SplitN(why, " — ", 2)[0]
 		if cause != nil && !errors.Is(cause, client.ErrNoDaemon) {

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hafencity-dev/kran/internal/client"
 	"github.com/hafencity-dev/kran/internal/config"
 	"github.com/hafencity-dev/kran/internal/proto"
 )
@@ -62,19 +63,47 @@ func TestRunNodePinToUnknownMachineIsAUsageError(t *testing.T) {
 	}
 }
 
-func TestPinnedNodeNoticeSaysWhenTheMachineIsOffline(t *testing.T) {
+func TestPinnedNodeAsksTheDaemon(t *testing.T) {
 	cl := &stateClient{st: sampleState()}
-	if got := pinnedNodeNotice(context.Background(), cl, "devmac"); got != "" {
-		t.Fatalf("online node: %q", got)
+	for _, n := range []string{"devmac", "gx10", ""} {
+		if u, nt := pinnedNode(context.Background(), cl, n); u != "" || nt != "" {
+			t.Fatalf("%q: usage %q notice %q", n, u, nt)
+		}
 	}
-	if got := pinnedNodeNotice(context.Background(), cl, "gx10"); got != "" {
-		t.Fatalf("self: %q", got)
-	}
-	got := pinnedNodeNotice(context.Background(), cl, "old")
+	_, got := pinnedNode(context.Background(), cl, "old")
 	if !strings.HasPrefix(got, "old is offline: ssh: connection refused; the job waits for it") || !strings.Contains(got, "drop --node") {
 		t.Fatalf("offline notice %q", got)
 	}
-	if got := pinnedNodeNotice(context.Background(), &fakeClient{}, "old"); got != "" {
-		t.Fatalf("no state: %q", got)
+	u, _ := pinnedNode(context.Background(), cl, "devmc")
+	if u != `no machine named "devmc" (linked: devmac, old). Link it with: kran link devmc` {
+		t.Fatalf("usage %q", u)
+	}
+	if u, nt := pinnedNode(context.Background(), &fakeClient{}, "old"); u != "" || nt != "" {
+		t.Fatalf("no state: %q %q", u, nt)
 	}
 }
+
+// With a daemon, its view decides (it may know machines this peers.toml
+// does not): an unknown pin ends kran run with exit 2 before submitting.
+func TestRunNodePinCheckedAgainstTheDaemon(t *testing.T) {
+	s := newFakeSession()
+	cl := &stateFakeClient{fakeClient: fakeClient{sessions: []*fakeSession{s}}, st: sampleState()}
+	h := newHarness(t, nil, "true")
+	h.r.dial = func(context.Context) (client.Client, error) { return cl, nil }
+	cl.version.API = proto.APIVersion
+	h.r.spec.Req.Node = "nope"
+	h.r.unknownNode = func(string) string { return "" }
+	if code := h.run(t); code != proto.ExitUsage {
+		t.Fatalf("exit %d", code)
+	}
+	if !strings.Contains(h.stderr.String(), `kran: no machine named "nope" (linked: devmac, old)`) || s.count(proto.FrameSubmit) != 0 {
+		t.Fatalf("stderr %q, submitted %d", h.stderr.String(), s.count(proto.FrameSubmit))
+	}
+}
+
+type stateFakeClient struct {
+	fakeClient
+	st *proto.State
+}
+
+func (c *stateFakeClient) State(context.Context) (*proto.State, error) { return c.st, nil }
