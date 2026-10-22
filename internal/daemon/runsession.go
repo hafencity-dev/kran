@@ -1,0 +1,307 @@
+package daemon
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"github.com/hafencity-dev/kran/internal/proto"
+)
+
+// UpgradeProtocol is the HTTP Upgrade token of run sessions (SPEC §8.2).
+const UpgradeProtocol = "kran-run/1"
+
+func (d *Daemon) handleRun(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("Upgrade") != UpgradeProtocol {
+		writeAPIError(w, http.StatusUpgradeRequired, "run sessions need the header Upgrade: "+UpgradeProtocol, "use kran run")
+		return
+	}
+	if d.stopping.Load() {
+		writeAPIError(w, http.StatusServiceUnavailable, "the daemon is shutting down", "retry in a moment")
+		return
+	}
+	conn, brw, err := http.NewResponseController(w).Hijack()
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "cannot upgrade: "+err.Error(), "")
+		return
+	}
+	untrack := d.trackConn(conn)
+	defer untrack()
+	defer conn.Close()
+	conn.SetDeadline(time.Time{})
+	brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: " + UpgradeProtocol + "\r\n\r\n")
+	if err := brw.Flush(); err != nil {
+		return
+	}
+	d.serveRun(conn, brw.Reader)
+}
+
+// runConn serializes writes to the CLI.
+type runConn struct {
+	conn net.Conn
+	mu   sync.Mutex
+}
+
+func (c *runConn) write(t proto.FrameType, p []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return proto.WriteFrame(c.conn, t, p)
+}
+
+func (c *runConn) writeJSON(t proto.FrameType, v any) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	return c.write(t, b)
+}
+
+func (c *runConn) fail(msg, hint string) {
+	c.writeJSON(proto.FrameError, proto.APIError{Error: msg, Hint: hint})
+}
+
+// serveRun drives one run session: the first frame is submit or reattach;
+// afterwards the job's spool streams to the CLI while the CLI's frames
+// (stdin, resize, signals, local started/exit) flow to the job.
+func (d *Daemon) serveRun(conn net.Conn, br *bufio.Reader) {
+	rc := &runConn{conn: conn}
+	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	t, p, err := proto.ReadFrame(br, nil)
+	conn.SetReadDeadline(time.Time{})
+	if err != nil {
+		return
+	}
+	var e *jobEntry
+	var offset int64
+	reattach := false
+	switch t {
+	case proto.FrameSubmit:
+		var spec proto.JobSpec
+		if err := json.Unmarshal(p, &spec); err != nil {
+			rc.fail("malformed submit: "+err.Error(), "upgrade kran so the CLI and the daemon match")
+			return
+		}
+		e, err = d.submit(spec)
+		if err != nil {
+			rc.fail("cannot accept the job: "+err.Error(), "")
+			return
+		}
+		e.attach()
+		d.startDriver(e, driveFresh)
+	case proto.FrameReattach:
+		var ra proto.Reattach
+		if err := json.Unmarshal(p, &ra); err != nil || !validID(ra.JobID) {
+			rc.fail("malformed reattach", "")
+			return
+		}
+		offset, reattach = ra.Offset, true
+		e = d.jobs.get(ra.JobID)
+		if e == nil {
+			d.serveFinished(rc, ra)
+			return
+		}
+		e.attach()
+	default:
+		rc.fail("expected submit or reattach, got "+t.String(), "")
+		return
+	}
+	defer e.detach()
+
+	ctx, cancel := context.WithCancel(d.lifetime())
+	defer cancel()
+
+	// Spool → CLI.
+	go func() {
+		defer cancel()
+		rd, err := e.spool.reader(offset, reattach)
+		if err != nil {
+			rc.fail("read job output: "+err.Error(), "")
+			return
+		}
+		defer rd.Close()
+		for {
+			ft, fp, err := rd.Next(ctx)
+			if err != nil {
+				if err == io.EOF {
+					// Finished without an exit frame (abandoned).
+					rc.writeJSON(proto.FrameExit, exitOf(e.snapshot()))
+				}
+				return
+			}
+			if err := rc.write(ft, fp); err != nil {
+				return
+			}
+			if ft == proto.FrameExit {
+				return
+			}
+		}
+	}()
+
+	// Heartbeats to the CLI.
+	go func() {
+		tk := time.NewTicker(d.t.Heartbeat)
+		defer tk.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tk.C:
+				if rc.write(proto.FrameHeartbeat, nil) != nil {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
+	// CLI → job.
+	go func() {
+		defer cancel()
+		var buf []byte
+		for {
+			ft, fp, err := proto.ReadFrame(br, buf)
+			if err != nil {
+				return
+			}
+			buf = fp[:0]
+			if !d.onCLIFrame(ctx, e, ft, fp) {
+				return
+			}
+		}
+	}()
+	<-ctx.Done()
+}
+
+// onCLIFrame applies one frame from the CLI; false ends the session.
+func (d *Daemon) onCLIFrame(ctx context.Context, e *jobEntry, t proto.FrameType, p []byte) bool {
+	switch t {
+	case proto.FrameHeartbeat:
+	case proto.FrameStdin:
+		// Back-pressure: wait while the target is slow to take stdin.
+		for !e.outbox.put(proto.FrameStdin, p) {
+			select {
+			case <-ctx.Done():
+				return false
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+	case proto.FrameStdinEOF:
+		e.outbox.put(proto.FrameStdinEOF, nil)
+	case proto.FrameResize:
+		var tty proto.TTY
+		if json.Unmarshal(p, &tty) == nil {
+			e.mu.Lock()
+			e.tty = &tty
+			e.mu.Unlock()
+			e.outbox.put(proto.FrameResize, p)
+		}
+	case proto.FrameSignal:
+		var s proto.Signal
+		if json.Unmarshal(p, &s) == nil {
+			e.forwardSignal(s.Name)
+		}
+	case proto.FrameStarted:
+		var s proto.Started
+		if json.Unmarshal(p, &s) == nil {
+			select {
+			case e.localCh <- localEvent{started: &s}:
+			case <-ctx.Done():
+				return false
+			}
+		}
+	case proto.FrameExit:
+		var x proto.Exit
+		if json.Unmarshal(p, &x) == nil {
+			e.mu.Lock()
+			e.exitReported = true
+			e.mu.Unlock()
+			select {
+			case e.localCh <- localEvent{exit: &x}:
+			case <-ctx.Done():
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// forwardSignal routes a signal from the CLI: to the target once the job
+// stream exists, as a cancel while the job has not started, and not at all
+// for local jobs (the child shares the CLI's terminal and got it already).
+func (e *jobEntry) forwardSignal(name string) {
+	e.mu.Lock()
+	streaming := e.streaming
+	local := e.job.Local && e.placed
+	e.mu.Unlock()
+	switch {
+	case streaming:
+		e.outbox.put(proto.FrameSignal, mustJSON(proto.Signal{Name: name}))
+	case local:
+	default:
+		reason := "interrupted before it started"
+		if name != "INT" {
+			reason = "stopped by " + name + " before it started"
+		}
+		e.requestCancel(reason, name)
+	}
+}
+
+// serveFinished answers a reattach to a job that already ended: the output
+// from offset (if spooled) and its exit.
+func (d *Daemon) serveFinished(rc *runConn, ra proto.Reattach) {
+	job, ok := d.jobs.find(ra.JobID)
+	if !ok {
+		rc.fail("unknown job "+ra.JobID, "list jobs: kran jobs")
+		return
+	}
+	if !job.State.Terminal() {
+		rc.fail("job "+ra.JobID+" is not running on this daemon", "")
+		return
+	}
+	path := filepath.Join(d.deps.Dirs.spoolDir(), ra.JobID)
+	if _, err := os.Stat(path); err == nil {
+		if sp, err := openSpool(path); err == nil {
+			sp.finish()
+			rd, err := sp.reader(ra.Offset, true)
+			if err == nil {
+				ctx, cancel := context.WithTimeout(d.lifetime(), time.Minute)
+				for {
+					ft, fp, err := rd.Next(ctx)
+					if err != nil {
+						break
+					}
+					if rc.write(ft, fp) != nil {
+						break
+					}
+					if ft == proto.FrameExit {
+						cancel()
+						rd.Close()
+						sp.close()
+						return
+					}
+				}
+				cancel()
+				rd.Close()
+			}
+			sp.close()
+		}
+	}
+	rc.writeJSON(proto.FrameExit, exitOf(job))
+}
+
+func exitOf(j proto.Job) proto.Exit {
+	x := proto.Exit{JobID: j.Spec.ID, State: j.State, Signal: j.Signal, Reason: j.Reason, Usage: j.Usage, Node: j.Node, Fallback: j.Fallback}
+	if j.ExitCode != nil {
+		x.Code = *j.ExitCode
+	} else if !j.State.Terminal() || j.State == proto.JobInfraErr || j.State == proto.JobLost {
+		x.Code = proto.ExitInfra
+	}
+	return x
+}

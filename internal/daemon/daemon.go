@@ -8,8 +8,8 @@ import "context"
 // Options configure a daemon. Zero values mean production defaults from
 // internal/paths and internal/config.
 type Options struct {
-	ConfigDir string
-	StateDir  string
+	ConfigDir  string
+	StateDir   string
 	RuntimeDir string
 	// UIListen overrides config ui.listen ("" = from config, "-" = disabled).
 	UIListen string

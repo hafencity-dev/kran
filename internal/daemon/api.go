@@ -1,0 +1,414 @@
+package daemon
+
+import (
+	"context"
+	"crypto/subtle"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/hafencity-dev/kran/internal/proto"
+	"github.com/hafencity-dev/kran/internal/store"
+	"github.com/hafencity-dev/kran/internal/version"
+)
+
+// Handler returns the local API as served on the unix socket (full trust).
+func (d *Daemon) Handler() http.Handler { return d.unixHandler }
+
+// routes builds the API. unix=false is the TCP (UI) listener: no run
+// sessions, token rules from SPEC §9 applied by tcpAuth.
+func (d *Daemon) routes(unix bool) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/version", d.handleVersion)
+	mux.HandleFunc("GET /api/v1/state", d.handleState)
+	mux.HandleFunc("GET /api/v1/events", d.handleEvents)
+	mux.HandleFunc("GET /api/v1/jobs", d.handleJobs)
+	mux.HandleFunc("GET /api/v1/jobs/{id}", d.handleJob)
+	mux.HandleFunc("GET /api/v1/jobs/{id}/log", d.handleLog)
+	mux.HandleFunc("POST /api/v1/jobs/{id}/cancel", d.handleCancel)
+	mux.HandleFunc("POST /api/v1/jobs/{id}/priority", d.handlePriority)
+	mux.HandleFunc("POST /api/v1/nodes/{name}/drain", d.handleDrain(true))
+	mux.HandleFunc("POST /api/v1/nodes/{name}/resume", d.handleDrain(false))
+	if unix {
+		mux.HandleFunc("POST /api/v1/run", d.handleRun)
+	} else {
+		mux.HandleFunc("POST /api/v1/run", func(w http.ResponseWriter, r *http.Request) {
+			writeAPIError(w, http.StatusForbidden, "run sessions are only served on the unix socket", "use kran run on this machine")
+		})
+	}
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
+		writeAPIError(w, http.StatusNotFound, "no such API endpoint: "+r.Method+" "+r.URL.Path, "check kran version on both sides")
+	})
+	ui := d.deps.UI
+	if ui == nil {
+		ui = placeholderUI()
+	}
+	mux.Handle("/", ui)
+	return mux
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
+
+func writeAPIError(w http.ResponseWriter, status int, msg, hint string) {
+	writeJSON(w, status, proto.APIError{Error: msg, Hint: hint})
+}
+
+// --- auth (SPEC §9) ---
+
+func (d *Daemon) loadToken() error {
+	path := d.deps.Dirs.tokenFile()
+	if b, err := os.ReadFile(path); err == nil {
+		if tok := strings.TrimSpace(string(b)); len(tok) >= 32 {
+			d.token = tok
+			os.Chmod(path, 0o600)
+			return nil
+		}
+	}
+	tok := randomHex(32)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(path), err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(tok+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write UI token: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("write UI token: %w", err)
+	}
+	d.token = tok
+	return nil
+}
+
+// Token is the UI/API token (for `kran ui --print-url`).
+func (d *Daemon) Token() string { return d.token }
+
+func (d *Daemon) tokenOK(r *http.Request, allowQuery bool) bool {
+	got := r.Header.Get("X-Kran-Token")
+	if got == "" && allowQuery {
+		got = r.URL.Query().Get("token")
+	}
+	return got != "" && subtle.ConstantTimeCompare([]byte(got), []byte(d.token)) == 1
+}
+
+// tcpAuth guards the UI listener. Loopback: reads are open (the browser UI
+// loads without ceremony), mutations need X-Kran-Token, and the Host header
+// must be a loopback name (DNS rebinding). Non-loopback: every API call
+// needs the token (header, or ?token= for GETs such as SSE); static UI
+// assets stay public because they carry no data.
+func (d *Daemon) tcpAuth(next http.Handler, loopback bool) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if loopback && !loopbackHost(r.Host) {
+			writeAPIError(w, http.StatusForbidden, "unexpected Host header", "open the UI through 127.0.0.1 or localhost")
+			return
+		}
+		isAPI := strings.HasPrefix(r.URL.Path, "/api/")
+		read := r.Method == http.MethodGet || r.Method == http.MethodHead
+		switch {
+		case !read && !d.tokenOK(r, false):
+			writeAPIError(w, http.StatusUnauthorized, "this action needs the kran token (header X-Kran-Token)", "open the UI with kran ui")
+			return
+		case read && isAPI && !loopback && !d.tokenOK(r, true):
+			writeAPIError(w, http.StatusUnauthorized, "this listener needs the kran token", "open the UI with kran ui --print-url")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func loopbackHost(hostport string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// --- handlers ---
+
+func (d *Daemon) handleVersion(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, version.Info())
+}
+
+func (d *Daemon) handleState(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, d.State())
+}
+
+func (d *Daemon) handleEvents(w http.ResponseWriter, r *http.Request) {
+	fl, ok := w.(http.Flusher)
+	if !ok {
+		writeAPIError(w, http.StatusInternalServerError, "streaming unsupported", "")
+		return
+	}
+	sub, seq := d.bus.subscribe()
+	defer d.bus.unsubscribe(sub)
+	st := d.State()
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	rc := http.NewResponseController(w)
+	write := func(ev proto.Event) error {
+		b, err := json.Marshal(ev)
+		if err != nil {
+			return err
+		}
+		rc.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		if _, err := fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", ev.Seq, ev.Type, b); err != nil {
+			return err
+		}
+		fl.Flush()
+		return nil
+	}
+	if write(proto.Event{Type: proto.EventState, Seq: seq, Time: d.now().UTC(), Data: st}) != nil {
+		return
+	}
+	ping := time.NewTicker(15 * time.Second)
+	defer ping.Stop()
+	for {
+		select {
+		case ev, ok := <-sub.ch:
+			if !ok {
+				return // dropped as a slow consumer, or shutdown: client resyncs
+			}
+			if ev.Seq <= seq {
+				continue
+			}
+			if write(ev) != nil {
+				return
+			}
+		case <-ping.C:
+			rc.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if _, err := io.WriteString(w, ": ping\n\n"); err != nil {
+				return
+			}
+			fl.Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+func (d *Daemon) handleJobs(w http.ResponseWriter, r *http.Request) {
+	q := store.JobQuery{Limit: 50, Owner: r.URL.Query().Get("owner"), Node: r.URL.Query().Get("node")}
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			writeAPIError(w, http.StatusBadRequest, "limit must be a positive number", "")
+			return
+		}
+		q.Limit = n
+	}
+	if q.Limit > 1000 {
+		q.Limit = 1000
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	jobs, err := d.deps.Store.ListJobs(ctx, q)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "list jobs: "+err.Error(), "check kran doctor")
+		return
+	}
+	// Live state wins over what was last persisted.
+	for i := range jobs {
+		if e := d.jobs.get(jobs[i].Spec.ID); e != nil {
+			jobs[i] = e.snapshot()
+		}
+	}
+	if jobs == nil {
+		jobs = []proto.Job{}
+	}
+	writeJSON(w, http.StatusOK, jobs)
+}
+
+func (d *Daemon) handleJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	j, ok := d.jobs.find(id)
+	if !ok {
+		writeAPIError(w, http.StatusNotFound, "no job "+id, "list jobs: kran jobs")
+		return
+	}
+	writeJSON(w, http.StatusOK, j)
+}
+
+func (d *Daemon) handleCancel(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	e := d.jobs.get(id)
+	if e == nil {
+		if _, ok := d.jobs.find(id); ok {
+			writeAPIError(w, http.StatusConflict, "job "+id+" already ended", "")
+			return
+		}
+		writeAPIError(w, http.StatusNotFound, "no job "+id, "list jobs: kran jobs")
+		return
+	}
+	e.requestCancel("canceled with kran cancel", "TERM")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (d *Daemon) handlePriority(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var body struct {
+		Priority proto.Priority `json:"priority"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "body must be {\"priority\": \"high|normal|low\"}", "")
+		return
+	}
+	switch body.Priority {
+	case proto.PriorityHigh, proto.PriorityNormal, proto.PriorityLow:
+	default:
+		writeAPIError(w, http.StatusBadRequest, "priority must be high, normal or low", "")
+		return
+	}
+	e := d.jobs.get(id)
+	if e == nil {
+		writeAPIError(w, http.StatusNotFound, "no active job "+id, "list jobs: kran jobs")
+		return
+	}
+	e.update(func(j *proto.Job) { j.Spec.Priority = body.Priority })
+	d.deps.Sched.SetPriority(id, body.Priority)
+	d.publishQueue()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (d *Daemon) handleDrain(on bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		if !d.peers.setDrained(name, on) {
+			writeAPIError(w, http.StatusNotFound, "no node "+name, "see linked nodes: kran status")
+			return
+		}
+		if name == d.self {
+			d.publishSelf()
+			d.deps.Sched.Kick()
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// handleLog serves a job's output: raw bytes, or SSE ("output" events with
+// proto.OutputChunk, then "exit") when follow=1.
+func (d *Daemon) handleLog(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !validID(id) {
+		writeAPIError(w, http.StatusBadRequest, "invalid job id", "")
+		return
+	}
+	job, ok := d.jobs.find(id)
+	if !ok {
+		writeAPIError(w, http.StatusNotFound, "no job "+id, "list jobs: kran jobs")
+		return
+	}
+	var offset int64
+	if v := r.URL.Query().Get("offset"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 0 {
+			writeAPIError(w, http.StatusBadRequest, "offset must be a non-negative number", "")
+			return
+		}
+		offset = n
+	}
+	follow := r.URL.Query().Get("follow") == "1" || r.URL.Query().Get("follow") == "true"
+	var sp *spool
+	if e := d.jobs.get(id); e != nil {
+		sp = e.spool
+	} else {
+		path := filepath.Join(d.deps.Dirs.spoolDir(), id)
+		if _, err := os.Stat(path); err != nil {
+			if job.Local {
+				writeAPIError(w, http.StatusNotFound, "job "+id+" ran locally; kran does not capture the output of local jobs", "")
+			} else {
+				writeAPIError(w, http.StatusNotFound, "the output of job "+id+" is no longer kept", "")
+			}
+			return
+		}
+		var err error
+		if sp, err = openSpool(path); err != nil {
+			writeAPIError(w, http.StatusInternalServerError, "open output: "+err.Error(), "")
+			return
+		}
+		sp.finish()
+		defer sp.close()
+	}
+	rd, err := sp.reader(offset, true)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "open output: "+err.Error(), "")
+		return
+	}
+	defer rd.Close()
+	ctx := r.Context()
+	if !follow {
+		// Only what exists now.
+		w.Header().Set("Content-Type", "application/octet-stream")
+		for {
+			t, p, err := rd.NextNoWait()
+			if err != nil {
+				return
+			}
+			if isOutput(t) {
+				if _, err := w.Write(p); err != nil {
+					return
+				}
+			}
+		}
+	}
+	fl, _ := w.(http.Flusher)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	pos := offset
+	for {
+		t, p, err := rd.Next(ctx)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				fmt.Fprintf(w, "event: end\ndata: {}\n\n")
+				if fl != nil {
+					fl.Flush()
+				}
+			}
+			return
+		}
+		switch {
+		case isOutput(t):
+			stream := "stdout"
+			if t == proto.FrameStderr {
+				stream = "stderr"
+			}
+			b, _ := json.Marshal(proto.OutputChunk{Stream: stream, Offset: pos, B64: base64.StdEncoding.EncodeToString(p)})
+			pos += int64(len(p))
+			if _, err := fmt.Fprintf(w, "event: output\ndata: %s\n\n", b); err != nil {
+				return
+			}
+		case t == proto.FrameExit:
+			fmt.Fprintf(w, "event: exit\ndata: %s\n\n", p)
+			if fl != nil {
+				fl.Flush()
+			}
+			return
+		default:
+			continue
+		}
+		if fl != nil {
+			fl.Flush()
+		}
+	}
+}
