@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -78,7 +79,7 @@ func TestInternalAcceptForget(t *testing.T) {
 	home, _ := os.UserHomeDir()
 	ak := filepath.Join(home, ".ssh", "authorized_keys")
 	exe, _ := selfExe()
-	want := PeerKeyLine(exe, "devmac", keyA, "kran-dev") + "\n"
+	want := PeerKeyLineEnv(exe, "devmac", keyA, "kran-dev", InstallEnv()) + "\n"
 	if b, _ := os.ReadFile(ak); string(b) != want {
 		t.Fatalf("%q want %q", b, want)
 	}
@@ -145,5 +146,45 @@ func TestProbeAndHandshake(t *testing.T) {
 	}
 	if rs := m["results"].([]any); len(rs) != 2 || rs[0].(map[string]any)["ok"] == true {
 		t.Fatal(rs)
+	}
+}
+
+// TestAcceptPinsInstallEnv: a kran install placed with KRAN_*_DIR (and
+// KRAN_NAMESPACE) — a development setup next to a real one — must get a
+// forced command that reaches that install's daemon, not the default one.
+func TestAcceptPinsInstallEnv(t *testing.T) {
+	internalEnv(t)
+	odd := filepath.Join(t.TempDir(), "it's here")
+	t.Setenv("KRAN_STATE_DIR", odd)
+	t.Setenv("KRAN_NAMESPACE", "kran-dev")
+	req := AcceptRequest{Tag: "kran-dev", Peer: PeerInfo{Name: "devmac", ID: "abc", PubKey: keyA, Addresses: []string{"h:22"}, User: "u", KranPath: "/k", Direction: "both"}}
+	if _, code, e := runInternal(t, req, "link-accept"); code != 0 {
+		t.Fatal(code, e)
+	}
+	home, _ := os.UserHomeDir()
+	b, _ := os.ReadFile(filepath.Join(home, ".ssh", "authorized_keys"))
+	al, ok := parseAuthLine(string(b))
+	if !ok || !al.isKran() {
+		t.Fatalf("not a kran line: %q", b)
+	}
+	cmd := strings.TrimSuffix(strings.TrimPrefix(strings.SplitN(al.opts, `",`, 2)[0], `command="`), `"`)
+	cmd = strings.NewReplacer(`\"`, `"`, `\\`, `\`).Replace(cmd)
+	exe, _ := selfExe()
+	// Run what sshd would run, with the kran binary swapped for a probe.
+	run := exe
+	if !plainPath.MatchString(run) {
+		run = shq(run)
+	}
+	run += " serve --stdio --peer devmac"
+	if !strings.Contains(cmd, run) {
+		t.Fatalf("forced command %q does not run %s", cmd, run)
+	}
+	probe := strings.Replace(cmd, run, `sh -c 'echo "$KRAN_CONFIG_DIR|$KRAN_STATE_DIR|$KRAN_RUNTIME_DIR|$KRAN_CACHE_DIR|$KRAN_NAMESPACE"'`, 1)
+	sh := exec.Command("sh", "-c", probe)
+	sh.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home} // what sshd gives the forced command
+	out, err := sh.Output()
+	want := strings.Join([]string{os.Getenv("KRAN_CONFIG_DIR"), odd, os.Getenv("KRAN_RUNTIME_DIR"), os.Getenv("KRAN_CACHE_DIR"), "kran-dev"}, "|") + "\n"
+	if err != nil || string(out) != want {
+		t.Fatalf("forced command %q sees %q (%v), want %q", cmd, out, err, want)
 	}
 }

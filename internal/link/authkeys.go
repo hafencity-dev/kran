@@ -20,7 +20,7 @@ import (
 // pubKey may be a full "type blob comment" line. The key can then do nothing
 // except speak the kran protocol (SPEC §3).
 func AuthorizedKeysLine(kranPath, pubKey, tag string) string {
-	return keyLine(kranPath, "", pubKey, tag)
+	return keyLine(kranPath, "", pubKey, tag, nil)
 }
 
 // PeerKeyLine is AuthorizedKeysLine for a key linked as peer: the forced
@@ -30,10 +30,40 @@ func PeerKeyLine(kranPath, peer, pubKey, tag string) string {
 	if !transport.ValidPeerName(peer) {
 		return ""
 	}
-	return keyLine(kranPath, peer, pubKey, tag)
+	return keyLine(kranPath, peer, pubKey, tag, nil)
 }
 
-func keyLine(kranPath, peer, pubKey, tag string) string {
+// installEnv are the variables that place a kran install (KRAN_*_DIR and
+// the resource namespace). A development install next to a real one sets
+// them; its forced command must carry them, or `kran serve --stdio` would
+// reach (and autostart) the default install's daemon instead.
+var installEnv = []string{"KRAN_CONFIG_DIR", "KRAN_STATE_DIR", "KRAN_RUNTIME_DIR", "KRAN_CACHE_DIR", "KRAN_NAMESPACE"}
+
+// InstallEnv returns the install-placing variables set in this process
+// (nil for a normal install).
+func InstallEnv() map[string]string {
+	var m map[string]string
+	for _, k := range installEnv {
+		if v := os.Getenv(k); v != "" {
+			if m == nil {
+				m = map[string]string{}
+			}
+			m[k] = v
+		}
+	}
+	return m
+}
+
+// PeerKeyLineEnv is PeerKeyLine for an install placed by env (see
+// InstallEnv): the forced command runs `env K='v' … <kran> serve --stdio …`.
+func PeerKeyLineEnv(kranPath, peer, pubKey, tag string, env map[string]string) string {
+	if !transport.ValidPeerName(peer) {
+		return ""
+	}
+	return keyLine(kranPath, peer, pubKey, tag, env)
+}
+
+func keyLine(kranPath, peer, pubKey, tag string, env map[string]string) string {
 	f := strings.Fields(pubKey)
 	if len(f) < 2 || hasControl(kranPath+tag+strings.Join(f, " ")) { // a newline would start another key line
 		return ""
@@ -50,6 +80,19 @@ func keyLine(kranPath, peer, pubKey, tag string) string {
 	cmd := kranPath
 	if !plainPath.MatchString(cmd) {
 		cmd = shq(cmd)
+	}
+	if len(env) > 0 {
+		var b strings.Builder
+		b.WriteString("env")
+		for _, k := range installEnv {
+			if v, ok := env[k]; ok {
+				if hasControl(v) {
+					return ""
+				}
+				fmt.Fprintf(&b, " %s=%s", k, shq(v))
+			}
+		}
+		cmd = b.String() + " " + cmd
 	}
 	cmd += " serve --stdio"
 	if peer != "" {

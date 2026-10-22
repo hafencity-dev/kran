@@ -70,9 +70,13 @@ type runner struct {
 	lastRecv time.Time
 	local    *localProc
 	localCh  <-chan proto.Exit
-	tee      *historyTee // local output → daemon (job history)
-	fallback bool
-	lastInt  time.Time
+	// localNode is the daemon's node name for a local placement.
+	localNode string
+	// pendingExit: the local job ended while reconnecting to the daemon.
+	pendingExit *proto.Exit
+	tee         *historyTee // local output → daemon (job history)
+	fallback    bool
+	lastInt     time.Time
 
 	// notices
 	pending   string
@@ -290,7 +294,7 @@ func defaultEnvelope() *proto.LocalEnvelope {
 }
 
 func (r *runner) localJob(env *proto.LocalEnvelope) localJob {
-	j := localJob{JobID: r.jobID, Argv: r.spec.Argv, Dir: r.spec.Cwd, Env: withEnvSet(r.env, r.envSet), Envelope: env,
+	j := localJob{JobID: r.jobID, Node: r.localNode, Argv: r.spec.Argv, Dir: r.spec.Cwd, Env: withEnvSet(r.env, r.envSet), Envelope: env,
 		Stdio: r.stdio, ScopeProbe: r.probe}
 	if r.tee != nil {
 		j.Tee = r.tee.push
@@ -314,7 +318,10 @@ func (r *runner) standalone(ctx context.Context) int {
 	for {
 		select {
 		case ex := <-r.localCh:
-			r.event("exit", map[string]any{"code": ex.Code, "signal": ex.Signal, "state": ex.State, "fallback": true})
+			if ex.Reason != "" {
+				r.sayAlways("%s", ex.Reason)
+			}
+			r.event("exit", map[string]any{"code": ex.Code, "signal": ex.Signal, "state": ex.State, "fallback": true, "reason": ex.Reason})
 			return ex.Code
 		case sig := <-r.signals:
 			r.forwardLocal(sig)
@@ -429,6 +436,12 @@ func (r *runner) loop(ctx context.Context) int {
 		case b := <-r.stdinCh:
 			r.onInput(b)
 		case ex := <-r.localCh:
+			if r.sess == nil && r.reconnectOn {
+				// The daemon is restarting: report the exit once we are
+				// back (or the reconnect gives up), so its record is right.
+				r.localCh, r.pendingExit = nil, &ex
+				continue
+			}
 			return r.onLocalDone(ex)
 		case <-r.noteC:
 			r.noteTimer, r.noteC = nil, nil
@@ -560,11 +573,11 @@ func (r *runner) onDecision(ctx context.Context, d proto.Decision) (int, bool) {
 		r.fallback = true
 	}
 	r.remote = false
+	r.localNode = d.Node
 	if r.tee == nil && r.sess != nil {
 		// The output also goes to the daemon, so kran logs and the UI
 		// show local jobs like remote ones (SPEC §8.2).
-		r.tee = newHistoryTee(teeQueueMax)
-		r.tee.setSession(r.sess)
+		r.tee = newHistoryTee(teeQueueMax) // queues until started is sent
 	}
 	p, lerr := r.start(r.localJob(d.Envelope))
 	if lerr != nil {
@@ -573,6 +586,9 @@ func (r *runner) onDecision(ctx context.Context, d proto.Decision) (int, bool) {
 	}
 	r.local, r.localCh, r.started = p, p.Done(), true
 	r.sendJSON(proto.FrameStarted, p.Started)
+	if r.tee != nil {
+		r.tee.setSession(r.sess) // the history takes output only after started
+	}
 	r.event("started", map[string]any{"job_id": d.JobID, "pid": p.Started.PID, "scope": p.Started.Scope})
 	return 0, false
 }
@@ -590,7 +606,10 @@ func (r *runner) onLocalDone(ex proto.Exit) int {
 		}
 	}
 	r.sendJSON(proto.FrameExit, ex)
-	r.event("exit", map[string]any{"code": ex.Code, "signal": ex.Signal, "state": ex.State, "fallback": r.fallback})
+	if ex.Reason != "" {
+		r.sayAlways("%s", ex.Reason)
+	}
+	r.event("exit", map[string]any{"code": ex.Code, "signal": ex.Signal, "state": ex.State, "fallback": r.fallback, "reason": ex.Reason})
 	return ex.Code
 }
 
@@ -672,6 +691,9 @@ func (r *runner) reconnect() {
 func (r *runner) onReconnect(ctx context.Context, rr reconnectResult) (int, bool) {
 	r.reconnectOn = false
 	if rr.err != nil || rr.sess == nil {
+		if r.pendingExit != nil {
+			return r.onLocalDone(*r.pendingExit), true
+		}
 		if r.local != nil {
 			return 0, false // keep running locally; the exit code is still ours
 		}
@@ -694,6 +716,9 @@ func (r *runner) onReconnect(ctx context.Context, rr reconnectResult) (int, bool
 	}
 	if r.tee != nil {
 		r.tee.setSession(r.sess) // output only after reattach and started
+	}
+	if r.pendingExit != nil {
+		return r.onLocalDone(*r.pendingExit), true
 	}
 	return 0, false
 }

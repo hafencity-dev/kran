@@ -198,6 +198,12 @@ func (e *jobEntry) targetReport(r stdinReport, first bool, node string) {
 	if f.closed {
 		return
 	}
+	if !r.Known && f.next == 0 {
+		// Nothing was forwarded yet (the job restarted on its target before
+		// it read any input, e.g. during setup): nothing can repeat, so
+		// the input starts from zero as if the target had said so.
+		r = stdinReport{Known: true}
+	}
 	if !r.Known {
 		if first {
 			e.outbox.dropInput()

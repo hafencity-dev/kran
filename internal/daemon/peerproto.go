@@ -59,6 +59,7 @@ const (
 	codeNotAccepting = "not_accepting"
 	codeDraining     = "draining"
 	codeBusy         = "busy"
+	codeMaxJobs      = "max_jobs"
 	codeUnknownJob   = "unknown_job"
 	codeJobStarted   = "job_started"
 	codeBadRequest   = "bad_request"
