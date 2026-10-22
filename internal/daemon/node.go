@@ -130,20 +130,22 @@ type Deps struct {
 
 // Daemon is one node's daemon.
 type Daemon struct {
-	deps    Deps
-	cfg     NodeConfig
-	self    string
-	t       Timing
-	now     func() time.Time
-	logf    func(format string, args ...any)
-	bus     *bus
-	ids     idGen
-	jobs    *jobTable
-	peers   *peerManager
-	target  *targetSide
-	stats   *statsTracker
-	history metricsHistory
-	token   string
+	deps   Deps
+	cfg    NodeConfig
+	self   string
+	t      Timing
+	now    func() time.Time
+	logf   func(format string, args ...any)
+	bus    *bus
+	ids    idGen
+	jobs   *jobTable
+	peers  *peerManager
+	target *targetSide
+	// manifests: what this origin synced where (peer protocol 1.1).
+	manifests *originManifests
+	stats     *statsTracker
+	history   metricsHistory
+	token     string
 
 	draining atomic.Bool
 
@@ -210,6 +212,7 @@ func New(deps Deps) (*Daemon, error) {
 	d.jobs = newJobTable(d)
 	d.stats = newStatsTracker(d.now)
 	d.target = newTargetSide(d)
+	d.manifests = newOriginManifests()
 	d.peers = newPeerManager(d)
 	d.unixHandler = d.routes(true)
 	d.tcpHandler = d.routes(false)

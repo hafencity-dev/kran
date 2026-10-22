@@ -425,7 +425,8 @@ type fakeExec struct {
 	putBlobs int
 	acquires int
 	releases int
-	runtimes []proto.Runtime // nil: one native runtime
+	runtimes []proto.Runtime   // nil: one native runtime
+	diffed   []*proto.Manifest // manifests Diff was called with
 }
 
 func newFakeExec(node, dir string, lease time.Duration) *fakeExec {
@@ -489,6 +490,7 @@ func (x *fakeExec) heldSlots() int {
 func (x *fakeExec) Diff(ctx context.Context, slot proto.SlotRef, m *proto.Manifest) (proto.SyncPlan, error) {
 	x.mu.Lock()
 	defer x.mu.Unlock()
+	x.diffed = append(x.diffed, m)
 	plan := proto.SyncPlan{Slot: slot}
 	seen := map[string]bool{}
 	for _, e := range m.Entries {

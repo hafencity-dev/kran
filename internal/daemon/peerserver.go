@@ -298,7 +298,7 @@ func (t *targetSide) handleSlotAcquire(ps *peerSession, pc *peerConn, req rawPee
 	if j.Slot != nil {
 		s := *j.Slot
 		t.mu.Unlock()
-		pc.respond(s)
+		pc.respond(slotAcquireReply{SlotRef: s, Sync: syncRevision})
 		return
 	}
 	t.mu.Unlock()
@@ -322,7 +322,7 @@ func (t *targetSide) handleSlotAcquire(ps *peerSession, pc *peerConn, req rawPee
 	}
 	j.Slot = &slot
 	t.mu.Unlock()
-	if err := pc.respond(slot); err != nil {
+	if err := pc.respond(slotAcquireReply{SlotRef: slot, Sync: syncRevision}); err != nil {
 		t.mu.Lock()
 		t.releaseLocked(j, "origin went away during slot.acquire")
 		t.mu.Unlock()
@@ -349,7 +349,15 @@ func decodeManifest(r io.Reader, m *proto.Manifest) error {
 }
 
 func (t *targetSide) handleSlotDiff(ps *peerSession, pc *peerConn, req rawPeerRequest) {
-	j, err := t.begin(req.JobID, ps.name(), true)
+	var b slotDiffBody
+	if len(req.Body) > 0 && string(req.Body) != "null" {
+		if err := json.Unmarshal(req.Body, &b); err != nil {
+			pc.fail(codeBadRequest, "malformed slot.diff")
+			return
+		}
+	}
+	origin := ps.name()
+	j, err := t.begin(req.JobID, origin, true)
 	if err != nil {
 		failPeer(pc, err)
 		return
@@ -362,32 +370,32 @@ func (t *targetSide) handleSlotDiff(ps *peerSession, pc *peerConn, req rawPeerRe
 		pc.fail(codeBadRequest, "slot.diff before slot.acquire")
 		return
 	}
+	var base *proto.Manifest
+	if b.Format == proto.ManifestSame || b.Format == proto.ManifestDelta {
+		if base = t.manifests.get(manifestKey(origin, b.Base)); base == nil {
+			pc.fail(codeManifestBase, "%s does not hold manifest %.12s; send all of it", t.d.self, b.Base)
+			return
+		}
+	}
 	if err := pc.respond(nil); err != nil {
 		return
 	}
-	fr := &frameReader{c: pc}
-	dec, err := newZstdDecoder()
+	m, hash, err := t.readManifest(pc, b, base)
 	if err != nil {
-		pc.fail(codeInternal, "zstd: %v", err)
+		var pe *peerError
+		if errors.As(err, &pe) {
+			pc.fail(pe.Code, "read manifest: %s", pe.Msg)
+		} else {
+			pc.fail(codeBadRequest, "read manifest: %v", err)
+		}
 		return
 	}
-	defer dec.Close()
-	if err := dec.Reset(fr); err != nil {
-		pc.fail(codeInternal, "zstd: %v", err)
-		return
-	}
-	var m proto.Manifest
-	if err := decodeManifest(dec, &m); err != nil {
-		fr.drain()
-		pc.fail(codeBadRequest, "read manifest: %v", err)
-		return
-	}
-	if err := fr.drain(); err != nil {
-		return
+	if hash != "" {
+		t.manifests.put(manifestKey(origin, hash), m)
 	}
 	ctx, cancel := context.WithTimeout(t.d.lifetime(), t.d.t.PrestartTimeout)
 	defer cancel()
-	plan, err := t.d.deps.Exec.Diff(ctx, *slot, &m)
+	plan, err := t.d.deps.Exec.Diff(ctx, *slot, m)
 	if err != nil {
 		pc.fail(codeInternal, "diff on %s: %v", t.d.self, err)
 		return
@@ -399,7 +407,7 @@ func (t *targetSide) handleSlotDiff(ps *peerSession, pc *peerConn, req rawPeerRe
 		}
 	}
 	t.mu.Lock()
-	j.manifest, j.blobs = &m, blobs
+	j.manifest, j.blobs = m, blobs
 	t.mu.Unlock()
 	pc.respond(plan)
 }

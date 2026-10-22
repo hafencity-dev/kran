@@ -29,6 +29,9 @@ type targetSide struct {
 	persistSeq uint64
 	writeMu    sync.Mutex
 	written    uint64
+	// manifests: recent slot.diff manifests by origin and hash, the bases
+	// of later deltas (peer protocol 1.1).
+	manifests *manifestCache
 }
 
 type tjob struct {
@@ -78,7 +81,7 @@ type tjobRecord struct {
 const targetJobsKey = "target.jobs"
 
 func newTargetSide(d *Daemon) *targetSide {
-	return &targetSide{d: d, jobs: map[string]*tjob{}}
+	return &targetSide{d: d, jobs: map[string]*tjob{}, manifests: newManifestCache(manifestCacheEntries)}
 }
 
 func (t *targetSide) get(id string) *tjob {

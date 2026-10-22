@@ -10,7 +10,7 @@ import "time"
 const (
 	APIVersion    = "v1"
 	ProtocolMajor = 1
-	ProtocolMinor = 0
+	ProtocolMinor = 1
 )
 
 // ---------------------------------------------------------------------------
