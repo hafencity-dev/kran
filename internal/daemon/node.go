@@ -204,19 +204,23 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.loadDrains()
 	d.refreshInfo(true)
 
-	var listeners []func()
-	if !d.deps.NoListen {
-		stop, err := d.listen()
-		if err != nil {
-			return err
-		}
-		listeners = stop
-	}
-
+	// Restore before listening: a CLI or origin reattaching right after a
+	// restart must find its job.
 	d.stats.rebuild(d)
 	d.jobs.loadRecent()
 	d.target.restore()
 	d.jobs.restore()
+
+	var listeners []func()
+	if !d.deps.NoListen {
+		stop, err := d.listen()
+		if err != nil {
+			d.cancel()
+			d.wg.Wait()
+			return err
+		}
+		listeners = stop
+	}
 
 	d.goLoop(d.selfLoop)
 	d.goLoop(d.target.sweepLoop)

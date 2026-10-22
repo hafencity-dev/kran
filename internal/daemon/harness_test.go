@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -462,3 +463,7 @@ func storedJob(t *testing.T, n *testNode, id string) proto.Job {
 }
 
 var _ = io.EOF
+
+type netConn = net.Conn
+
+func jsonUnmarshal(b []byte, v any) { json.Unmarshal(b, v) }
