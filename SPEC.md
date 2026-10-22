@@ -404,7 +404,13 @@ lowercase base32 (job IDs: 10 chars, sortable by time).
 Control frame payloads are JSON (`proto.RunFrame*` types); data frames are
 raw bytes. Types: `submit`, `notice`, `decision`, `started`, `stdin`,
 `stdin_eof`, `stdout`, `stderr`, `resize`, `signal`, `exit`, `heartbeat`,
-`reattach`, `error`. See `internal/proto/frames.go`.
+`reattach`, `error`, `stdin_credit`, `stdin_resume`. See
+`internal/proto/frames.go`. Input to a remote job (`-i`) is flow-controlled
+end to end: `kran run` forwards stdin only below the credit's limit (the
+job's consumed offset + 8 MiB), keeps what was not consumed, and sends it
+again from `resume` after a lost connection; signals never wait behind
+input. Input is never dropped silently: when it cannot be recovered, the
+job's stdin is closed with a warning.
 
 ### 8.3 Peer protocol
 
