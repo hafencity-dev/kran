@@ -333,3 +333,16 @@ func (v *nodeView) freeCPUFor(rt rtView) float64 {
 	}
 	return f
 }
+
+// fitsMem is fits without the CPU check (short local jobs).
+func (v *nodeView) fitsMem(rt rtView, mem int64) bool {
+	for _, p := range v.pools(rt) {
+		if mem > p.freeMem() {
+			return false
+		}
+	}
+	if mx := v.e.st.MaxJobs; mx > 0 && v.running >= mx {
+		return false
+	}
+	return true
+}

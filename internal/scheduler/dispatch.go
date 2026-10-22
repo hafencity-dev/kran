@@ -308,8 +308,10 @@ func (s *sched) tryPlace(j *sjob, views map[string]*nodeView, names []string, no
 	starving := now.Sub(j.queuedAt) >= s.opts.StarvationAfter
 
 	// Short jobs stay on the origin: sending them costs more than it saves.
+	// They need only memory to start: run locally without kran they would
+	// share the CPUs too, for a few seconds.
 	if selfCand != nil && j.est.Duration < shortJobSeconds && j.req.Node == "" && !selfCand.oversize {
-		if selfCand.fits {
+		if selfCand.fits || selfCand.v.fitsMem(selfCand.rt, selfCand.mem) {
 			s.place(j, selfCand, now, fmt.Sprintf("here: est. %s, too short to send elsewhere", fmtDur(j.est.Duration)))
 			return placedJob
 		}
