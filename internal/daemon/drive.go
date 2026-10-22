@@ -330,14 +330,17 @@ func (d *Daemon) waitLocal(ctx context.Context, e *jobEntry) {
 		if killed {
 			return
 		}
-		killed = true
 		e.mu.Lock()
 		pid, pgid, scope := e.pid, e.pgid, e.scope
 		e.mu.Unlock()
 		if pid > 0 || pgid > 0 || scope != "" {
+			killed = true
 			go d.deps.KillLocal(pid, pgid, scope)
 		}
-		killDeadline = time.After(d.t.KillGrace + 5*time.Second)
+		// Nothing reported yet: the started frame (if it comes) kills it.
+		if killDeadline == nil {
+			killDeadline = time.After(d.t.KillGrace + 5*time.Second)
+		}
 	}
 	cancelCh := e.cancelCh
 	for {
