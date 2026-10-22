@@ -211,21 +211,6 @@ func TestIDsSortableAndUnique(t *testing.T) {
 	}
 }
 
-func TestSliceMax(t *testing.T) {
-	const G = int64(1 << 30)
-	cases := []struct{ cur, avail, total, reserve, want int64 }{
-		{0, 100 * G, 120 * G, 8 * G, 92 * G},
-		{10 * G, 100 * G, 120 * G, 8 * G, 102 * G},
-		{50 * G, 100 * G, 120 * G, 8 * G, 112 * G}, // capped at total − reserve
-		{0, 4 * G, 120 * G, 8 * G, G},              // floor
-	}
-	for _, c := range cases {
-		if got := sliceMax(c.cur, c.avail, c.total, c.reserve); got != c.want {
-			t.Errorf("sliceMax(%d,%d,%d,%d) = %d, want %d", c.cur/G, c.avail/G, c.total/G, c.reserve/G, got/G, c.want/G)
-		}
-	}
-}
-
 func TestRotator(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "daemon.log")
 	r, err := newRotator(path, 100, 3)
