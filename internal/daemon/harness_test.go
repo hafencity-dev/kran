@@ -102,8 +102,8 @@ type testNode struct {
 	timing  Timing
 	log     *safeLog
 	cfg     NodeConfig
-	dialer  PeerDialer   // nil = in-memory network
-	src     PeerSource   // nil = peers
+	dialer  PeerDialer // nil = in-memory network
+	src     PeerSource // nil = peers
 
 	mu     sync.Mutex
 	d      *Daemon
