@@ -34,7 +34,7 @@ type Options struct {
 	KranPath string
 	Home     string // default os.UserHomeDir()
 	GOOS     string // default runtime.GOOS; tests render both flavors on one host
-	UID      int    // default os.Getuid()
+	UID      int    // default os.Getuid() (taken as given when Runner is set)
 	// Instance isolates dev/test installs from the real service. When empty
 	// and any of KRAN_CONFIG_DIR/KRAN_STATE_DIR/KRAN_RUNTIME_DIR is set, a
 	// short stable id is derived from them (unit kran-<inst>.service, label
@@ -184,7 +184,9 @@ func (o Options) normalize() (Options, error) {
 		}
 		o.Home = h
 	}
-	if o.UID == 0 && o.GOOS == runtime.GOOS {
+	// UID 0 means "this process's" on the real system. With an injected
+	// Runner (tests) the options are taken as given, so 0 can mean root.
+	if o.UID == 0 && o.GOOS == runtime.GOOS && o.Runner == nil {
 		o.UID = os.Getuid()
 	}
 	if o.KranPath == "" {

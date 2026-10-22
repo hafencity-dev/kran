@@ -64,7 +64,9 @@ func TestLoadHintReachesPeerSessions(t *testing.T) {
 	}
 
 	b.prober.mu.Lock()
-	b.prober.m.MemPressure = 45 // PSI: stalled on memory 45% of the time
+	// Heavy on either scale: Linux PSI (share of time stalled on memory) and
+	// the macOS memorystatus level the test daemon reports on a Mac.
+	b.prober.m.MemPressure = 95
 	b.prober.mu.Unlock()
 	waitFor(t, 3*time.Second, "stress hint for a loaded peer", func() bool { return hd.session().stressed.Load() })
 

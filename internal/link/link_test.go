@@ -122,12 +122,12 @@ func TestLinkEndToEnd(t *testing.T) {
 	// Both installs are placed by KRAN_*_DIR (a dev setup): the forced
 	// commands carry those dirs so they reach these daemons.
 	if !strings.Contains(ra, `command="env KRAN_CONFIG_DIR=`) ||
-		!strings.Contains(ra, " "+filepath.Join(w.remoteHome, "bin", "kran")+` serve --stdio --peer gx-local",restrict `) ||
+		!hasPath(ra, filepath.Join(w.remoteHome, "bin", "kran"), ` serve --stdio --peer gx-local",restrict `) ||
 		!strings.Contains(ra, keyBlob(ours)) || !strings.HasSuffix(strings.TrimSpace(ra), "kran@gx-local kran-dev") {
 		t.Fatalf("remote authorized_keys:\n%s", ra)
 	}
 	la := w.readFile(w.localAuthKeys())
-	if !strings.Contains(la, `command="env KRAN_CONFIG_DIR=`) || !strings.Contains(la, " "+w.self+` serve --stdio --peer devbox",restrict `) || !strings.HasSuffix(strings.TrimSpace(la), "kran@devbox kran-dev") {
+	if !strings.Contains(la, `command="env KRAN_CONFIG_DIR=`) || !hasPath(la, w.self, ` serve --stdio --peer devbox",restrict `) || !strings.HasSuffix(strings.TrimSpace(la), "kran@devbox kran-dev") {
 		t.Fatalf("local authorized_keys:\n%s", la)
 	}
 	// peers.toml on both sides
@@ -137,7 +137,7 @@ func TestLinkEndToEnd(t *testing.T) {
 		t.Fatalf("local peer: %+v", p)
 	}
 	rp, ok := w.remotePeers().Find("gx-local")
-	if !ok || rp.Direction != "both" || rp.Tag != "kran-dev" || rp.KranPath != w.self || len(rp.Addresses) != 1 {
+	if !ok || rp.Direction != "both" || rp.Tag != "kran-dev" || (rp.KranPath != w.self && rp.KranPath != resolved(w.self)) || len(rp.Addresses) != 1 {
 		t.Fatalf("remote peer: %+v", rp)
 	}
 	// no real-config pollution: the remote's files live under remoteHome only
@@ -379,4 +379,19 @@ func TestUnlinkWhenPeerUnreachable(t *testing.T) {
 	if !strings.Contains(w.readFile(w.remoteAuthKeys()), "serve --stdio") {
 		t.Fatal("remote must not be touched while unreachable")
 	}
+}
+
+// hasPath reports whether s contains " <p><suffix>" for p as given or
+// with symlinks resolved.
+func hasPath(s, p, suffix string) bool {
+	return strings.Contains(s, " "+p+suffix) || strings.Contains(s, " "+resolved(p)+suffix)
+}
+
+// resolved is p with symlinks resolved, as kran records its own path (on
+// macOS the temp dir /var/folders/... is really /private/var/folders/...).
+func resolved(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	return p
 }
