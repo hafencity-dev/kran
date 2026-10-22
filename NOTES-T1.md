@@ -48,15 +48,19 @@ The default `go test ./...` is unchanged: tagged suites do not compile without t
 
 ## Open issues
 
-See the report in the branch's last commit message / lead report; in short:
-* `TestOriginRestartWithoutCLICancels` (daemon) times out now and then under heavy CPU load
-  (in-memory links miss 3 pings); seen 2 of ~8 full-package runs on this branch, 0 of 2 on main.
-* Once after the reboot a daemon start took > 30 s (Docker CLI probes timing out); a CLI that tries
-  to reattach after a daemon restart only retries for 10 s. The harness now waits 60 s.
+* Flaky under heavy CPU load (load 30-65 on gx10 today), not reproducible in isolation:
+  `TestOriginRestartWithoutCLICancels` (daemon; in-memory links miss 3 pings, the job never reaches
+  canceled; 2 of ~10 full-package runs) and `TestOriginDaemonRestartReattach` (daemon; reattach saw
+  "no daemon at socket" once in the full suite, 0 of 50 runs alone). Both go through main's restore
+  code; worth a look by A.
+* Once after the reboot a daemon start took more than 30 s (Docker CLI probes timing out). A CLI
+  that reattaches after a daemon restart retries for only 10 s. Not reproduced since (start 0.5 s).
 * A `--remote`/`-n` job whose only target is draining or below its disk floor waits (with the
-  reason) instead of failing with 125; consistent, but an agent may wait forever.
-* `submit.prefer = "remote"` in config.toml behaves exactly like `--remote` (no fallback when no
-  peer can take a job); only origin-only jobs are exempt now. Decide whether it should be soft.
+  reason) instead of failing with 125: consistent, but an agent may wait forever.
+* `submit.prefer = "remote"` in config.toml still means `--remote` (no fallback when no peer can
+  take a job); only origin-only jobs are exempt now. Decide whether it should be a soft preference.
 * `*.key` files are hard-excluded from sync (secrets), also when a project uses one as setup key.
-* Under a terminal, remote tty jobs run with the local terminal in cooked mode: with `-i`, typed
-  input is echoed twice (local tty and remote pty).
+* Remote tty jobs run with the local terminal in cooked mode: with `-i`, typed input is echoed
+  twice (local tty and remote pty).
+* The default `go test -race ./...` took 174 s at load ~60 today (`internal/link` alone 123 s);
+  the tagged suites add nothing to it.

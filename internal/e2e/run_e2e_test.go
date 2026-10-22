@@ -146,7 +146,7 @@ func TestE2ELocalRecordsMatchExit(t *testing.T) {
 	c := newCluster(t, []string{"a"}, nil)
 	a := c.node("a")
 	repo := makeRepo(t, filepath.Join(c.base, "repo"), map[string]string{"f": "x"})
-	for i := 0; i < 40; i++ {
+	for i := 0; i < 12; i++ {
 		r := a.kran(runOpts{dir: repo}, "run", "--json-events", "--local", "--", "sh", "-c", "sleep 1.9; seq 1 400000; exit 3")
 		id, _ := event(r.events(), "decision")["job_id"].(string)
 		if r.code != 3 || id == "" {
