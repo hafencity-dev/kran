@@ -54,7 +54,13 @@ func fakeKran(args []string) int {
 		name := fs.String("name", "", "")
 		fs.Bool("yes", false, "")
 		fs.Bool("quiet", false, "")
+		noAgents := fs.Bool("no-agents", false, "")
+		fs.Bool("no-link", false, "")
 		if fs.Parse(args[1:]) != nil {
+			return 2
+		}
+		if !*noAgents { // link must never touch the remote's coding agents
+			os.Stderr.WriteString("setup without --no-agents\n")
 			return 2
 		}
 		if *name != "" {

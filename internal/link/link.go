@@ -257,7 +257,9 @@ func Link(ctx context.Context, o Options) (*Result, error) {
 	// --- first-time setup of the remote (node id, key, service)
 	if info.ID == "" || info.PubKey == "" {
 		o.progress("setup", "Setting up kran on "+o.Host)
-		args := []string{"setup", "--yes", "--quiet"}
+		// The remote's coding agents are its owner's business: link never
+		// changes them (they can run `kran agents install` there).
+		args := []string{"setup", "--yes", "--quiet", "--no-agents", "--no-link"}
 		if o.Name != "" {
 			args = append(args, "--name", o.Name)
 		}
