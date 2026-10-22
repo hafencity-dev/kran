@@ -74,13 +74,15 @@ func (d *Daemon) uploadBlobs(ctx context.Context, sess transport.Session, e *job
 	}()
 
 	work := make(chan string)
+	var errMu sync.Mutex
 	var firstErr error
-	var errOnce sync.Once
 	setErr := func(err error) {
-		errOnce.Do(func() {
+		errMu.Lock()
+		if firstErr == nil {
 			firstErr = err
-			cancel()
-		})
+		}
+		errMu.Unlock()
+		cancel()
 	}
 	workers := uploadWorkers
 	if len(plan.Missing) < workers {
@@ -114,14 +116,20 @@ feed:
 		// link ignores the stream's deadline (yamux waits for the
 		// connection itself), so it ends only with the link; the job must
 		// not.
+		cancel()
+		<-progDone
+		return sent.Load(), parent.Err()
 	}
 	cancel()
 	<-progDone
-	if firstErr == nil && parent.Err() != nil {
-		firstErr = parent.Err()
+	errMu.Lock()
+	err := firstErr
+	errMu.Unlock()
+	if err == nil && parent.Err() != nil {
+		err = parent.Err()
 	}
-	if firstErr != nil {
-		return sent.Load(), firstErr
+	if err != nil {
+		return sent.Load(), err
 	}
 	n := sent.Load()
 	if el := time.Since(start).Seconds(); n >= 1<<20 && el > 0 {
