@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -581,6 +582,13 @@ func runLocalChild(rs client.RunSession, spec proto.JobSpec, dc proto.Decision, 
 		code = ee.ExitCode()
 	}
 	return rs.SendJSON(proto.FrameExit, proto.Exit{JobID: dc.JobID, Code: code, Usage: proto.Usage{WallSeconds: 0.1}})
+}
+
+// reachedLine reports whether the output so far plus frame p contains the
+// line want. Frames coalesce under load ("2\n3\n4\n"), so checking a
+// frame's prefix can miss the line and the disruption never happens.
+func reachedLine(r *cliResult, p []byte, want string) bool {
+	return strings.Contains("\n"+r.out()+string(p), "\n"+want+"\n")
 }
 
 func storedJob(t *testing.T, n *testNode, id string) proto.Job {

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -55,6 +56,20 @@ func TestFallbackAndCircuitBreaker(t *testing.T) {
 	ws := workspaceDir(t, map[string]string{"f": "local data"})
 	ctx, cancel := testContext(30 * time.Second)
 	defer cancel()
+	// The degraded window (BreakerCooldown) may pass while a loaded machine
+	// finishes the third run: watch for it all along.
+	var sawDegraded atomic.Bool
+	watchCtx, stopWatch := context.WithCancel(ctx)
+	defer stopWatch()
+	go func() {
+		for watchCtx.Err() == nil {
+			if ns, ok := a.scheduler().node("b"); ok && ns.Status == proto.NodeDegraded && strings.Contains(ns.Reason, "failed before they started") {
+				sawDegraded.Store(true)
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
 	for i := 0; i < 3; i++ {
 		res, err := runCLI(ctx, a.sock(), shSpec(ws, "cat f"), cliOpts{})
 		if err != nil {
@@ -85,10 +100,7 @@ func TestFallbackAndCircuitBreaker(t *testing.T) {
 		return b.exec.heldSlots() == 0 && len(b.daemon().target.status().Allocs) == 0
 	})
 	// Three failures in a row: b is degraded for a while.
-	waitFor(t, 2*time.Second, "b degraded", func() bool {
-		ns, _ := a.scheduler().node("b")
-		return ns.Status == proto.NodeDegraded && strings.Contains(ns.Reason, "failed before they started")
-	})
+	waitFor(t, 2*time.Second, "b degraded", sawDegraded.Load)
 	if a.daemon().State().Stats.FallbacksToday != 3 {
 		t.Fatalf("stats %+v", a.daemon().State().Stats)
 	}
@@ -171,7 +183,7 @@ func TestTargetDaemonRestartMidRun(t *testing.T) {
 	var once sync.Once
 	res, err := runCLI(ctx, a.sock(), shSpec(ws, script), cliOpts{
 		hook: func(rs client.RunSession, ft proto.FrameType, p []byte, r *cliResult) error {
-			if ft == proto.FrameStdout && strings.HasPrefix(string(p), "5") {
+			if ft == proto.FrameStdout && reachedLine(r, p, "5") {
 				once.Do(func() {
 					go func() {
 						b.stop()
@@ -204,7 +216,7 @@ func TestShortNetworkCut(t *testing.T) {
 	var once sync.Once
 	res, err := runCLI(ctx, a.sock(), shSpec(ws, script), cliOpts{
 		hook: func(rs client.RunSession, ft proto.FrameType, p []byte, r *cliResult) error {
-			if ft == proto.FrameStdout && strings.HasPrefix(string(p), "5") {
+			if ft == proto.FrameStdout && reachedLine(r, p, "5") {
 				once.Do(func() { c.net.Cut("a") })
 			}
 			return nil
@@ -226,7 +238,7 @@ func TestShortStallSurvives(t *testing.T) {
 	var once sync.Once
 	res, err := runCLI(ctx, a.sock(), shSpec(ws, script), cliOpts{
 		hook: func(rs client.RunSession, ft proto.FrameType, p []byte, r *cliResult) error {
-			if ft == proto.FrameStdout && strings.HasPrefix(string(p), "3") {
+			if ft == proto.FrameStdout && reachedLine(r, p, "3") {
 				once.Do(func() {
 					// Shorter than keepalive and lease: nothing may break.
 					c.net.SetDown("a", true)
@@ -285,7 +297,7 @@ func TestOriginDaemonRestartReattach(t *testing.T) {
 	var once sync.Once
 	err := runCLIInto(ctx, a.sock(), shSpec(ws, script), cliOpts{
 		hook: func(rs client.RunSession, ft proto.FrameType, p []byte, r *cliResult) error {
-			if ft == proto.FrameStdout && strings.HasPrefix(string(p), "5") {
+			if ft == proto.FrameStdout && reachedLine(r, p, "5") {
 				once.Do(func() { go a.stop() })
 			}
 			return nil

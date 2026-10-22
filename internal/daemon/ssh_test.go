@@ -3,7 +3,6 @@ package daemon
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -60,11 +59,15 @@ func TestRemoteRunOverSSH(t *testing.T) {
 			t.Fatalf("link %+v", n.Link)
 		}
 	}
-	// The connection drops (sshd restart): a reconnects by itself.
+	// The connection drops (sshd restart): a reconnects by itself. Wait for
+	// a new session, not for "connected": right after the drop a still
+	// reports the old one until it notices.
+	old := a.daemon().peers.get("b").active()
 	srv.DropConnections()
 	waitFor(t, 10*time.Second, "b reconnected", func() bool {
+		s := a.daemon().peers.get("b").active()
 		ns, ok := a.scheduler().node("b")
-		return ok && ns.Status == proto.NodeOnline && ns.Link.Connected
+		return s != nil && s != old && ok && ns.Status == proto.NodeOnline && ns.Link.Connected
 	})
 	res, err = runCLI(ctx, a.sock(), shSpec(ws, "echo again"), cliOpts{})
 	if err != nil || res.out() != "again\n" || res.exit.Node != "b" {
@@ -76,7 +79,7 @@ func TestRemoteRunOverSSH(t *testing.T) {
 	var once sync.Once
 	res, err = runCLI(ctx, a.sock(), shSpec(ws, script), cliOpts{
 		hook: func(rs client.RunSession, ft proto.FrameType, p []byte, r *cliResult) error {
-			if ft == proto.FrameStdout && strings.HasPrefix(string(p), "4") {
+			if ft == proto.FrameStdout && reachedLine(r, p, "4") {
 				once.Do(srv.DropConnections)
 			}
 			return nil

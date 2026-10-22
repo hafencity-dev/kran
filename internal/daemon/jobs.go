@@ -484,13 +484,13 @@ func (e *jobEntry) finish(x proto.Exit) {
 		u := x.Usage
 		d.deps.Sched.Release(e.id, &u)
 	}
+	d.stats.record(final) // `kran status` right after kran run sees this job
 	e.sendFrame(proto.FrameExit, x)
 	e.spool.finish()
 	e.spool.close() // readers keep their own handles
 	if final.State == proto.JobSucceeded || final.State == proto.JobFailed {
 		d.deps.Est.Observe(&final)
 	}
-	d.stats.record(final)
 	d.bus.publish(proto.EventStats, d.stats.snapshot())
 	d.jobs.retire(e, final)
 	close(e.done)
