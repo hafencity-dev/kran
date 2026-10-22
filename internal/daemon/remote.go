@@ -390,7 +390,9 @@ func (d *Daemon) pumpJob(ctx context.Context, e *jobEntry, node string, pc *peer
 			return
 		}
 		for {
-			for _, f := range e.outbox.take() {
+			// One frame at a time: a signal queued while input is being
+			// written goes out next.
+			for f, ok := e.outbox.next(); ok; f, ok = e.outbox.next() {
 				if !send(f.t, f.p) {
 					return
 				}

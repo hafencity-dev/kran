@@ -498,9 +498,13 @@ func stateForExit(x proto.Exit) proto.JobState {
 
 // --- outbox: frames from the origin to the target, kept across reattach ---
 
+// outbox queues frames for the target. Control frames (signals, resizes)
+// overtake queued input so Ctrl-C never waits behind stdin; input (data
+// and EOF) keeps its order.
 type outbox struct {
 	mu     sync.Mutex
-	frames []outFrame
+	ctl    []outFrame
+	data   []outFrame
 	bytes  int
 	notify chan struct{}
 }
@@ -521,6 +525,8 @@ func (o *outbox) wake() {
 	}
 }
 
+func isInput(t proto.FrameType) bool { return t == proto.FrameStdin || t == proto.FrameStdinEOF }
+
 // put queues a frame; data beyond outboxMax is refused (control frames are
 // always accepted).
 func (o *outbox) put(t proto.FrameType, p []byte) bool {
@@ -529,17 +535,31 @@ func (o *outbox) put(t proto.FrameType, p []byte) bool {
 	if t == proto.FrameStdin && o.bytes+len(p) > outboxMax {
 		return false
 	}
-	o.frames = append(o.frames, outFrame{t, append([]byte(nil), p...)})
-	o.bytes += len(p)
+	f := outFrame{t, append([]byte(nil), p...)}
+	if isInput(t) {
+		o.data = append(o.data, f)
+		o.bytes += len(p)
+	} else {
+		o.ctl = append(o.ctl, f)
+	}
 	o.wake()
 	return true
 }
 
-func (o *outbox) take() []outFrame {
+// next pops the next frame to send, control frames first.
+func (o *outbox) next() (outFrame, bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	f := o.frames
-	o.frames = nil
-	o.bytes = 0
-	return f
+	if len(o.ctl) > 0 {
+		f := o.ctl[0]
+		o.ctl = o.ctl[1:]
+		return f, true
+	}
+	if len(o.data) > 0 {
+		f := o.data[0]
+		o.data = o.data[1:]
+		o.bytes -= len(f.p)
+		return f, true
+	}
+	return outFrame{}, false
 }
