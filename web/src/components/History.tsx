@@ -185,7 +185,7 @@ const HistoryRow = memo(function HistoryRow({ job: j, onOpen }: { job: Job; onOp
   const delta = est > 0 && took > 0 ? took / est - 1 : null
   return (
     <tr onClick={e => !(e.target as HTMLElement).closest('button') && onOpen(j.spec.id)}>
-      <td data-label="Result">
+      <td class="cell-result" data-label="Result">
         <StateBadge job={j} />
       </td>
       <td class="cell-cmd" data-label="Command">
@@ -197,20 +197,22 @@ const HistoryRow = memo(function HistoryRow({ job: j, onOpen }: { job: Job; onOp
           {j.spec.workspace.branch ? ` on ${j.spec.workspace.branch}` : ''}
         </span>
       </td>
-      <td data-label="Owner">
+      <td class="cell-owner" data-label="Owner">
         <OwnerChip owner={j.spec.owner} />
       </td>
-      <td data-label="Machine">{where(j)}</td>
-      <td data-label="Ended" class="r num">
+      <td class="cell-machine" data-label="Machine">
+        {where(j)}
+      </td>
+      <td data-label="Ended" class="r num cell-ended">
         {clock(j.ended_at)}
       </td>
-      <td data-label="Took" class="r num">
+      <td data-label="Took" class="r num cell-took">
         {took ? duration(took) : '–'}
       </td>
-      <td data-label="vs. estimate" class="r num">
+      <td data-label="vs. estimate" class="r num cell-delta">
         {delta == null ? <span class="muted">–</span> : <Delta v={delta} />}
       </td>
-      <td data-label="Peak memory" class="r num">
+      <td data-label="Peak memory" class="r num cell-peak">
         {j.usage?.peak_mem ? bytes(j.usage.peak_mem) : '–'}
       </td>
     </tr>

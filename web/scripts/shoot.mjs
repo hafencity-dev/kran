@@ -57,6 +57,37 @@ const settle = async p => {
   await p.waitForSelector('.berth')
   // Sparklines are client-side history; give them some samples.
   await p.waitForTimeout(Number(process.env.SETTLE ?? 2500))
+  await assertRowsVisible(p)
+}
+
+// Every list the page claims to have must actually be painted: a row that
+// exists in the DOM but is skipped (content-visibility), hidden, transparent
+// or empty is a bug, even if nothing throws. Counts must match the headers.
+async function assertRowsVisible(p) {
+  const problems = await p.evaluate(() => {
+    const out = []
+    const count = id => Number(document.querySelector(`#${id} .count`)?.textContent ?? 'NaN')
+    const check = (sel, want) => {
+      const els = [...document.querySelectorAll(sel)]
+      if (want != null && els.length !== want) out.push(`${sel}: ${els.length} rows rendered, header says ${want}`)
+      els.forEach((el, i) => {
+        const r = el.getBoundingClientRect()
+        // content-visibility skips an element's contents, not the element:
+        // test the row and the text inside it.
+        const inner = el.querySelector('code, .node-name, .state') ?? el.firstElementChild ?? el
+        const opts = { contentVisibilityAuto: true, opacityProperty: true, visibilityProperty: true }
+        const painted = el.checkVisibility(opts) && inner.checkVisibility(opts)
+        if (!painted || r.height < 12 || r.width < 60 || !el.innerText.trim()) out.push(`${sel} #${i + 1} is not visible (${Math.round(r.width)}x${Math.round(r.height)}, painted=${painted})`)
+      })
+    }
+    check('.berth', count('machines-h') || document.querySelectorAll('.berth').length)
+    check('.running tbody tr', count('running-h'))
+    check('.qitem', Math.min(count('waiting-h'), 40))
+    check('.history tbody tr', null)
+    if (count('waiting-h') > 0 && !document.querySelector('.qreason')?.innerText.includes('waiting')) out.push('queue rows show no wait reason')
+    return out
+  })
+  if (problems.length) throw new Error('rows not visible:\n' + problems.join('\n'))
 }
 
 await Promise.all(

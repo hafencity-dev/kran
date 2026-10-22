@@ -18,7 +18,7 @@ No changes to `internal/proto` or any other owner's interface.
 * `go run ./internal/ui/mockserver [-nodes 10 -jobs 200] [-token x] [-top]` serves the API and the built UI on :7271. `web/` `npm run dev` proxies `/api` there.
 * Build: `make -f ui.mk ui` (or `go generate ./internal/ui`) runs `npm ci && npm run build` in `web/`. **Lead:** add `include ui.mk` to the root Makefile (E owns it; a second root Makefile would conflict).
 * Budget: JS is 24.5 KB gzipped (the target was under 100 KB), CSS 6 KB. One 90 KB variable font (Archivo, latin) is served from the binary, so nothing loads from the network.
-* Measured with `web/scripts/perf.mjs` (10 nodes, 200 active jobs, about 100 events/s, 10× the target rate): 60 fps, worst frame 17 ms, zero long tasks, 10 MB heap.
+* Measured with `web/scripts/perf.mjs` (10 nodes, 200 active jobs, about 120 events/s, 12× the target rate): 59.5 fps, zero long tasks, worst single frame 100 ms on this loaded host, 14 MB heap. No virtualization and no `content-visibility`: an earlier `content-visibility: auto` on queue and history rows left them unpainted in full-page captures, so it was removed.
 
 ## Wiring (lead / A / E)
 
@@ -72,5 +72,7 @@ mux.Handle("/", ui.Handler())        // D
 * `internal/ui`: handler table test (types, caching, SPA fallback, traversal, methods) and a check that the embedded build is real.
 * `internal/ui/mock`: simulation invariants over 10 simulated minutes, SSE first event, token rules.
 * `internal/tui`: view fits 80×24, 100×30 and 160×50; NO_COLOR has no escapes; cancel asks first; drain asks and resume doesn't; tab cycles panes; log follow; JSON-decoded event data; seq gap detection; log line cleanup.
+
+`web/scripts/shoot.mjs` also fails unless every machine, running, queue and history row is actually painted (checked with `checkVisibility` including `content-visibility`) and the row counts match the section headers.
 
 Screenshots: `web/screenshots/` (gitignored), regenerated with `make -f ui.mk ui-mock` in one shell and `make -f ui.mk ui-shots` in another.

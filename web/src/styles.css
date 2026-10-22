@@ -1013,15 +1013,7 @@ table.jobs {
 .jobs tbody tr {
   cursor: pointer;
 }
-/* Long lists: rows off screen cost nothing until scrolled to. */
-.history tbody tr {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 58px;
-}
-.qitem {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 120px;
-}
+
 .jobs tbody tr:hover {
   background: color-mix(in srgb, var(--sunken) 70%, transparent);
 }
@@ -1682,7 +1674,9 @@ main.is-stale .today {
     grid-column: span 2;
   }
 
-  /* Tables become stacked rows. */
+  /* Tables become dense cards: command first, then who and where on one
+     line, then time and usage. No per-cell labels; the values say what
+     they are. */
   .jobs thead {
     display: none;
   }
@@ -1692,9 +1686,10 @@ main.is-stale .today {
   }
   .jobs tr {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    gap: 8px 14px;
-    padding: 14px 16px;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: baseline;
+    gap: 5px 12px;
+    padding: 12px 14px;
     border-top: 1px solid var(--rule);
   }
   .jobs tbody tr:first-child {
@@ -1706,30 +1701,108 @@ main.is-stale .today {
     border: 0;
     width: auto !important;
     max-width: none;
+    min-width: 0;
     text-align: left !important;
+    font-size: 13px;
   }
-  .jobs td.cell-cmd {
-    grid-column: 1 / -1;
-    order: -1;
+  .jobs .sub {
+    font-size: 12px;
   }
-  .jobs td[data-label]::before {
-    content: attr(data-label);
-    display: block;
-    font-size: 11.5px;
-    font-weight: 600;
-    color: var(--ink-3);
-    margin-bottom: 1px;
+
+  .running tr {
+    grid-template-areas:
+      'cmd cmd act'
+      'phase owner where'
+      'time time live';
   }
-  .jobs td.cell-cmd::before {
+  .running .cell-cmd {
+    grid-area: cmd;
+  }
+  .running .cell-actions {
+    grid-area: act;
+    align-self: start;
+  }
+  .running .cell-phase {
+    grid-area: phase;
+  }
+  .running .cell-owner {
+    grid-area: owner;
+    overflow: hidden;
+  }
+  .running .cell-where {
+    grid-area: where;
+    text-align: right !important;
+  }
+  .running .cell-where .sub {
     display: none;
   }
-  .jobs td.cell-actions {
-    grid-column: 1 / -1;
-    display: flex;
-    justify-content: flex-end;
+  .running .cell-time {
+    grid-area: time;
   }
-  .reason-line {
-    white-space: normal;
+  .running .cell-live {
+    grid-area: live;
+    text-align: right !important;
+  }
+  .running .cell-live > span {
+    display: inline;
+  }
+  .running .cell-live > span + span {
+    margin-left: 8px;
+  }
+  .running .cell-live .of {
+    display: none;
+  }
+  .elapsed {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+  }
+  .elapsed .bar {
+    width: 4.5rem;
+    flex: none;
+  }
+  .running .cell-actions .btn {
+    height: 26px;
+    margin: -4px -6px 0 0;
+  }
+
+  .history tr {
+    grid-template-areas:
+      'cmd cmd took'
+      'result owner machine'
+      'ended delta peak';
+  }
+  .history .cell-cmd {
+    grid-area: cmd;
+  }
+  .history .cell-took {
+    grid-area: took;
+    text-align: right !important;
+    font-weight: 600;
+  }
+  .history .cell-result {
+    grid-area: result;
+  }
+  .history .cell-owner {
+    grid-area: owner;
+    overflow: hidden;
+  }
+  .history .cell-machine {
+    grid-area: machine;
+    text-align: right !important;
+    white-space: nowrap;
+  }
+  .history .cell-ended {
+    grid-area: ended;
+    color: var(--ink-3);
+  }
+  .history .cell-delta {
+    grid-area: delta;
+  }
+  .history .cell-peak {
+    grid-area: peak;
+    text-align: right !important;
+    color: var(--ink-3);
   }
 
   .queue {
@@ -1744,12 +1817,36 @@ main.is-stale .today {
     justify-content: flex-start;
     align-items: center;
   }
-  .qline {
-    flex-direction: column;
-    gap: 2px;
+  /* Workspace and size are in the reason and the details; keep the card
+     to command, owner and the reason itself. */
+  .qitem {
+    padding: 12px 0;
+    gap: 2px 10px;
+  }
+  .qpos {
+    font-size: 19px;
+  }
+  .qmeta .q-ws,
+  .qmeta .q-need {
+    display: none;
   }
   .waited {
-    margin-left: 0;
+    font-size: 12px;
+  }
+  .qreason {
+    margin-top: 6px;
+    padding: 5px 10px;
+    font-size: 13px;
+  }
+  .qactions {
+    margin-top: 4px;
+  }
+  .vital {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .vital .spark-wrap {
+    align-self: stretch;
   }
 
   .filters label {

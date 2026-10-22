@@ -69,7 +69,7 @@ const RunningRow = memo(function RunningRow({ job: j, onOpen }: { job: Job; onOp
   const cmd = command(j.spec.argv, j.spec.shell)
   return (
     <tr onClick={e => !(e.target as HTMLElement).closest('button,select,a') && onOpen(j.spec.id)}>
-      <td data-label="Phase">
+      <td class="cell-phase" data-label="Phase">
         <StateBadge job={j} />
       </td>
       <td class="cell-cmd" data-label="Command">
@@ -82,10 +82,10 @@ const RunningRow = memo(function RunningRow({ job: j, onOpen }: { job: Job; onOp
         </span>
         {j.reason && <span class="sub reason-line">{j.reason}</span>}
       </td>
-      <td data-label="Owner">
+      <td class="cell-owner" data-label="Owner">
         <OwnerChip owner={j.spec.owner} />
       </td>
-      <td data-label="Where">
+      <td class="cell-where" data-label="Where">
         <span class="where">{where(j)}</span>
         {j.local && !j.fallback && <span class="sub">here</span>}
       </td>
@@ -131,10 +131,12 @@ function LiveUse({ job: j }: { job: Job }) {
   return (
     <>
       <span>
-        {cores(j.live.cpus)} <span class="muted">of {cores(j.alloc.cpus)} cores</span>
+        {cores(j.live.cpus)}
+        <span class="muted of"> of {cores(j.alloc.cpus)}</span> <span class="muted">cores</span>
       </span>
       <span>
-        {gib(j.live.mem)} <span class="muted">of {bytes(j.alloc.mem)}</span>
+        {gib(j.live.mem)}
+        <span class="muted of"> of {gib(j.alloc.mem)}</span> <span class="muted">GiB</span>
       </span>
     </>
   )
@@ -192,11 +194,11 @@ const QueueItem = memo(function QueueItem({ job: j, pos, onOpen }: { job: Job; p
         </div>
         <div class="qmeta">
           <OwnerChip owner={j.spec.owner} />
-          <span class="sub">
+          <span class="sub q-ws">
             {j.spec.workspace.name}
             {j.spec.workspace.branch ? ` on ${j.spec.workspace.branch}` : ''}
           </span>
-          <span class="sub">needs {need}</span>
+          <span class="sub q-need">needs {need}</span>
         </div>
         <p class="qreason">{j.reason || 'waiting for the scheduler'}</p>
       </div>
