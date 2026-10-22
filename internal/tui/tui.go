@@ -6,7 +6,7 @@ import (
 	"context"
 	"os"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/hafencity-dev/kran/internal/client"
 )
 
@@ -15,8 +15,8 @@ import (
 func Run(ctx context.Context, c client.Client) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	m := New(ctx, c, Options{Out: os.Stdout, NoColor: os.Getenv("NO_COLOR") != ""})
-	p := tea.NewProgram(m, tea.WithContext(ctx), tea.WithAltScreen(), tea.WithOutput(os.Stdout))
+	m := New(ctx, c, Options{NoColor: os.Getenv("NO_COLOR") != ""})
+	p := tea.NewProgram(m, tea.WithContext(ctx), tea.WithOutput(os.Stdout))
 	_, err := p.Run()
 	if err != nil && ctx.Err() != nil {
 		// Interrupted from outside (signal, parent exit): a normal end.
