@@ -333,7 +333,7 @@ func (d *Dialer) start(ctx context.Context, p Peer, client *ssh.Client, addr str
 		return nil, err
 	}
 	s := ys.(*session)
-	if _, err := s.Ping(d.handshakeTimeout()); err != nil {
+	if err := handshakePing(s, d.handshakeTimeout()); err != nil {
 		s.Close()
 		// The bridge prints why it gave up and exits; give it a moment.
 		var exitErr error
