@@ -129,10 +129,15 @@ func (m *peerManager) reload() {
 
 	changed := false
 	for _, p := range stop {
-		p.stop()
-		if _, still := want[p.cfg.Name]; !still {
+		_, still := want[p.cfg.Name]
+		// A changed entry keeps the connection the peer opened to us; only
+		// an unlinked peer loses it.
+		in := p.stop(!still)
+		if !still {
 			m.d.deps.Sched.RemoveNode(p.cfg.Name)
 			m.d.logf("peers: %s removed", p.cfg.Name)
+		} else if in != nil {
+			defer m.attachInbound(p.cfg.Name, in)
 		}
 		changed = true
 	}
@@ -161,7 +166,7 @@ func (m *peerManager) stopAll() {
 	}
 	m.mu.Unlock()
 	for _, p := range ps {
-		p.stop()
+		p.stop(true)
 	}
 }
 
@@ -339,7 +344,9 @@ func (m *peerManager) isDrained(name string) bool {
 
 // --- peer ---
 
-func (p *peer) stop() {
+// stop ends the peer's connector and its own session. It returns the
+// inbound session when it is kept open (closeInbound false).
+func (p *peer) stop(closeInbound bool) transport.Session {
 	p.cancel()
 	p.mu.Lock()
 	out, in := p.out, p.in
@@ -349,9 +356,14 @@ func (p *peer) stop() {
 	if out != nil {
 		out.Close()
 	}
-	if in != nil {
+	if in != nil && closeInbound {
 		in.Close()
+		in = nil
 	}
+	if in != nil && in.Err() != nil {
+		in = nil
+	}
+	return in
 }
 
 func (p *peer) notifyLocked() {

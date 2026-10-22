@@ -4,11 +4,14 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/hafencity-dev/kran/internal/client"
 	"github.com/hafencity-dev/kran/internal/proto"
 	"github.com/hafencity-dev/kran/internal/transport"
 )
@@ -19,6 +22,7 @@ func TestRemoteRunOverSSH(t *testing.T) {
 	c := newCluster(t, "a", "b")
 	a, b := c.nodes["a"], c.nodes["b"]
 	a.place = preferRemote("b")
+	b.peers.set([]PeerConfig{{Name: "a", ID: "a-id", Addresses: []string{"mem"}, Direction: "inbound"}})
 	b.start()
 
 	key, err := transport.GenerateSigner()
@@ -38,7 +42,6 @@ func TestRemoteRunOverSSH(t *testing.T) {
 	// a reaches b over SSH only; b does not dial back (inbound only).
 	a.peers.set([]PeerConfig{{Name: "b", ID: "b-id", Addresses: []string{"127.0.0.1:1", srv.Addr()},
 		User: "kran", HostKey: srv.HostKey(), Direction: "outbound"}})
-	b.peers.set([]PeerConfig{{Name: "a", ID: "a-id", Addresses: []string{"mem"}, Direction: "inbound"}})
 	a.start()
 	c.waitOnline("a", "b")
 
@@ -50,7 +53,7 @@ func TestRemoteRunOverSSH(t *testing.T) {
 		t.Fatal(err)
 	}
 	if res.out() != "over ssh\n" || res.exit.Code != 9 || res.exit.Node != "b" {
-		t.Fatalf("out %q exit %+v", res.out(), res.exit)
+		t.Fatalf("out %q exit %+v notices %+v", res.out(), res.exit, res.notices)
 	}
 	st := a.daemon().State()
 	for _, n := range st.Nodes {
@@ -67,6 +70,20 @@ func TestRemoteRunOverSSH(t *testing.T) {
 	res, err = runCLI(ctx, a.sock(), shSpec(ws, "echo again"), cliOpts{})
 	if err != nil || res.out() != "again\n" || res.exit.Node != "b" {
 		t.Fatalf("after reconnect: %v %q %+v", err, res.out(), res.exit)
+	}
+
+	// The SSH connection dies while the job streams: a reattaches.
+	script, want := counterScript(30, "0.05")
+	var once sync.Once
+	res, err = runCLI(ctx, a.sock(), shSpec(ws, script), cliOpts{
+		hook: func(rs client.RunSession, ft proto.FrameType, p []byte, r *cliResult) error {
+			if ft == proto.FrameStdout && strings.HasPrefix(string(p), "4") {
+				once.Do(srv.DropConnections)
+			}
+			return nil
+		}})
+	if err != nil || res.out() != want || res.exit.Code != 0 || res.exit.Node != "b" {
+		t.Fatalf("drop mid-job: %v %q %+v", err, res.out(), res.exit)
 	}
 }
 
