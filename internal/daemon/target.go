@@ -325,16 +325,29 @@ func (t *targetSide) status() peerStatus {
 		Draining: d.draining.Load(),
 		Degraded: t.diskFloorReason(),
 	}
+	var procs []execenv.Process
 	t.mu.Lock()
 	for _, j := range t.jobs {
 		if !j.ended {
 			st.Allocs = append(st.Allocs, allocInfo{JobID: j.ID, Origin: j.Origin, Res: j.Alloc, Running: j.started})
+			var p execenv.Process
+			if j.started {
+				p = j.process()
+			}
+			procs = append(procs, p)
 		}
 	}
 	for id, l := range t.local {
 		st.Allocs = append(st.Allocs, allocInfo{JobID: id, Origin: d.self, Res: l.res, Running: true})
 	}
 	t.mu.Unlock()
+	// Sampling happens outside the admission lock.
+	for i, p := range procs {
+		if p != nil {
+			l := p.Live()
+			st.Allocs[i].Live = &l
+		}
+	}
 	sort.Slice(st.Allocs, func(i, j int) bool { return st.Allocs[i].JobID < st.Allocs[j].JobID })
 	return st
 }

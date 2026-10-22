@@ -114,9 +114,16 @@ func TestRemoteStdinAndSignal(t *testing.T) {
 	}
 
 	sent := false
+	sawLive := false
 	res, err = runCLI(ctx, a.sock(), shSpec(ws, "echo ready; sleep 30"), cliOpts{
 		hook: func(rs client.RunSession, ft proto.FrameType, p []byte, r *cliResult) error {
 			if ft == proto.FrameStdout && !sent {
+				// Live usage of the remote job reaches the origin.
+				waitFor(t, 3*time.Second, "live usage", func() bool {
+					j, ok := a.daemon().jobs.find(r.jobID)
+					return ok && j.Live != nil && j.Live.Mem == 64<<20
+				})
+				sawLive = true
 				sent = true
 				return rs.SendJSON(proto.FrameSignal, proto.Signal{Name: "INT"})
 			}
@@ -125,7 +132,7 @@ func TestRemoteStdinAndSignal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.exit.Code != 130 || res.exit.Signal != "INT" {
+	if !sawLive || res.exit.Code != 130 || res.exit.Signal != "INT" {
 		t.Fatalf("exit %+v", res.exit)
 	}
 }

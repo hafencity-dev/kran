@@ -157,10 +157,11 @@ type peerStatus struct {
 }
 
 type allocInfo struct {
-	JobID   string          `json:"job_id"`
-	Origin  string          `json:"origin"`
-	Res     proto.Resources `json:"res"`
-	Running bool            `json:"running"`
+	JobID   string           `json:"job_id"`
+	Origin  string           `json:"origin"`
+	Res     proto.Resources  `json:"res"`
+	Running bool             `json:"running"`
+	Live    *proto.Resources `json:"live,omitempty"` // current usage of a running job
 }
 
 // peerConn wraps a stream with a line reader and a write lock.

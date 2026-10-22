@@ -734,7 +734,7 @@ func (p *fakeProc) Renew() error {
 	p.mu.Unlock()
 	return nil
 }
-func (p *fakeProc) Live() proto.Resources { return proto.Resources{} }
+func (p *fakeProc) Live() proto.Resources { return proto.Resources{CPUs: 0.25, Mem: 64 << 20} }
 func (p *fakeProc) Wait(ctx context.Context) (proto.Exit, error) {
 	select {
 	case <-p.doneCh:

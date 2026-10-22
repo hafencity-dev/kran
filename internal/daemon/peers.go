@@ -574,6 +574,7 @@ func (p *peer) subscribe(s transport.Session) {
 			p.lastSeen = d.now()
 			p.mu.Unlock()
 			p.push(false)
+			d.applyRemoteLive(p.cfg.Name, st.Allocs)
 		}
 		stop()
 		pc.Close()
@@ -709,4 +710,25 @@ func (d *Daemon) loadDrains() {
 		d.peers.drained[n] = true
 	}
 	d.peers.mu.Unlock()
+}
+
+// applyRemoteLive copies the live usage a target reports into our jobs.
+func (d *Daemon) applyRemoteLive(node string, allocs []allocInfo) {
+	for _, a := range allocs {
+		if a.Origin != d.self || a.Live == nil {
+			continue
+		}
+		e := d.jobs.get(a.JobID)
+		if e == nil {
+			continue
+		}
+		live := *a.Live
+		e.mu.Lock()
+		same := e.job.Live != nil && *e.job.Live == live
+		running := e.job.State == proto.JobRunning && e.job.Node == node
+		e.mu.Unlock()
+		if running && !same {
+			e.update(func(j *proto.Job) { j.Live = &live })
+		}
+	}
 }
