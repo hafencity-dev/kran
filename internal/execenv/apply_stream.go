@@ -361,6 +361,21 @@ func driveApply(ctx context.Context, w io.Writer, r io.Reader, req applyReq, ope
 		return need, res, fmt.Errorf("apply: unexpected reply %q", t)
 	}
 	if req.Op == "commit" {
+		// The apply side may run where jobs can replace it (the container
+		// helper): send only blobs of this manifest.
+		inManifest := map[string]bool{}
+		if req.Manifest != nil {
+			for _, e := range req.Manifest.Entries {
+				if e.Kind == proto.EntryFile && e.Hash != "" {
+					inManifest[e.Hash] = true
+				}
+			}
+		}
+		for _, h := range need.Needed {
+			if !inManifest[h] {
+				return need, res, abortApply(bw, r, fmt.Errorf("apply asked for blob %q, which is not in the manifest", h))
+			}
+		}
 		buf := make([]byte, applyChunk)
 		for _, h := range need.Needed {
 			if err := ctx.Err(); err != nil {

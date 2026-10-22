@@ -421,7 +421,8 @@ func (m *manager) volumeApply(ctx context.Context, req applyReq, open blobOpener
 
 // reservedMount reports container paths a workspace must not shadow.
 func reservedMount(root string) bool {
-	if root == "/" || !path.IsAbs(root) {
+	// docker reads --mount as CSV, later keys winning: ",src=/" would add one.
+	if root == "/" || !path.IsAbs(root) || strings.ContainsAny(root, ",\"\n\r\x00") {
 		return true
 	}
 	for _, p := range []string{"/bin", "/boot", "/dev", "/etc", "/lib", "/lib64", "/proc", "/sbin", "/sys", "/usr", "/kran", "/var/run", "/run"} {

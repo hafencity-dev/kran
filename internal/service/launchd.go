@@ -188,6 +188,9 @@ func (l *launchd) bootout(ctx context.Context) error {
 func (l *launchd) Install(ctx context.Context) (bool, error) {
 	var changed bool
 	var err error
+	if err := refuseRoot(l.o); err != nil {
+		return false, err
+	}
 	if l.o.System {
 		if changed, err = l.writeSystemPlist(ctx); err != nil {
 			return false, err

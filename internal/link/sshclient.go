@@ -2,8 +2,6 @@ package link
 
 import (
 	"context"
-	"crypto/sha1"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -21,20 +19,30 @@ type sshClient struct {
 	r    Runner
 	dest string
 	ctl  string
+	dir  string // private directory holding ctl ("" = no multiplexing)
 }
 
+// newSSH puts the ControlPath in a fresh 0700 directory: ssh connects to
+// whatever socket already sits at that path, so in a shared /tmp another
+// account could otherwise answer as our master. Without one, ssh runs
+// without multiplexing.
 func newSSH(o *Options) *sshClient {
-	dir := os.TempDir()
-	if len(dir) > 40 { // unix socket paths max out around 104 bytes
-		dir = "/tmp"
+	base := os.TempDir()
+	if len(base) > 40 { // unix socket paths max out around 104 bytes
+		base = "/tmp"
 	}
-	h := sha1.Sum([]byte(o.Host + fmt.Sprint(os.Getpid())))
-	return &sshClient{o: o, r: o.runner(), dest: o.Host,
-		ctl: dir + "/kran-ssh-" + hex.EncodeToString(h[:4]) + "-%C"}
+	c := &sshClient{o: o, r: o.runner(), dest: o.Host, ctl: "none"}
+	if dir, err := os.MkdirTemp(base, "kran-ssh-"); err == nil {
+		c.dir, c.ctl = dir, dir+"/%C"
+	}
+	return c
 }
 
 func (c *sshClient) args(batch bool, extra ...string) []string {
-	a := []string{"-o", "ConnectTimeout=10", "-o", "ControlMaster=auto", "-o", "ControlPersist=60", "-o", "ControlPath=" + c.ctl}
+	a := []string{"-o", "ConnectTimeout=10", "-o", "ControlPath=" + c.ctl}
+	if c.dir != "" {
+		a = append(a, "-o", "ControlMaster=auto", "-o", "ControlPersist=60")
+	}
 	if batch {
 		a = append(a, "-o", "BatchMode=yes")
 	}
@@ -130,6 +138,10 @@ func (c *sshClient) kran(ctx context.Context, kranPath string, stdin io.Reader, 
 
 // exitMaster closes the multiplexed connection.
 func (c *sshClient) exitMaster() {
+	if c.dir == "" {
+		return
+	}
+	defer func() { os.RemoveAll(c.dir); c.dir = "" }()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	a := []string{"-o", "ControlPath=" + c.ctl, "-O", "exit"}

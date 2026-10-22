@@ -569,6 +569,9 @@ func lexShell(s string) ([]shellCmd, bool) {
 						continue
 					}
 				}
+				if c == '$' && !plainDollar(rs, j, true) {
+					return nil, false
+				}
 				cur.WriteRune(c)
 				j++
 			}
@@ -587,8 +590,16 @@ func lexShell(s string) ([]shellCmd, bool) {
 			}
 			cur.WriteRune(rs[i])
 			inWord, unq = true, false
-		case ' ', '\t', '\r':
+		case ' ', '\t':
 			endWord()
+		case '\r': // a word character to the shell, a separator to a reader
+			return nil, false
+		case '$':
+			if !plainDollar(rs, i, false) {
+				return nil, false
+			}
+			cur.WriteRune(r)
+			inWord = true
 		case '\n':
 			if !sep("\n") {
 				return nil, false
@@ -696,5 +707,34 @@ func redirect(rs []rune, i int) (int, bool) {
 	if string(rs[i:j]) != "/dev/null" {
 		return 0, false
 	}
+	if j < len(rs) && strings.ContainsRune("'\"\\", rs[j]) { // >/dev/null'x' names another file
+		return 0, false
+	}
 	return j - 1, true
+}
+
+var bracedName = regexp.MustCompile(`^\{[A-Za-z_][A-Za-z0-9_]*\}`)
+
+// plainDollar reports whether the '$' at rs[i] is a literal or a plain
+// parameter ($NAME, ${NAME}, $1, $?). Everything else — $'…', $"…", $[…],
+// ${x@P}, ${(e)x}, ${a[i]} — can run code or quote in ways the lexer does
+// not model, in bash or zsh.
+func plainDollar(rs []rune, i int, inDQ bool) bool {
+	if i+1 >= len(rs) {
+		return true
+	}
+	n := rs[i+1]
+	switch {
+	case n == '_' || n >= 'A' && n <= 'Z' || n >= 'a' && n <= 'z' || n >= '0' && n <= '9':
+		return true
+	case strings.ContainsRune("?$!#@*-", n):
+		return true
+	case n == ' ' || n == '\t' || n == '\n':
+		return true
+	case n == '"':
+		return inDQ
+	case n == '{':
+		return bracedName.MatchString(string(rs[i+1:]))
+	}
+	return false
 }

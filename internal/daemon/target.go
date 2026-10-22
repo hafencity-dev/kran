@@ -40,6 +40,7 @@ type tjob struct {
 	Argv       []string
 	Slot       *proto.SlotRef
 	manifest   *proto.Manifest
+	blobs      map[string]int64  // manifest file hash → size: what blob.put takes
 	sess       transport.Session // session that admitted it
 	reservedAt time.Time
 	busy       int // in-flight prestart operations (holds the reservation)
@@ -206,6 +207,9 @@ func (t *targetSide) admit(id, origin string, b admitBody, sess transport.Sessio
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if j := t.jobs[id]; j != nil && !j.ended {
+		if j.Origin != origin { // IDs are not secret; never follow another origin's job
+			return &admitError{codeBusy, fmt.Sprintf("job id %s is already in use on %s by another node; run the job again", id, d.self)}
+		}
 		if j.started {
 			return &admitError{codeJobStarted, fmt.Sprintf("job %s already started on %s", id, d.self)}
 		}

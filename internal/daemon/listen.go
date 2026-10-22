@@ -60,7 +60,7 @@ func (d *Daemon) listen() ([]func(), error) {
 		} else {
 			d.uiAddr = ln.Addr().String()
 			bindHost, _, _ := net.SplitHostPort(addr)
-			ui := &http.Server{Handler: d.tcpAuth(d.tcpHandler, loopback, bindHost), ReadHeaderTimeout: 10 * time.Second}
+			ui := &http.Server{Handler: d.tcpAuth(d.tcpHandler, loopback, bindHost), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: time.Minute}
 			go ui.Serve(ln)
 			stops = append(stops, func() { shutdownServer(ui) })
 			d.logf("ui: listening on http://%s", d.uiAddr)

@@ -549,7 +549,7 @@ func TestIncompatibleOriginRefused(t *testing.T) {
 }
 
 func TestReservationExpires(t *testing.T) {
-	c := newCluster(t, "b")
+	c := newCluster(t, "a", "b")
 	b := c.nodes["b"]
 	b.start()
 	s, err := c.net.Dial(context.Background(), "a", "b")

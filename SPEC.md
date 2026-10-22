@@ -65,7 +65,10 @@ targets linux/darwin × arm64/amd64.
 * **daemon ↔ daemon:** one SSH connection per peer (Go `x/crypto/ssh` client),
   authenticated with kran's own key `~/.config/kran/id_ed25519`. On the peer,
   `authorized_keys` pins that key to a forced command:
-  `command="<abs path>/kran serve --stdio",restrict ssh-ed25519 … kran@<node>`.
+  `command="<abs path>/kran serve --stdio --peer <name>",restrict ssh-ed25519 … kran@<node>`.
+  `--peer` is the name the key was linked as; the bridge passes it to the
+  daemon ahead of the yamux bytes and the session is bound to it (the
+  peer's own hello cannot claim another linked node's name).
   `kran serve --stdio` connects stdin/stdout to the peer daemon's peer socket
   (`kran-peer.sock`), so all traffic is multiplexed by **yamux** over that one
   stdio stream. The kran key can do nothing except speak kran protocol.
@@ -291,10 +294,12 @@ Forward all env vars **except**: host-specific (`PATH`, `HOME`, `USER`,
 `GOPATH`, `GOCACHE`, `GOMODCACHE`, `GOTOOLCHAIN`, `NVM_*`, `PNPM_HOME`,
 `npm_config_cache`, `*_SOCK`, `*_SOCKET`, `LD_*`, `DYLD_*`, `KRAN_*` except
 `KRAN_OWNER`) and secrets (name matches `/(TOKEN|SECRET|PASSWORD|PASSWD|
-PRIVATE|CREDENTIAL|API_KEY|APIKEY|ACCESS_KEY)/i` or `AWS_*`, `GH_*`,
-`GITHUB_*`, `ANTHROPIC_*`, `OPENAI_*`) unless listed in `.kran.toml
+PASSPHRASE|PRIVATE|CREDENTIAL|API_KEY|APIKEY|ACCESS_KEY|(^|_)AUTH(_|$))/i`
+or `AWS_*`, `GH_*`, `GITHUB_*`, `ANTHROPIC_*`, `OPENAI_*`, or the value is a
+URL with a password, `scheme://user:pass@…`) unless listed in `.kran.toml
 env.forward` or `--env NAME`. `TERM`, `COLORTERM`, `NO_COLOR`,
-`FORCE_COLOR`, `CI`, `LANG`, `LC_*`, `TZ` are forwarded. The target sets
+`FORCE_COLOR`, `CI`, `LANG`, `LC_*` (unless the name looks like a secret),
+`TZ` are forwarded. The target sets
 `PATH` (runtime default + toolchains), `HOME` (real), `TMPDIR` (per job),
 `GOCACHE`/`GOMODCACHE`/`npm_config_store_dir` (node-shared caches),
 `KRAN_JOB_ID`, `KRAN_NODE`, `KRAN_ORIGIN`, `KRAN_ORIGIN_ROOT`.
@@ -418,10 +423,12 @@ target side delegates to `execenv.Manager` (§10). Methods: `hello`,
 
 ## 9. Security
 
-* No listening TCP except the UI on loopback (default). If bound to a
-  non-loopback address, the UI requires a token (`kran ui --print-url` shows
-  `http://host:7270/#token=…`); mutating endpoints always require the
-  `X-Kran-Token` header (token stored in state dir, 0600) or the unix socket.
+* No listening TCP except the UI on loopback (default). The API on that
+  listener always requires the token (loopback TCP is open to every account
+  on the machine): `kran ui` opens and `kran ui --print-url` shows
+  `http://host:7270/#token=…` (token stored in state dir, 0600); GETs accept
+  `?token=` (EventSource), mutating endpoints only the `X-Kran-Token` header.
+  The unix socket needs no token. Static UI assets are public.
 * Unix sockets 0600 in a 0700 dir. All state files 0600/0700.
 * Peer auth = SSH with dedicated key + forced command + pinned host key.
   `restrict` disables forwarding/pty/agent.

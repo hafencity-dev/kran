@@ -45,7 +45,7 @@ func (a *App) uiCommand() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&printURL, "print-url", false, "only print the URL (includes the token for non-loopback listeners)")
+	cmd.Flags().BoolVar(&printURL, "print-url", false, "only print the URL (it includes the token; treat it like a password)")
 	return cmd
 }
 
@@ -65,8 +65,9 @@ func tailscaleIP() string {
 	return strings.TrimSpace(strings.Fields(string(out) + " ")[0])
 }
 
-// uiURL builds the dashboard URL from ui.listen (SPEC §9): loopback needs no
-// token, anything else carries it in the fragment.
+// uiURL builds the dashboard URL from ui.listen (SPEC §9). It always
+// carries the token in the fragment (never sent to the server or logged):
+// the API needs it on loopback too.
 func uiURL(listen string, token func() string, tsIP func() string) (string, error) {
 	if listen == "" {
 		return "", fmt.Errorf("the web UI is disabled; enable it by setting [ui] listen = \"127.0.0.1:7270\" in %s and restarting the daemon", paths.ConfigFile())
@@ -81,10 +82,6 @@ func uiURL(listen string, token func() string, tsIP func() string) (string, erro
 		host, port = h, p
 	}
 	u := "http://" + net.JoinHostPort(host, port) + "/"
-	ip := net.ParseIP(host)
-	if host == "localhost" || (ip != nil && ip.IsLoopback()) {
-		return u, nil
-	}
 	if t := token(); t != "" {
 		u += "#token=" + t
 	}

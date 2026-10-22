@@ -300,6 +300,9 @@ func Link(ctx context.Context, o Options) (*Result, error) {
 	}
 	remoteAddrs := dedupe(append([]string{net.JoinHostPort(g.Hostname, strconv.Itoa(g.Port))}, info.Addresses...))
 	hostKey := pickHostKey(ctx, c, g, info)
+	if hostKey == "" {
+		return nil, fmt.Errorf("could not learn %s's ssh host key in a verified way (no readable /etc/ssh/ssh_host_*_key.pub there and no known_hosts entry for %s). Run `ssh %s` once to record the key, then run kran link again", o.Host, g.Hostname, o.Host)
+	}
 	selfAddrs := o.SelfAddresses
 	if len(selfAddrs) == 0 {
 		selfAddrs = localAddresses()
@@ -311,7 +314,7 @@ func Link(ctx context.Context, o Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if ch, err := EnsureAuthorizedKey(ak, AuthorizedKeysLine(o.SelfPath, info.PubKey, o.Tag)); err != nil {
+	if ch, err := EnsureAuthorizedKey(ak, PeerKeyLine(o.SelfPath, peerName, info.PubKey, o.Tag)); err != nil {
 		return nil, err
 	} else if ch {
 		changed = true
@@ -345,15 +348,6 @@ func Link(ctx context.Context, o Options) (*Result, error) {
 	default:
 		return nil, noConnectionError(peerName, outRes, probe, pErr)
 	}
-	if hostKey == "" { // trust-on-first-use of what the server presented, only after auth succeeded
-		for _, r := range outRes {
-			if r.OK && r.HostKey != "" {
-				hostKey = r.HostKey
-				break
-			}
-		}
-	}
-
 	// --- record
 	preferred := ""
 	if best, ok := fastestOK(outRes); ok {
@@ -504,8 +498,9 @@ func noConnectionError(peer string, out []ProbeResult, probe ProbeResponse, pErr
 }
 
 // pickHostKey chooses the key to pin: what the remote's own sshd reports
-// (learned over the authenticated ssh channel), then known_hosts, then
-// ssh-keyscan. Empty means "pin the key presented on first verified use".
+// (learned over the ssh channel known_hosts verified), then known_hosts.
+// Empty means none was found; ssh-keyscan or the key a kran handshake
+// presents are never trusted, since a man in the middle answers those.
 func pickHostKey(ctx context.Context, c *sshClient, g sshResolved, info *Info) string {
 	if info.HostKey != "" {
 		return info.HostKey
@@ -516,14 +511,6 @@ func pickHostKey(ctx context.Context, c *sshClient, g sshResolved, info *Info) s
 	}
 	if k, err := HostKeyFromKnownHosts(name, g.Port); err == nil {
 		return k
-	}
-	out, err := c.r.Run(ctx, Cmd{Name: "ssh-keyscan", Args: []string{"-t", "ed25519", "-p", strconv.Itoa(g.Port), g.Hostname}})
-	if err == nil {
-		for _, ln := range strings.Split(string(out.Stdout), "\n") {
-			if f := strings.Fields(ln); len(f) >= 3 && !strings.HasPrefix(f[0], "#") && isKeyType(f[1]) {
-				return f[1] + " " + f[2]
-			}
-		}
 	}
 	return ""
 }

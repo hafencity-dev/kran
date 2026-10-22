@@ -15,13 +15,15 @@ import (
 	"github.com/hafencity-dev/kran/internal/paths"
 )
 
-func serveStdio(ctx context.Context) int {
+func serveStdio(ctx context.Context) int { return serveStdioAs(ctx, "") }
+
+func serveStdioAs(ctx context.Context, peer string) int {
 	sock := paths.PeerSocket()
 	if err := autostart(ctx, sock); err != nil {
 		fmt.Fprintf(os.Stderr, "kran: the kran daemon on this machine is not running and could not be started: %v (start it: kran service start)\n", err)
 		return ExitDaemonDown
 	}
-	return Bridge(ctx, os.Stdin, os.Stdout, os.Stderr, sock)
+	return BridgeAs(ctx, os.Stdin, os.Stdout, os.Stderr, sock, peer)
 }
 
 // Bridge connects in/out (the SSH channel of the forced command) to the

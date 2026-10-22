@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -22,6 +24,11 @@ func otherPlatform() (string, string) {
 		return runtime.GOOS, "amd64"
 	}
 	return runtime.GOOS, "arm64"
+}
+
+func sha256hex(b []byte) string {
+	s := sha256.Sum256(b)
+	return hex.EncodeToString(s[:])
 }
 
 func tarball(t *testing.T, name, content string) []byte {
@@ -70,7 +77,9 @@ func TestAcquireOrder(t *testing.T) {
 		ghCalls = append(ghCalls, c.Args)
 		if c.Args[0] == "release" {
 			dir := c.Args[len(c.Args)-2]
-			os.WriteFile(filepath.Join(dir, asset), tarball(t, "kran", "FROM-GH"), 0o644)
+			tgz := tarball(t, "kran", "FROM-GH")
+			os.WriteFile(filepath.Join(dir, asset), tgz, 0o644)
+			os.WriteFile(filepath.Join(dir, "checksums.txt"), []byte(sha256hex(tgz)+"  "+asset+"\n"), 0o644)
 		}
 		return Output{}, nil
 	}}
@@ -102,6 +111,8 @@ func TestAcquireTokenAPI(t *testing.T) {
 			return
 		}
 		switch r.URL.Path {
+		case "/a/1":
+			fmt.Fprintf(w, "%s  %s\n", sha256hex(tarball(t, "kran", "FROM-API")), asset)
 		case "/repos/hafencity-dev/kran/releases/tags/v1.2.3":
 			fmt.Fprintf(w, `{"assets":[{"name":"checksums.txt","url":"%s/a/1"},{"name":%q,"url":"%s/a/2"}]}`, srv.URL, asset, srv.URL)
 		case "/a/2":
@@ -207,6 +218,7 @@ func TestPushLinuxBinaryForMacRemote(t *testing.T) {
 	os.MkdirAll(filepath.Dir(cache), 0o755)
 	os.WriteFile(cache, []byte("LINUX-KRAN"), 0o755)
 	c := newSSH(&w.opts)
+	defer c.exitMaster()
 	info := &Info{Version: "1.2.3", CacheDir: filepath.Join(w.remoteHome, "Caches", "kran")}
 	src := binarySource{o: &w.opts, r: w.runner}
 	changed := false

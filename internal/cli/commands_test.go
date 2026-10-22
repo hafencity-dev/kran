@@ -162,8 +162,8 @@ func TestUIURL(t *testing.T) {
 	tok := func() string { return "sekret" }
 	ts := func() string { return "100.64.0.1" }
 	for listen, want := range map[string]string{
-		"127.0.0.1:7270": "http://127.0.0.1:7270/",
-		"localhost:9000": "http://localhost:9000/",
+		"127.0.0.1:7270": "http://127.0.0.1:7270/#token=sekret",
+		"localhost:9000": "http://localhost:9000/#token=sekret",
 		"tailscale":      "http://100.64.0.1:7270/#token=sekret",
 		"0.0.0.0:7270":   "http://0.0.0.0:7270/#token=sekret",
 	} {
@@ -242,6 +242,17 @@ func TestNoGUIMessageNamesTheCommand(t *testing.T) {
 	for _, want := range []string{"on demand", "kran service install --system", "password"} {
 		if !strings.Contains(noGUIMessage, want) {
 			t.Errorf("message lacks %q", want)
+		}
+	}
+}
+
+func TestParseKVNames(t *testing.T) {
+	if m, err := parseKV([]string{"KRAN_CONFIG_DIR=/a b"}); err != nil || m["KRAN_CONFIG_DIR"] != "/a b" {
+		t.Fatal(m, err)
+	}
+	for _, bad := range []string{"=x", "A;rm -rf ~;B=x", "A B=x", "1A=x"} {
+		if _, err := parseKV([]string{bad}); err == nil {
+			t.Errorf("accepted %q", bad)
 		}
 	}
 }

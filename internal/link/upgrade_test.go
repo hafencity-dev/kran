@@ -93,6 +93,41 @@ func TestFetchRelease(t *testing.T) {
 	if p2, err := FetchRelease(context.Background(), o, "2.0.0", goos, arch); err != nil || p2 != p {
 		t.Fatal(p2, err)
 	}
+	// A release without checksums.txt, or one that does not list the asset,
+	// is refused: the binary is pushed to and run on every linked machine.
+	asset21 := assetName("2.1.0", goos, arch)
+	sums := func(content string) scripted {
+		return scripted{func(c Cmd) (Output, error) {
+			if c.Name == "gh" && c.Args[0] == "release" {
+				dir := c.Args[len(c.Args)-2]
+				if c.Args[6] == asset21 {
+					os.WriteFile(filepath.Join(dir, asset21), tgz, 0o644)
+				} else if content == "" {
+					return Output{}, &ExitError{Code: 1, Stderr: "no asset"}
+				} else {
+					os.WriteFile(filepath.Join(dir, "checksums.txt"), []byte(content), 0o644)
+				}
+			}
+			return Output{}, nil
+		}}
+	}
+	o.Runner = sums("")
+	if _, err := FetchRelease(context.Background(), o, "2.1.0", goos, arch); err == nil || !strings.Contains(err.Error(), "checksums.txt") {
+		t.Fatalf("missing checksums.txt: %v", err)
+	}
+	o.Runner = sums(good + "  other.tar.gz\n")
+	if _, err := FetchRelease(context.Background(), o, "2.1.0", goos, arch); err == nil || !strings.Contains(err.Error(), "checksums.txt") {
+		t.Fatalf("asset not in checksums.txt: %v", err)
+	}
+	if _, err := os.Stat(paths.BinaryCache("2.1.0", goos, arch)); err == nil {
+		t.Fatal("unverified download must not be cached")
+	}
+	// A version is a release tag, never a path or a flag.
+	for _, v := range []string{"../../x", "1.2.3/../../x", "--repo=evil/kran", "1.2.3-a/b", ""} {
+		if _, err := FetchRelease(context.Background(), o, v, goos, arch); err == nil || !strings.Contains(err.Error(), "not a release version") {
+			t.Fatalf("%q: %v", v, err)
+		}
+	}
 	// nothing available: helpful
 	o.Runner = scripted{func(Cmd) (Output, error) { return Output{}, &ExitError{Code: 1} }}
 	t.Setenv("GITHUB_TOKEN", "")

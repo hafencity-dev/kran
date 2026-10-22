@@ -388,6 +388,9 @@ func (m *manager) Commit(ctx context.Context, ref proto.SlotRef, mf *proto.Manif
 }
 
 func (m *manager) openBlob(hash string) (io.ReadCloser, int64, error) {
+	if err := validHash(hash); err != nil { // the apply side names it
+		return nil, 0, err
+	}
 	f, err := os.Open(m.blobs.path(hash))
 	if err != nil {
 		return nil, 0, fmt.Errorf("%w: %s", ErrMissingBlob, short(hash))

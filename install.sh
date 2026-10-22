@@ -58,11 +58,17 @@ download_gh() {
 		-p "kran_*_${OS}_${ARCH}.tar.gz" -p checksums.txt >/dev/null
 }
 
+# gh_curl passes the token in a curl config on stdin (printf is a builtin),
+# never in argv, where other users on the machine could read it in ps.
+gh_curl() {
+	printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" | curl -K - "$@"
+}
+
 download_token() {
 	have curl || die "curl is required to download with a token"
 	api="https://api.github.com/repos/$REPO/releases"
 	if [ -n "$VERSION" ]; then api="$api/tags/v$VERSION"; else api="$api/latest"; fi
-	curl -fsSL -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" "$api" -o "$TMP/release.json" ||
+	gh_curl -fsSL -H "Accept: application/vnd.github+json" "$api" -o "$TMP/release.json" ||
 		die "could not read the release ($api); check the version and that your token can read $REPO"
 	for pattern in "kran_[^\"]*_${OS}_${ARCH}.tar.gz" "checksums.txt"; do
 		# In the API JSON an asset's "url" precedes its "name".
@@ -71,7 +77,7 @@ download_token() {
 			/^[ \t]*"name": "/ { n = $2; gsub(/[",]/, "", n); if (u != "" && n ~ pat) { print n " " u; exit } }
 		' "$TMP/release.json")"
 		[ -n "$asset" ] || die "release has no asset matching $pattern for $OS/$ARCH"
-		curl -fsSL -H "Authorization: Bearer $TOKEN" -H "Accept: application/octet-stream" \
+		gh_curl -fsSL -H "Accept: application/octet-stream" \
 			"${asset#* }" -o "$TMP/${asset%% *}" || die "download of ${asset%% *} failed"
 	done
 }
