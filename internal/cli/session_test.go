@@ -634,6 +634,43 @@ func TestReconnectGivesUpWith125(t *testing.T) {
 	}
 }
 
+// TestDropDuringRemoteSetupReattaches: the daemon goes away while the job
+// is set up on its target. The job may still start there, so the CLI
+// reattaches instead of running it a second time here.
+func TestDropDuringRemoteSetupReattaches(t *testing.T) {
+	s1, s2 := newFakeSession(), newFakeSession()
+	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s1, s2}}, "sh", "-c", "exit 6")
+	go func() {
+		s1.push(proto.FrameDecision, proto.Decision{JobID: "js", Mode: "remote", Node: "n"})
+		s1.push(proto.FramePhase, proto.Phase{State: proto.JobSetup})
+		time.Sleep(50 * time.Millisecond)
+		s1.drop()
+		waitFor(t, func() bool { return s2.count(proto.FrameReattach) == 1 })
+		s2.push(proto.FramePhase, proto.Phase{State: proto.JobRunning})
+		s2.push(proto.FrameStdout, []byte("remote"))
+		s2.push(proto.FrameExit, proto.Exit{JobID: "js", Code: 5, State: proto.JobFailed})
+	}()
+	if code := h.run(t); code != 5 || h.stdout.String() != "remote" {
+		t.Fatalf("code %d stdout %q", code, h.stdout.String())
+	}
+}
+
+// TestDropDuringRemoteSetupNoDaemonRunsHere: without a daemon to reattach
+// to (it does not resume a job nobody waits for), the job runs here.
+func TestDropDuringRemoteSetupNoDaemonRunsHere(t *testing.T) {
+	s1 := newFakeSession()
+	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s1}}, "sh", "-c", "exit 6")
+	go func() {
+		s1.push(proto.FrameDecision, proto.Decision{JobID: "js", Mode: "remote", Node: "n"})
+		s1.push(proto.FramePhase, proto.Phase{State: proto.JobSetup})
+		time.Sleep(50 * time.Millisecond)
+		s1.drop()
+	}()
+	if code := h.run(t); code != 6 {
+		t.Fatalf("code %d, stderr %q", code, h.stderr.String())
+	}
+}
+
 func TestDropBeforeDecisionFallsBack(t *testing.T) {
 	s := newFakeSession()
 	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s}}, "sh", "-c", "exit 6")

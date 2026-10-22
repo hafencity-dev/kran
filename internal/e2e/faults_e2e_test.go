@@ -18,8 +18,8 @@ import (
 // target, so a job sits in phase `setup` (before the user's command).
 func slowSetupRepo(t *testing.T, c *cluster, secs string) string {
 	return makeRepo(t, filepath.Join(c.base, "repo"), map[string]string{
-		".kran.toml": "[setup]\nrun = \"sleep " + secs + "\"\nkey = [\"setup.key\"]\n",
-		"setup.key":  "v1\n",
+		".kran.toml": "[setup]\nrun = \"sleep " + secs + "\"\nkey = [\"setup.lock\"]\n",
+		"setup.lock": "v1\n",
 	})
 }
 
@@ -527,6 +527,39 @@ func TestE2ETargetRestartDuringSetup(t *testing.T) {
 	r := p.wait()
 	if r.code != 4 || strings.TrimSpace(string(r.stdout)) != "1000" {
 		t.Errorf("job across a target restart during setup: %s", r)
+	}
+	a.waitIdle(30 * time.Second)
+	b.waitIdle(30 * time.Second)
+}
+
+// TestE2EOriginRestartDuringSetup: the origin daemon restarts while the
+// job is in setup on the target; the job runs exactly once and its CLI
+// reports the command's result.
+func TestE2EOriginRestartDuringSetup(t *testing.T) {
+	c := newCluster(t, []string{"a", "b"}, nil)
+	a, b := c.node("a"), c.node("b")
+	repo := slowSetupRepo(t, c, "4")
+	marks := filepath.Join(c.base, "marks")
+	for _, kill := range []struct {
+		name string
+		fn   func()
+	}{{"graceful", a.stop}, {"crash", a.crash}} {
+		os.Remove(marks)
+		must(t, os.WriteFile(filepath.Join(repo, "setup.lock"), []byte(kill.name), 0o644)) // setup runs again
+		p := a.startKran(runOpts{dir: repo, env: []string{"MARKS=" + marks}}, "run", "--json-events", "-n", "b", "--",
+			"sh", "-c", `echo "${KRAN_NODE:-here}" >> "$MARKS"; exit 5`)
+		if waitPhase(p, "setup", 60*time.Second) == nil {
+			t.Fatalf("no setup phase: %s", p.wait())
+		}
+		kill.fn()
+		time.Sleep(500 * time.Millisecond)
+		a.start()
+		r := p.wait()
+		time.Sleep(execLease + 5*time.Second)
+		data, _ := os.ReadFile(marks)
+		if got := strings.Fields(string(data)); len(got) != 1 || r.code != 5 {
+			t.Errorf("%s restart during setup: ran on %v; %s", kill.name, got, r)
+		}
 	}
 	a.waitIdle(30 * time.Second)
 	b.waitIdle(30 * time.Second)

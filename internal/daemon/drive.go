@@ -84,14 +84,33 @@ func (d *Daemon) drive(ctx context.Context, e *jobEntry, mode driveMode) {
 		d.restoreLocal(ctx, e)
 		return
 	case driveRestoreRemote:
-		// Heartbeats must resume at once (the target's lease is short);
-		// the CLI gets CLIReattachWait to come back.
-		go d.cancelWithoutCLI(ctx, e)
 		job := e.snapshot()
+		if job.State != proto.JobRunning {
+			// The command had not started (setup on the target). Its kran
+			// run either reattaches, or it has run the job itself: our
+			// heartbeats would let the target start it a second time.
+			if !d.waitForCLI(ctx, e) {
+				if ctx.Err() == nil {
+					d.cancelOnTarget(job.Node, e.id)
+					e.requestCancel("its kran run did not reconnect after the daemon restarted", "TERM")
+					d.finishCanceledBeforeStart(e)
+				}
+				return
+			}
+		} else {
+			// Heartbeats must resume at once (the target's lease is short);
+			// the CLI gets CLIReattachWait to come back.
+			go d.cancelWithoutCLI(ctx, e)
+		}
 		p := scheduler.Placement{JobID: e.id, Node: job.Node, Runtime: job.Runtime, Alloc: job.Alloc}
 		if err := d.followRemote(ctx, e, p, nil); err != nil {
-			// Before running there is nothing to fall back to here: the
-			// CLI that could run it locally is gone or reattaching.
+			var pe *prestartError
+			if errors.As(err, &pe) {
+				// Nothing ran there: the reattached kran run may still run
+				// it itself (unless --no-fallback).
+				d.unplaceable(e, pe.Error())
+				return
+			}
 			e.finish(proto.Exit{Code: proto.ExitInfra, State: proto.JobInfraErr, Reason: err.Error()})
 		}
 		return
@@ -201,6 +220,16 @@ func (d *Daemon) drive(ctx context.Context, e *jobEntry, mode driveMode) {
 		e.setState(proto.JobQueued, fmt.Sprintf("%s failed before start: %v", p.Node, pe.err))
 		lastFail = pe
 		ticket = d.deps.Sched.Reject(e.id, p.Node, pe.err)
+	}
+}
+
+// cancelOnTarget tells a target to drop a job (best effort; its lease
+// stops it anyway).
+func (d *Daemon) cancelOnTarget(node, id string) {
+	ctx, cancel := context.WithTimeout(d.lifetime(), 5*time.Second)
+	defer cancel()
+	if s, err := d.peers.waitSession(ctx, node); err == nil {
+		peerOneShot(ctx, s, proto.PeerJobCancel, id, nil, nil)
 	}
 }
 

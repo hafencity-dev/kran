@@ -563,7 +563,7 @@ func (r *runner) fail(msg string) (int, bool) {
 func (r *runner) onDisconnect(ctx context.Context, cause error) (int, bool) {
 	r.closeSession()
 	switch {
-	case r.jobID == "" || (r.remote && !r.started):
+	case r.jobID == "":
 		return r.noSession(ctx, "lost the connection to the daemon before the job started — running locally", cause), true
 	case r.reconnectOn:
 		return 0, false
@@ -607,6 +607,12 @@ func (r *runner) onReconnect(ctx context.Context, rr reconnectResult) (int, bool
 		}
 		if r.local != nil {
 			return 0, false // keep running locally; the exit code is still ours
+		}
+		if r.remote && !r.started {
+			// A remote job that had not started yet: a restarted daemon
+			// resumes it only for a kran run that reattaches, so it never
+			// starts there now.
+			return r.noSession(ctx, "lost the connection to the daemon before the job started — running locally", rr.err), true
 		}
 		node := "its node"
 		if r.decision != nil {
