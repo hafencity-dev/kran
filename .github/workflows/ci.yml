@@ -16,6 +16,7 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -34,7 +35,8 @@ jobs:
           GOOS=linux go vet ./...
           GOOS=darwin go vet ./...
       - name: test
-        run: go test -race -p 4 ./...
+        # A hung test fails with a goroutine dump instead of the job timeout.
+        run: go test -race -p 4 -timeout 10m ./...
 
   e2e:
     # Real kran daemons and CLI (internal/e2e, build tag e2e); container
