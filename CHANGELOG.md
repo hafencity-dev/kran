@@ -2,7 +2,7 @@
 
 All notable changes to kran. Versions follow [semantic versioning](https://semver.org/).
 
-## Unreleased
+## 0.1.2
 
 ### Linux container runtime
 
@@ -10,6 +10,10 @@ All notable changes to kran. Versions follow [semantic versioning](https://semve
 - The runner image has GNU awk as `awk`, plus GNU parallel, uuidgen, hostname, tput and cpio.
 - kran keeps free space on the disks it fills: `accept.disk_reserve` (default max(25 GiB, 20%), at most 50 GiB). Below it, kran trims its container caches and then removes idle slots, least recently used first (never one in use), on this machine's disk and on the Docker disk of a Mac. `kran doctor` shows the reserve.
 - After an upgrade the old runner image is removed even when the old version's sync helper or a stopped container still held it; while a job of the old version runs, kran retries every 5 minutes.
+
+### Fixes
+
+- The service tests no longer read the real `/Library/LaunchDaemons` on a Mac where kran runs as a system daemon.
 
 ## 0.1.1
 
