@@ -7,7 +7,7 @@ FROM debian:stable-slim
 ENV DEBIAN_FRONTEND=noninteractive
 # Besides the build basics, the everyday command-line tools scripts and
 # tests expect on a Linux dev box (envsubst, jq, rg, lsof, sfdisk, nc, dig,
-# ss, sqlite3, GNU parallel, …) and GNU awk as awk (scripts use gawk
+# ss, sqlite3, GNU parallel, busybox, …) and GNU awk as awk (scripts use gawk
 # features mawk lacks). Toolchains (Go, Node, Python, …) come from mise;
 # the system python3 (with venv) is there for scripts that run /usr/bin/python3
 # or narrow PATH (the job's shims still put the origin's python first).
@@ -18,7 +18,7 @@ RUN apt-get update \
       openssh-client gnupg openssl locales tzdata \
       unzip zip xz-utils zstd bzip2 rsync file less patch diffutils bc time tree xxd bsdextrautils \
       gettext-base jq ripgrep shellcheck sqlite3 fdisk python3 python3-venv \
-      gawk parallel uuid-runtime hostname ncurses-bin cpio \
+      gawk parallel uuid-runtime hostname ncurses-bin cpio busybox \
  && rm -rf /var/lib/apt/lists/*
 
 # Common UTF-8 locales, so a job sorts and formats like its origin without

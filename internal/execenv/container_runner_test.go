@@ -187,7 +187,7 @@ docker volume create --opt type=none --opt o=bind --opt device="$PWD" "kt-$KRAN_
 echo "14:$(docker volume inspect -f '{{.Options.device}}' "kt-$KRAN_JOB_ID")"
 docker volume rm "kt-$KRAN_JOB_ID" >/dev/null
 echo "15:$(awk --version | head -1 | cut -d, -f1) $(awk 'BEGIN { print gensub(/o/, "0", "g", "foo") }')"
-for tool in gawk parallel uuidgen hostname tput cpio getopt column hexdump timeout flock setsid nproc realpath iconv perl; do
+for tool in gawk busybox parallel uuidgen hostname tput cpio getopt column hexdump timeout flock setsid nproc realpath iconv perl; do
 	command -v "$tool" >/dev/null || echo "missing: $tool"
 done
 echo "10:$(env -i PATH=/usr/bin:/bin sh -c 'docker compose version >/dev/null && docker buildx version >/dev/null && docker-compose version >/dev/null && command -v docker')"

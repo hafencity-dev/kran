@@ -2,6 +2,12 @@
 
 All notable changes to kran. Versions follow [semantic versioning](https://semver.org/).
 
+## 0.1.3
+
+### Linux container runtime
+
+- The runner image has `busybox` (the binary only; its applets do not replace the GNU tools), for tests that run a script under busybox's shell and tools.
+
 ## 0.1.2
 
 ### Linux container runtime

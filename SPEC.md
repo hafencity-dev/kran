@@ -576,7 +576,8 @@ pass, anything that holds the memory is stopped).
   ripgrep, shellcheck, lsof, strace, fdisk/sfdisk, file, zip/unzip, xz,
   zstd, bzip2, rsync, procps, psmisc, iproute2, ping, netcat, dig, less,
   patch, diff, bc, time, tree, xxd, openssl, sqlite3, zsh, GNU awk (as
-  `awk`), GNU parallel, uuidgen, hostname, tput, cpio; git trusts every
+  `awk`), GNU parallel, uuidgen, hostname, tput, cpio, busybox (as `busybox`; the
+  applets are not linked over the GNU tools); git trusts every
   directory. Built lazily by the
   first container job (phase `setup`, "preparing the Linux runtime (first
   use, ~30 s)"), one build at a time; until then the runtime reports
