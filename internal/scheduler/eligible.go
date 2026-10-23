@@ -192,7 +192,7 @@ func (s *sched) eligible(j *sjob, v *nodeView, now time.Time) ([]rtView, *inelig
 	}
 	if !v.self {
 		m := st.Metrics
-		floor := max(10*gib, st.Info.DiskTotal/20)
+		floor := proto.DiskFloor(st.Info.DiskTotal)
 		if !m.Time.IsZero() && m.DiskFree > 0 && m.DiskFree < floor {
 			return no(whyDisk, "disk almost full (%s free)", fmtBytes(m.DiskFree))
 		}

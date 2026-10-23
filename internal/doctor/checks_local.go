@@ -10,6 +10,7 @@ import (
 
 	"github.com/hafencity-dev/kran/internal/config"
 	"github.com/hafencity-dev/kran/internal/paths"
+	"github.com/hafencity-dev/kran/internal/proto"
 	"github.com/hafencity-dev/kran/internal/service"
 )
 
@@ -173,7 +174,7 @@ func (c *checker) checkLocalResources(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	floor := max(int64(10<<30), total/20)
+	floor := proto.DiskFloor(total)
 	detail := fmt.Sprintf("%s free of %s", gib(free), gib(total))
 	if free < floor {
 		c.add(Result{ID: "disk", Title: "disk space", Level: Warn, Detail: detail + fmt.Sprintf("; below kran's floor of %s, so this machine refuses remote jobs", gib(floor)),

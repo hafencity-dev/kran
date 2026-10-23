@@ -247,7 +247,9 @@ Flags: `-l/--local`, `-r/--remote`, `-n/--node NAME`, `--gpu`, `--cpus N`,
    a. scans the workspace (`workspace.Scan`, hash cache) → manifest;
    b. asks the target to acquire a slot and diff the manifest → missing blob
       hashes; uploads missing blobs (zstd); target commits the slot
-      (writes/deletes files, restores modes + mtimes) — phase `syncing`;
+      (writes/deletes files, restores modes + mtimes) — phase `syncing`; a
+      file that changed since the scan (a log being written) makes it scan
+      and diff again, at most 3 scans in all;
    c. target runs project setup if its key changed — phase `setup`;
    d. target starts the job under a supervisor — phase `running`;
    e. output frames stream target → origin daemon → CLI; stdin/resize/signal
@@ -322,7 +324,7 @@ Flags: `-l/--local`, `-r/--remote`, `-n/--node NAME`, `--gpu`, `--cpus N`,
   whose metadata has none, e.g. written by an older kran, counts from the
   latest change of its metadata or directory, never as unused since
   year one); enforces disk floor (refuse new remote jobs below
-  max(10 GiB, 5%) free with reason `disk`). Hourly it also removes
+  5% free, at least 10 GiB and at most 20 GiB (`proto.DiskFloor`), with reason `disk`). Hourly it also removes
   dangling runner images of its namespace (rebuilds of the same tag),
   stopped kran containers that are not a job's (a sync helper or trim left
   by a crash), runner images of other kran versions, and trims the
@@ -491,8 +493,9 @@ cores), mem 4 GiB; `go build`/`go vet`: 4/2 GiB; `next build`: 4/6 GiB;
 
 Between the two sits a learned **repo-family tier**: agents rarely repeat a
 command exactly, but "go test in this repo" has plenty of history. Per (repo
-ID, family; `-race` is its own variant of `go test`/`go build`; not for
-"other") the last 24 runs are kept (at most 64 groups, least recently
+ID, family; `-race` is its own variant of `go test`/`go build`, and so is
+`-run` of `go test`, which falls back to the unfiltered group until it has
+runs of its own; not for "other") the last 24 runs are kept (at most 64 groups, least recently
 updated dropped, persisted in the store's KV). From 3 runs on, each quantity
 replaces the family default, blended with it in log space (the default
 counts as 2 runs, 5 for memory):
@@ -628,7 +631,9 @@ pass, anything that holds the memory is stopped).
   like macOS's `LC_CTYPE=UTF-8`, becomes `C.UTF-8`) and unsets CA bundle and
   SDK path variables (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `JAVA_HOME`,
   `VIRTUAL_ENV`, …) that name files missing in the container, starts the
-  job's Docker proxy (below) and takes the cache lock (§6.2). Its inputs
+  job's Docker proxy (below), takes the cache lock (§6.2) and makes fds 0-2
+  (Docker's root-owned pipes or pty) mode 0666, so the job can reopen them
+  by path (`/dev/stdin`, `> /dev/stderr`). Its inputs
   come as `KRAN_INIT_*` variables, validated in kran and again in the script,
   and are unset before the job starts. `HOME` is the origin's home path, a
   mount of the node's persistent container home (`kran-cache`, subpath
@@ -694,7 +699,7 @@ pass, anything that holds the memory is stopped).
 * Docker disk floor: on macOS container jobs write to the Docker VM's disk
   (slots, caches, `/tmp`), not the state dir's. The cache trim and the
   slot check measure it (§6.2); while the last measurement (at most two
-  hours old) is below the node's floor (max(10 GiB, 5%) of that disk, or
+  hours old) is below the node's floor (5% of that disk, 10–20 GiB, or
   `DiskFloor`), container slots are refused with reason `disk` and the
   next reaper pass trims caches and idle slots at once.
 * Resource caps: memory cap = admitted memory × 2, at least 8 GiB for an

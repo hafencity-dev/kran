@@ -205,9 +205,14 @@ func TestDiskFloor(t *testing.T) {
 	if r := find(Run(context.Background(), o), "disk"); r.Level != Warn || !strings.Contains(r.Detail, "floor") {
 		t.Fatalf("%+v", r)
 	}
-	// 5% of a 1 TiB disk (51 GiB) beats the 10 GiB floor.
-	o.DiskFree = func(string) (int64, int64, error) { return 30 << 30, 1 << 40, nil }
+	// 5% of a 300 GiB disk (15 GiB) beats the 10 GiB floor.
+	o.DiskFree = func(string) (int64, int64, error) { return 12 << 30, 300 << 30, nil }
 	if r := find(Run(context.Background(), o), "disk"); r.Level != Warn {
+		t.Fatalf("%+v", r)
+	}
+	// On a 1 TiB disk the floor is capped at 20 GiB: 30 GiB free is fine.
+	o.DiskFree = func(string) (int64, int64, error) { return 30 << 30, 1 << 40, nil }
+	if r := find(Run(context.Background(), o), "disk"); r.Level != OK {
 		t.Fatalf("%+v", r)
 	}
 }

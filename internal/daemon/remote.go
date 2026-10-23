@@ -11,6 +11,7 @@ import (
 
 	"github.com/hafencity-dev/kran/internal/proto"
 	"github.com/hafencity-dev/kran/internal/scheduler"
+	"github.com/hafencity-dev/kran/internal/workspace"
 )
 
 // prestartError: the remote placement failed before the command started;
@@ -119,12 +120,26 @@ func (d *Daemon) runRemote(ctx context.Context, e *jobEntry, p scheduler.Placeme
 		return fail(fmt.Errorf("workspace slot: %w", err))
 	}
 
-	plan, err := d.remoteDiff(pctx, sess, e.id, node, acq.Sync, m)
-	if err != nil {
-		leave()
-		return fail(fmt.Errorf("sync: %w", err))
+	// A file written while it is sent (a log, a build output) changed
+	// since the scan: scan again and send the difference, a few times.
+	var plan proto.SyncPlan
+	var sent int64
+	for attempt := 1; ; attempt++ {
+		plan, err = d.remoteDiff(pctx, sess, e.id, node, acq.Sync, m)
+		if err == nil {
+			var n int64
+			n, err = d.uploadBlobs(pctx, sess, e, node, m, plan)
+			sent += n
+		}
+		if err == nil || attempt == syncAttempts || !errors.Is(err, workspace.ErrBlobChanged) || pctx.Err() != nil {
+			break
+		}
+		e.phase(proto.Phase{State: proto.JobSyncing, Message: "files changed while sending; scanning again"})
+		if m, err = d.deps.Scanner.Scan(pctx, spec.Workspace, spec.SyncInclude, spec.SyncExclude); err != nil {
+			leave()
+			return fail(fmt.Errorf("scan workspace: %w", err))
+		}
 	}
-	sent, err := d.uploadBlobs(pctx, sess, e, node, m, plan)
 	if err != nil {
 		leave()
 		return fail(fmt.Errorf("sync: %w", err))
@@ -305,6 +320,10 @@ func (d *Daemon) followRemote(ctx context.Context, e *jobEntry, p scheduler.Plac
 		}
 	}
 }
+
+// syncAttempts bounds the scans of one sync when files change while they
+// are sent.
+const syncAttempts = 3
 
 type settleResult int
 

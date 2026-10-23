@@ -180,10 +180,7 @@ func (t *targetSide) diskFloorReason() string {
 	if m.DiskFree <= 0 || info.DiskTotal <= 0 {
 		return ""
 	}
-	floor := int64(10 << 30)
-	if pct := info.DiskTotal / 20; pct > floor {
-		floor = pct
-	}
+	floor := proto.DiskFloor(info.DiskTotal)
 	if m.DiskFree < floor {
 		return fmt.Sprintf("disk: %s free on %s, below the %s floor", humanBytes(m.DiskFree), t.d.self, humanBytes(floor))
 	}

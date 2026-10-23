@@ -13,6 +13,14 @@ const (
 	ProtocolMinor = 1
 )
 
+// DiskFloor is the free space below which a node takes no remote jobs and
+// kran stops filling the disk: 5% of it, at least 10 GiB and at most
+// 20 GiB (5% of a large disk that is otherwise fine would keep a node out
+// with tens of GiB free).
+func DiskFloor(total int64) int64 {
+	return max(10<<30, min(total/20, 20<<30))
+}
+
 // MemCap is a job's memory cap (SPEC §6.8): twice its admitted memory, at
 // most what is free when it starts. An estimated allocation gets at least
 // 8 GiB of room: the cap only kills, it reserves nothing, and a first

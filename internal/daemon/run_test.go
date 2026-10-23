@@ -59,6 +59,36 @@ func TestLocalRun(t *testing.T) {
 	}
 }
 
+// A file that changes while it is sent (a log being written) makes the
+// sync scan again instead of failing the remote start.
+func TestRemoteSyncRescansChangedFile(t *testing.T) {
+	c := newCluster(t, "a", "b")
+	a, b := c.nodes["a"], c.nodes["b"]
+	a.place = preferRemote("b")
+	b.start()
+	a.start()
+	c.waitOnline("a", "b")
+	ws := workspaceDir(t, map[string]string{"in.txt": "payload\n"})
+	a.scanner.mu.Lock()
+	a.scanner.changeOpens = 1
+	a.scanner.mu.Unlock()
+	ctx, cancel := testContext(20 * time.Second)
+	defer cancel()
+	res, err := runCLI(ctx, a.sock(), shSpec(ws, "cat in.txt"), cliOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.exit == nil || res.exit.Code != 0 || res.exit.Node != "b" || res.exit.Fallback || res.out() != "payload\n" {
+		t.Fatalf("exit %+v out %q", res.exit, res.out())
+	}
+	a.scanner.mu.Lock()
+	scans := a.scanner.scans
+	a.scanner.mu.Unlock()
+	if scans != 2 {
+		t.Fatalf("%d scans, want 2 (one again after the change)", scans)
+	}
+}
+
 func TestRemoteRun(t *testing.T) {
 	c := newCluster(t, "a", "b")
 	a, b := c.nodes["a"], c.nodes["b"]

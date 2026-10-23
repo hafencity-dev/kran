@@ -171,5 +171,12 @@ if [ -f "$kr_lock" ] && [ -r "$kr_lock" ] && command -v flock >/dev/null 2>&1 &&
 	fi
 fi
 
+# --- stdio: Docker's pipes (or the pty) belong to root with mode 0600, so
+# after the drop the job could read and write fd 0-2 but not reopen them
+# by path: `bash /dev/stdin`, `echo x > /dev/stderr` failed with EACCES.
+# They are this container's own; root owns them, so chmod needs no
+# capability (chown would need CAP_CHOWN, which the container lacks).
+chmod 0666 /proc/self/fd/0 /proc/self/fd/1 /proc/self/fd/2 2>/dev/null || true
+
 unset KRAN_INIT_UID KRAN_INIT_GID KRAN_INIT_GROUPS KRAN_INIT_USER KRAN_INIT_GROUP KRAN_INIT_TOOLS KRAN_INIT_SHIMS KRAN_INIT_TZ KRAN_INIT_DOCKER_MAP KRAN_INIT_CONTAINER
 exec setpriv --reuid="$kr_uid" --regid="$kr_gid" --groups="$kr_groups" -- "$@" 9<&-

@@ -32,7 +32,7 @@ func (s *sched) Admit(job *proto.Job, kind proto.RuntimeKind) (Placement, error)
 	case !st.Accepts:
 		return Placement{}, &AdmitError{Code: "not_accepting", Reason: self + ": not accepting jobs (accept.enabled is off)"}
 	}
-	floor := max(10*gib, st.Info.DiskTotal/20)
+	floor := proto.DiskFloor(st.Info.DiskTotal)
 	if m := st.Metrics; !m.Time.IsZero() && m.DiskFree > 0 && m.DiskFree < floor {
 		return Placement{}, &AdmitError{Code: "disk_floor", Reason: fmt.Sprintf("%s: disk almost full (%s free)", self, fmtBytes(m.DiskFree))}
 	}

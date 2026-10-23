@@ -2,6 +2,18 @@
 
 All notable changes to kran. Versions follow [semantic versioning](https://semver.org/).
 
+## 0.1.6
+
+### Fixes
+
+- Linux container runtime: `/dev/stdin`, `/dev/stdout` and `/dev/stderr` can be opened by path (`echo x > /dev/stderr`, `bash /dev/stdin`); they failed with "Permission denied", so scripts using them failed only on the Mac.
+- A file that changes while it is synced (a log being written) no longer fails the remote start and runs the job locally: kran scans again and sends the difference (at most 3 scans).
+- The disk floor (below which a node takes no remote jobs) is 5% of the disk capped at 20 GiB, still at least 10 GiB: on a 916 GiB disk 5% kept a node out with 42 GiB free.
+
+### Estimates
+
+- `go test -run …` learns apart from whole-package runs once a repo has a few: agents write a new filter each time, so these used the package's full-run duration (half of all local estimates were 2× too long or more).
+
 ## 0.1.5
 
 ### Disk shortage is reported

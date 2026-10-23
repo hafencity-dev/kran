@@ -122,7 +122,7 @@ func (c *checker) stateChecks(name string) {
 		}
 	}
 	if n.Info.DiskTotal > 0 {
-		floor := max(int64(10<<30), n.Info.DiskTotal/20)
+		floor := proto.DiskFloor(n.Info.DiskTotal)
 		if n.Metrics.DiskFree > 0 && n.Metrics.DiskFree < floor {
 			c.add(Result{ID: "disk.peer", Title: "disk space on " + name, Level: Warn, Node: name,
 				Detail: fmt.Sprintf("%s free, below the floor of %s; %s refuses new jobs", gib(n.Metrics.DiskFree), gib(floor), name),

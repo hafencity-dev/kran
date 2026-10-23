@@ -278,3 +278,27 @@ func TestRobustMeanAndQuantile(t *testing.T) {
 		t.Errorf("blend: %v", b)
 	}
 }
+
+// `go test -run` runs learn apart from whole-package runs once a repo has
+// a few: agents write a new filter each time, and a filtered run takes a
+// fraction of the package.
+func TestRunFilteredGoTestsLearnApart(t *testing.T) {
+	st := newTestStore(t)
+	e := NewWithOptions(st, Options{Self: "gx10"})
+	observeGoTests(e, "app", len(goTestRuns), t0) // whole packages: 3-67 s
+	for i := 0; i < 6; i++ {
+		spec := proto.JobSpec{Argv: []string{"go", "test", "-run", fmt.Sprintf("TestOne%d", i), "./internal/pkg/"},
+			Workspace: proto.Workspace{RepoID: "app"}}
+		fp := e.Fingerprint(&spec)
+		e.Observe(finished(spec, fp, "gx10", proto.JobSucceeded, 1.5, 1.5, 200<<20, t0.Add(time.Hour+time.Duration(i)*time.Minute)))
+	}
+	fresh := proto.JobSpec{Argv: []string{"go", "test", "-run", "TestNew", "./internal/pkg/"}, Workspace: proto.Workspace{RepoID: "app"}}
+	est := e.Estimate(&fresh, "", 20)
+	if est.Source != "repo:go-test+run" || est.Duration > 4 {
+		t.Errorf("filtered run: %+v", est)
+	}
+	whole := proto.JobSpec{Argv: []string{"go", "test", "./internal/other/"}, Workspace: proto.Workspace{RepoID: "app"}}
+	if est := e.Estimate(&whole, "", 20); est.Source != "repo:go-test" || est.Duration < 10 {
+		t.Errorf("whole package: %+v", est)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"math"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -168,6 +169,11 @@ func (e *estimator) Estimate(spec *proto.JobSpec, fp string, nodeCPUs int) proto
 	en.family = fam
 	learned := e.learn(en.samples, fam)
 	ge := e.groups[e.groupIDOf(spec, fam, variant)].estimate(prior)
+	if base, ok := strings.CutSuffix(variant, runVariant); ok && ge.duration == 0 && ge.cpus == 0 && ge.mem == 0 {
+		// Too few filtered runs yet: the package's unfiltered runs say more
+		// than the static default.
+		variant, ge = base, e.groups[e.groupIDOf(spec, fam, base)].estimate(prior)
+	}
 	e.mu.Unlock()
 
 	capCPUs := func(c float64) float64 {

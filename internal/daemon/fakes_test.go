@@ -349,12 +349,18 @@ func (p *fakeProber) Run(ctx context.Context) error { <-ctx.Done(); return nil }
 type fakeScanner struct {
 	mu    sync.Mutex
 	paths map[string]string
+	scans int
+	// changeOpens: the next Opens report the file changed since the scan.
+	changeOpens int
 }
 
 func newFakeScanner() *fakeScanner { return &fakeScanner{paths: map[string]string{}} }
 
 func (s *fakeScanner) Scan(ctx context.Context, ws proto.Workspace, include, exclude []string) (*proto.Manifest, error) {
 	m := &proto.Manifest{RepoID: ws.RepoID, Root: ws.Root}
+	s.mu.Lock()
+	s.scans++
+	s.mu.Unlock()
 	err := filepath.WalkDir(ws.Root, func(p string, de fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -383,9 +389,16 @@ func (s *fakeScanner) Scan(ctx context.Context, ws proto.Workspace, include, exc
 func (s *fakeScanner) Open(hash string) (workspace.ReadSeekCloser, int64, error) {
 	s.mu.Lock()
 	p, ok := s.paths[hash]
+	changed := s.changeOpens > 0
+	if changed {
+		s.changeOpens--
+	}
 	s.mu.Unlock()
 	if !ok {
 		return nil, 0, os.ErrNotExist
+	}
+	if changed {
+		return nil, 0, fmt.Errorf("blob %s: %s: %w", hash, p, workspace.ErrBlobChanged)
 	}
 	f, err := os.Open(p)
 	if err != nil {

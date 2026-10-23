@@ -66,7 +66,7 @@ func cacheResult(node string, cs *proto.CacheStatus) Result {
 	if cs.Reclaimed > 0 {
 		r.Detail += fmt.Sprintf("; the last trim reclaimed %s", gib(cs.Reclaimed))
 	}
-	if floor := max(int64(10<<30), cs.DiskTotal/20); cs.DiskFree < floor {
+	if floor := proto.DiskFloor(cs.DiskTotal); cs.DiskFree < floor {
 		r.Level = Warn
 		r.Detail += fmt.Sprintf("; below the floor of %s", gib(floor))
 		r.Fix = "free space in the Docker VM (`docker system prune`), give it a bigger disk, or lower runtime.container.cache_budget on " + node + "; kran already removes idle slots there"

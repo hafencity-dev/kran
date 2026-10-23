@@ -80,15 +80,26 @@ func groupID(repo, variant string) string {
 }
 
 // variantOf refines the family where one flag changes the resource profile
-// by a large factor: the race detector multiplies memory and time.
+// by a large factor: the race detector multiplies memory and time, and a
+// `go test -run` filter usually runs a few tests of a package that takes
+// far longer in full (agents write a new filter each time, so these rarely
+// have a learned fingerprint of their own).
 func variantOf(fam string, words []string) string {
+	v := fam
 	if fam == "go-test" || fam == "go-build" {
 		if hasFlag(words, "-race") {
-			return fam + "+race"
+			v += "+race"
+		}
+		if fam == "go-test" && hasFlag(words, "-run") {
+			v += runVariant
 		}
 	}
-	return fam
+	return v
 }
+
+// runVariant marks filtered test runs; until a repo has enough of them,
+// they use the unfiltered group.
+const runVariant = "+run"
 
 // groupEst is what a group says, per quantity (zero = not enough runs).
 type groupEst struct {
