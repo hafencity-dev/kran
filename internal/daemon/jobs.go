@@ -41,6 +41,7 @@ type jobEntry struct {
 	job      proto.Job
 	placed   bool // the scheduler holds an allocation
 	attached int
+	attaches int // sessions ever attached (attached counts the current ones)
 	finished bool
 	restored bool
 	started  bool // local: CLI reported started; remote: target reached running
@@ -374,6 +375,7 @@ func (e *jobEntry) canceled() (bool, string, string) {
 func (e *jobEntry) attach() {
 	e.mu.Lock()
 	e.attached++
+	e.attaches++
 	close(e.attachCh)
 	e.attachCh = make(chan struct{})
 	e.mu.Unlock()
@@ -455,6 +457,14 @@ func (e *jobEntry) attachedCount() (int, <-chan struct{}) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.attached, e.attachCh
+}
+
+// everAttached reports whether any run session attached to this entry, even
+// one that has left again.
+func (e *jobEntry) everAttached() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.attaches > 0
 }
 
 // finish records the terminal state exactly once: spool, store, events,

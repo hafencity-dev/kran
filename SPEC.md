@@ -286,6 +286,11 @@ Flags: `-l/--local`, `-r/--remote`, `-n/--node NAME`, `--gpu`, `--cpus N`,
      target (as above) before it is placed again.
    * A dropped run session of a placed job whose `kran run` still lives
      gets `CLIDropGrace` to reattach instead of an immediate cancel.
+   * A local job's `kran run` sends the command's exit and waits up to 3 s
+     for the daemon's `exit` frame back (it records the exit first). If
+     the session drops before that, it reconnects and sends it again, so
+     a daemon that dies with the frame unread still records the result.
+     Its own exit code is the command's either way.
 
 ### 6.2 Leases, supervisor, reaper (bulletproofing)
 

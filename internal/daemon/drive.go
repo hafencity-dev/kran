@@ -280,13 +280,15 @@ func (d *Daemon) pauseBeforeRequeue(ctx context.Context, e *jobEntry) bool {
 }
 
 // waitForCLI waits up to CLIReattachWait for a run session to reattach to
-// a restored job. It returns true at once for fresh jobs.
+// a restored job. It returns true at once for fresh jobs, and for a CLI
+// that reattached and left again already (a local job's CLI may report the
+// exit and quit before this looks).
 func (d *Daemon) waitForCLI(ctx context.Context, e *jobEntry) bool {
 	deadline := time.NewTimer(d.t.CLIReattachWait)
 	defer deadline.Stop()
 	for {
 		n, ch := e.attachedCount()
-		if n > 0 || !e.restored {
+		if n > 0 || !e.restored || e.everAttached() {
 			return true
 		}
 		select {

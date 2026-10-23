@@ -663,6 +663,50 @@ func TestLocalExitReportedAfterReconnect(t *testing.T) {
 	}
 }
 
+// TestLocalExitConfirmed: kran run waits for the daemon to record a
+// local job's exit; a daemon that dies before that gets it again once it
+// is back, and a confirming one ends the wait at once.
+func TestLocalExitConfirmed(t *testing.T) {
+	t.Run("daemon dies before recording", func(t *testing.T) {
+		s1, s2 := newFakeSession(), newFakeSession()
+		cl := &fakeClient{sessions: []*fakeSession{s1}}
+		h := newHarness(t, cl, "sh", "-c", "exit 3")
+		h.r.tm.ExitConfirm = 5 * time.Second
+		go func() {
+			s1.push(proto.FrameDecision, proto.Decision{JobID: "jc", Mode: "local", Envelope: &proto.LocalEnvelope{}})
+			waitFor(t, func() bool { return s1.count(proto.FrameExit) == 1 })
+			cl.mu.Lock()
+			cl.sessions = append(cl.sessions, s2)
+			cl.mu.Unlock()
+			s1.drop() // the frame was never read
+		}()
+		if code := h.run(t); code != 3 {
+			t.Fatal(code)
+		}
+		types := s2.sentTypes()
+		if len(types) < 2 || types[0] != proto.FrameReattach || types[len(types)-1] != proto.FrameExit {
+			t.Fatalf("frames after reconnect: %v", types)
+		}
+	})
+	t.Run("daemon confirms", func(t *testing.T) {
+		s := newFakeSession()
+		h := newHarness(t, &fakeClient{sessions: []*fakeSession{s}}, "sh", "-c", "exit 4")
+		h.r.tm.ExitConfirm = 10 * time.Second
+		go func() {
+			s.push(proto.FrameDecision, proto.Decision{JobID: "jd", Mode: "local", Envelope: &proto.LocalEnvelope{}})
+			waitFor(t, func() bool { return s.count(proto.FrameExit) == 1 })
+			s.push(proto.FrameExit, proto.Exit{JobID: "jd", Code: 4, State: proto.JobFailed})
+		}()
+		start := time.Now()
+		if code := h.run(t); code != 4 {
+			t.Fatal(code)
+		}
+		if d := time.Since(start); d > 5*time.Second {
+			t.Fatalf("waited %s for a confirmed exit", d)
+		}
+	})
+}
+
 func TestReconnectGivesUpWith125(t *testing.T) {
 	s1 := newFakeSession()
 	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s1}}, "x")

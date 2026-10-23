@@ -8,6 +8,10 @@ All notable changes to kran. Versions follow [semantic versioning](https://semve
 
 - The runner image has `busybox` (the binary only; its applets do not replace the GNU tools), for tests that run a script under busybox's shell and tools.
 
+### Fixes
+
+- A local job that ended while its daemon restarted was often recorded as `lost` although `kran run` exited with the command's code: a CLI that reattached, reported the exit and quit before the restored daemon checked for it was not counted as back. The daemon now counts it, and `kran run` waits for the daemon to record a local exit (up to 3 s) and reports it again after reconnecting when the connection dies first.
+
 ## 0.1.2
 
 ### Linux container runtime

@@ -78,3 +78,24 @@ func TestLocalExitSurvivesQuickQuit(t *testing.T) {
 		cancel()
 	}
 }
+
+// A restored job's CLI that reattached and already left again (a local job
+// reporting its exit and quitting) counts as back: waiting for it longer
+// would record the job lost.
+func TestWaitForCLISeesALeftReattach(t *testing.T) {
+	d := &Daemon{t: Timing{CLIReattachWait: 10 * time.Second}}
+	d.jobs = newJobTable(d)
+	e := d.jobs.newEntry(proto.Job{Spec: proto.JobSpec{ID: "j1"}}, nil)
+	e.restored = true
+	e.attach()
+	e.mu.Lock()
+	e.attached-- // left without the detach side effects
+	e.mu.Unlock()
+	start := time.Now()
+	if !d.waitForCLI(context.Background(), e) {
+		t.Fatal("waitForCLI gave up on a CLI that reattached")
+	}
+	if time.Since(start) > time.Second {
+		t.Fatalf("waited %s", time.Since(start))
+	}
+}

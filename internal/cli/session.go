@@ -26,11 +26,13 @@ type timing struct {
 	Reconnect   time.Duration // how long to retry the daemon after a drop (a restarted daemon waits as long, CLIReattachWait)
 	DoubleInt   time.Duration // second Ctrl-C within this escalates to KILL
 	RetryEvery  time.Duration
+	ExitConfirm time.Duration // how long a local job's exit waits for the daemon to record it
 }
 
 func defaultTiming() timing {
 	return timing{NoticeDelay: 2 * time.Second, Heartbeat: 2 * time.Second, DeadAfter: 10 * time.Second,
-		Reconnect: 20 * time.Second, DoubleInt: 2 * time.Second, RetryEvery: 300 * time.Millisecond}
+		Reconnect: 20 * time.Second, DoubleInt: 2 * time.Second, RetryEvery: 300 * time.Millisecond,
+		ExitConfirm: 3 * time.Second}
 }
 
 // runner drives one `kran run` (SPEC §6.1).
@@ -74,6 +76,10 @@ type runner struct {
 	localNode string
 	// pendingExit: the local job ended while reconnecting to the daemon.
 	pendingExit *proto.Exit
+	// sentExit: the local job's exit went to the daemon, which has not
+	// confirmed it yet (its exit frame back); exitConfirm bounds the wait.
+	sentExit    *proto.Exit
+	exitConfirm <-chan time.Time
 	tee         *historyTee // local output → daemon (job history)
 	fallback    bool
 	lastInt     time.Time
@@ -442,7 +448,15 @@ func (r *runner) loop(ctx context.Context) int {
 				r.localCh, r.pendingExit = nil, &ex
 				continue
 			}
-			return r.onLocalDone(ex)
+			if r.sess == nil {
+				return r.onLocalDone(ex)
+			}
+			// Wait for the daemon to record the exit: one that dies before
+			// it reads the frame would otherwise lose the result.
+			x := r.reportLocalExit(ex)
+			r.sentExit, r.exitConfirm = &x, time.After(r.tm.ExitConfirm)
+		case <-r.exitConfirm:
+			return r.localResult(*r.sentExit)
 		case <-r.noteC:
 			r.noteTimer, r.noteC = nil, nil
 			if r.pending != "" {
@@ -465,6 +479,9 @@ func (r *runner) loop(ctx context.Context) int {
 func (r *runner) onFrame(ctx context.Context, m frameMsg) (int, bool) {
 	if m.err != nil {
 		return r.onDisconnect(ctx, m.err)
+	}
+	if r.sentExit != nil && (m.t == proto.FrameExit || m.t == proto.FrameError) {
+		return r.localResult(*r.sentExit), true // recorded (or refused): the code is the command's
 	}
 	r.lastRecv = time.Now()
 	switch m.t {
@@ -594,6 +611,11 @@ func (r *runner) onDecision(ctx context.Context, d proto.Decision) (int, bool) {
 }
 
 func (r *runner) onLocalDone(ex proto.Exit) int {
+	return r.localResult(r.reportLocalExit(ex))
+}
+
+// reportLocalExit sends a local job's exit (after its output) to the daemon.
+func (r *runner) reportLocalExit(ex proto.Exit) proto.Exit {
 	ex.JobID = r.jobID
 	ex.Fallback = r.fallback
 	r.local, r.localCh = nil, nil
@@ -604,8 +626,14 @@ func (r *runner) onLocalDone(ex proto.Exit) int {
 		if r.tee.stop() {
 			r.send(proto.FrameStdout, []byte("\n"+historyTruncated+"\n"))
 		}
+		r.tee = nil
 	}
 	r.sendJSON(proto.FrameExit, ex)
+	return ex
+}
+
+// localResult ends kran run with a local job's own result.
+func (r *runner) localResult(ex proto.Exit) int {
 	if ex.Reason != "" {
 		r.sayAlways("%s", ex.Reason)
 	}
@@ -674,6 +702,11 @@ func (r *runner) onDisconnect(ctx context.Context, cause error) (int, bool) {
 		return r.noSession(ctx, "lost the connection to the daemon before the job started — running locally", cause), true
 	case r.reconnectOn:
 		return 0, false
+	}
+	if r.sentExit != nil {
+		// The daemon went away before confirming the exit: report it again
+		// once it is back.
+		r.pendingExit, r.sentExit, r.exitConfirm = r.sentExit, nil, nil
 	}
 	r.reconnectOn = true
 	go r.reconnect()
@@ -749,6 +782,13 @@ func (r *runner) onSignal(sig os.Signal) (int, bool) {
 	name := sigName(sig)
 	if name == "" {
 		return 0, false
+	}
+	if ex := r.sentExit; ex != nil || r.pendingExit != nil {
+		// The command has ended; stop waiting to report its result.
+		if ex == nil {
+			ex = r.pendingExit
+		}
+		return r.localResult(*ex), true
 	}
 	if r.local != nil {
 		r.forwardLocal(sig)
