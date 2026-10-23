@@ -47,6 +47,7 @@ jobs:
         if: failure() || cancelled()
         shell: bash
         run: |
+          echo "== failed tests"; grep -E '^\s*--- FAIL|^\s+[A-Za-z0-9_]+_test\.go:[0-9]+:|^panic:' "$RUNNER_TEMP/test.log" | head -80 || true
           echo "== last tests started"; grep -E '^=== (RUN|CONT)' "$RUNNER_TEMP/test.log" | tail -20 || true
           echo "== packages done"; grep -E '^(ok|FAIL)' "$RUNNER_TEMP/test.log" | tail -40 || true
           echo "== log tail"; tail -80 "$RUNNER_TEMP/test.log" || true
