@@ -369,3 +369,28 @@ func TestLocalJobOutputGoesToTheDaemon(t *testing.T) {
 		t.Fatalf("frames %v: stdout %q stderr %q", types, out.String(), errOut.String())
 	}
 }
+
+// A mark that found no room in a full queue still ends the history: flush
+// sends it once the queue drained.
+func TestHistoryTeeFlushSendsMarkThatDidNotFit(t *testing.T) {
+	s := &teeSession{fakeSession: newFakeSession(), gate: make(chan struct{})}
+	tee := newHistoryTee(3020)
+	defer tee.stop()
+	tee.setSession(s)
+	chunk := func(c byte) []byte { return bytes.Repeat([]byte{c}, 1000) }
+	tee.push(proto.FrameStdout, chunk('a'))
+	waitFor(t, func() bool { tee.mu.Lock(); defer tee.mu.Unlock(); return tee.busy }) // a is being sent
+	for _, c := range []byte("bcd") {
+		tee.push(proto.FrameStdout, chunk(c)) // 3000 of 3020 queued
+	}
+	tee.push(proto.FrameStdout, chunk('e')) // dropped: the mark is due
+	tee.push(proto.FrameStdout, chunk('f')) // no room for the mark either
+	go func() { time.Sleep(50 * time.Millisecond); close(s.gate) }()
+	if !tee.flush(10 * time.Second) {
+		t.Fatal("flush timed out")
+	}
+	h := s.history()
+	if !strings.HasSuffix(h, strings.Repeat("d", 1000)+"\n"+historyTruncated+"\n") {
+		t.Fatalf("history (%d bytes) ends %q", len(h), h[max(0, len(h)-60):])
+	}
+}

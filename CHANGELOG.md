@@ -8,6 +8,7 @@ All notable changes to kran. Versions follow [semantic versioning](https://semve
 
 - Linux container runtime: `/dev/stdin`, `/dev/stdout` and `/dev/stderr` can be opened by path (`echo x > /dev/stderr`, `bash /dev/stdin`); they failed with "Permission denied", so scripts using them failed only on the Mac.
 - A file that changes while it is synced (a log being written) no longer fails the remote start and runs the job locally: kran scans again and sends the difference (at most 3 scans).
+- A local job's history whose output was cut because the daemon fell behind now always ends with the truncation mark; when the queue was full at the end, the mark could be left out.
 - The disk floor (below which a node takes no remote jobs) is 5% of the disk capped at 20 GiB, still at least 10 GiB: on a 916 GiB disk 5% kept a node out with 42 GiB free.
 
 ### Estimates

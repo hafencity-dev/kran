@@ -180,23 +180,30 @@ func (t *historyTee) run() {
 // flush waits up to timeout until everything queued (and a pending mark)
 // reached the session. It reports whether it did.
 func (t *historyTee) flush(timeout time.Duration) bool {
-	t.mu.Lock()
-	if t.mark {
-		t.enqueueMarkLocked()
-	}
-	idle := t.idle
-	t.mu.Unlock()
-	select {
-	case t.wake <- struct{}{}:
-	default:
-	}
 	tm := time.NewTimer(timeout)
 	defer tm.Stop()
-	select {
-	case <-idle:
-		return true
-	case <-tm.C:
-		return false
+	for {
+		t.mu.Lock()
+		if t.mark {
+			t.enqueueMarkLocked()
+		}
+		// A full queue had no room for the mark: it goes once the queue
+		// drained (the next round), so the history ends with it.
+		pending := t.mark
+		idle := t.idle
+		t.mu.Unlock()
+		select {
+		case t.wake <- struct{}{}:
+		default:
+		}
+		select {
+		case <-idle:
+			if !pending {
+				return true
+			}
+		case <-tm.C:
+			return false
+		}
 	}
 }
 
