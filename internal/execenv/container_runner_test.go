@@ -188,6 +188,7 @@ echo "14:$(docker volume inspect -f '{{.Options.device}}' "kt-$KRAN_JOB_ID")"
 docker volume rm "kt-$KRAN_JOB_ID" >/dev/null
 echo "15:$(awk --version | head -1 | cut -d, -f1) $(awk 'BEGIN { print gensub(/o/, "0", "g", "foo") }')"
 echo "16:stdio-by-path" > /dev/stdout && echo "17:stderr-by-path" > /dev/stderr
+echo "19:$(stat -L -c %a /proc/$$/fd/1) $(stat -L -c %a /proc/$$/fd/2)"
 for tool in gawk busybox parallel uuidgen hostname tput cpio getopt column hexdump timeout flock setsid nproc realpath iconv perl; do
 	command -v "$tool" >/dev/null || echo "missing: $tool"
 done
@@ -203,7 +204,7 @@ command -v node >/dev/null && echo "node: $(command -v node)" || echo no-node`),
 		t.Fatalf("exit %+v\n%s\n%s", exit, out, errOut)
 	}
 	for _, want := range []string{"1:content from the slot\n", "2:written-by-nested\n", "3:content from the slot\n", "4:home-file\n", "5:content from the slot\n", "6:tmp-file-ok\n", "7:tmp-dir-ok\n", "8:42\n", "9:venv True\n", "10:/usr/bin/docker\n",
-		ctrRoot + "/sub ", "/f ", `12:["` + ctrRoot + `/sub:/w","/tmp/`, "13:1 ", "14:" + ctrRoot + "/sub\n", "15:GNU Awk 5", " f00\n", "16:stdio-by-path\n", "plugins-ok\n", "no-node\n"} {
+		ctrRoot + "/sub ", "/f ", `12:["` + ctrRoot + `/sub:/w","/tmp/`, "13:1 ", "14:" + ctrRoot + "/sub\n", "15:GNU Awk 5", " f00\n", "16:stdio-by-path\n", "19:666 666\n", "plugins-ok\n", "no-node\n"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s\n%s", want, out, errOut)
 		}

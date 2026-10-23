@@ -176,7 +176,11 @@ fi
 # by path: `bash /dev/stdin`, `echo x > /dev/stderr` failed with EACCES.
 # They are this container's own; root owns them, so chmod needs no
 # capability (chown would need CAP_CHOWN, which the container lacks).
-chmod 0666 /proc/self/fd/0 /proc/self/fd/1 /proc/self/fd/2 2>/dev/null || true
+# stderr goes through a copy on fd 8: the shell applies the 2>/dev/null
+# to itself while chmod runs, so /proc/$$/fd/2 would be /dev/null.
+exec 8>&2
+chmod 0666 /proc/$$/fd/0 /proc/$$/fd/1 /proc/$$/fd/8 2>/dev/null || true
+exec 8>&-
 
 unset KRAN_INIT_UID KRAN_INIT_GID KRAN_INIT_GROUPS KRAN_INIT_USER KRAN_INIT_GROUP KRAN_INIT_TOOLS KRAN_INIT_SHIMS KRAN_INIT_TZ KRAN_INIT_DOCKER_MAP KRAN_INIT_CONTAINER
 exec setpriv --reuid="$kr_uid" --regid="$kr_gid" --groups="$kr_groups" -- "$@" 9<&-

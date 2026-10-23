@@ -2,6 +2,12 @@
 
 All notable changes to kran. Versions follow [semantic versioning](https://semver.org/).
 
+## 0.1.7
+
+### Fixes
+
+- Linux container runtime: `> /dev/stderr` works too. 0.1.6 fixed `/dev/stdin` and `/dev/stdout` only: kran-init's shell applied a `2>/dev/null` to itself while it changed the mode of stderr, so it changed `/dev/null` instead.
+
 ## 0.1.6
 
 ### Fixes
