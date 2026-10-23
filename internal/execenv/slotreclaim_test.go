@@ -67,6 +67,44 @@ func TestReclaimSlotsLRU(t *testing.T) {
 	}
 }
 
+// Above the floor a slot used within slotReclaimMinIdle stays: the next
+// job would sync the whole workspace again. Below the floor it goes.
+func TestReclaimSlotsKeepsRecentAboveFloor(t *testing.T) {
+	te := newTestEnv(t)
+	m := te.m
+	ctx := context.Background()
+	clock := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+	m.pool.now = func() time.Time { return clock }
+	var refs []proto.SlotRef
+	for i := 0; i < 2; i++ {
+		ref, err := m.AcquireSlot(ctx, testRepo, "wt"+string(rune('a'+i)), proto.RuntimeNative)
+		if err != nil {
+			t.Fatal(err)
+		}
+		te.commit(ref, testRepo, map[string]string{"f": "x"})
+		refs = append(refs, ref)
+	}
+	m.ReleaseSlot(refs[0])
+	clock = clock.Add(time.Hour)
+	m.ReleaseSlot(refs[1]) // used just now
+	clock = clock.Add(5 * time.Minute)
+	m.opts.DiskReserve, m.opts.DiskFloor = 100, 10
+	space := func(free int64) func() (int64, int64, error) {
+		return func() (int64, int64, error) { return free, 1000, nil }
+	}
+	m.reclaimSlots(ctx, locHost, "the disk", space(50))
+	if _, err := os.Stat(refs[0].Path); err == nil {
+		t.Error("slot idle for an hour kept under pressure")
+	}
+	if _, err := os.Stat(refs[1].Path); err != nil {
+		t.Fatalf("slot used 5 minutes ago removed above the floor: %v", err)
+	}
+	m.reclaimSlots(ctx, locHost, "the disk", space(5))
+	if _, err := os.Stat(refs[1].Path); err == nil {
+		t.Error("recent slot kept below the floor")
+	}
+}
+
 func TestParseDF(t *testing.T) {
 	free, total, err := parseDF("     Avail        1B-blocks\n10276630528 103865303040\n")
 	if err != nil || free != 10276630528 || total != 103865303040 {

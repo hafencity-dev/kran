@@ -114,6 +114,27 @@ func TestWaitingReasonCPU(t *testing.T) {
 	}
 }
 
+// A job that waited long logs why when it is placed: the queue entry
+// with its reason is gone afterwards.
+func TestPlacedAfterWaitLogsReason(t *testing.T) {
+	clk := &fakeClock{t0}
+	g := self(gx10(t0))
+	g.Metrics.CPUBusy = 0.9
+	s := newTestSched(t, clk, g)
+	var log []string
+	s.opts.Logf = func(f string, a ...any) { log = append(log, fmt.Sprintf(f, a...)) }
+	tk := s.Submit(newJob("j1", "a", 8, 2*gib, 60, withQueuedAt(t0)))
+	pending(t, tk)
+	clk.Advance(2 * time.Minute)
+	g = self(gx10(clk.t))
+	s.UpdateNode(g)
+	placed(t, tk)
+	last := log[len(log)-1]
+	if !strings.Contains(last, "placed j1") || !strings.Contains(last, "after waiting 2m: needs 8 CPUs, gx10 has 2 free") {
+		t.Fatalf("log %q", last)
+	}
+}
+
 func TestCPUOvercommitFactor(t *testing.T) {
 	clk := &fakeClock{t0}
 	s := newTestSched(t, clk, self(gx10(t0)))

@@ -281,3 +281,51 @@ func TestDockerDiskFloor(t *testing.T) {
 		t.Fatalf("enough disk: %v", err)
 	}
 }
+
+// A trim overdue by cacheStarveAfter while the Docker disk keeps less free
+// than its reserve is starved; then new container slots are refused (the
+// runtime reports why) until the trim ran.
+func TestCacheTrimStarvedPause(t *testing.T) {
+	te := newTestEnv(t, func(o *Options, _ *tunables) { o.DiskFloor, o.DiskReserve = 10*gib, 25*gib })
+	m := te.m
+	m.tun.cacheTrimEvery = cacheTrimEvery
+	now := m.now()
+	set := func(last time.Time, free int64, at time.Time) {
+		m.ct.mu.Lock()
+		m.ct.last, m.ct.diskFree, m.ct.diskTotal, m.ct.diskAt = last, free, 100*gib, at
+		m.ct.mu.Unlock()
+	}
+	starved := func() bool {
+		m.ct.mu.Lock()
+		defer m.ct.mu.Unlock()
+		return m.trimStarvedLocked(now)
+	}
+	overdue := now.Add(-(cacheTrimEvery + cacheStarveAfter + time.Minute))
+	set(overdue, 15*gib, now)
+	if !starved() {
+		t.Error("overdue trim with a tight disk is not starved")
+	}
+	set(overdue, 30*gib, now)
+	if starved() {
+		t.Error("starved although the disk keeps its reserve")
+	}
+	set(overdue, 15*gib, now.Add(-time.Hour))
+	if starved() {
+		t.Error("starved on a stale disk measurement")
+	}
+	set(now.Add(-cacheTrimEvery), 15*gib, now)
+	if starved() {
+		t.Error("starved right when the trim became due")
+	}
+
+	m.ct.mu.Lock()
+	m.ct.pause = now
+	m.ct.mu.Unlock()
+	_, err := m.AcquireSlot(context.Background(), testRepo, "wt", proto.RuntimeContainer)
+	if !errors.Is(err, ErrRuntimeUnavailable) || !strings.Contains(err.Error(), "trimming its caches") {
+		t.Fatalf("container slot during a trim pause: %v", err)
+	}
+	if _, err := m.AcquireSlot(context.Background(), testRepo, "wt", proto.RuntimeNative); err != nil {
+		t.Fatalf("native slot during a trim pause: %v", err)
+	}
+}

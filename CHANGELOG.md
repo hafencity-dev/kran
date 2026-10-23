@@ -2,6 +2,17 @@
 
 All notable changes to kran. Versions follow [semantic versioning](https://semver.org/).
 
+## 0.1.4
+
+### Disk space on busy nodes
+
+- A node that always runs a container job never got to trim its caches (they grew to 33 GiB of a 20 GiB budget on a Mac) while kran deleted the slots of the busiest repository every few minutes instead, so its next job synced the whole workspace again. When the trim is 15 minutes overdue and the Docker disk keeps less than its reserve free, new container jobs now pause (they queue or go elsewhere) until the running ones end and the trim ran, at most 15 minutes.
+- Slots used within the last 30 minutes are kept while the disk is above its floor.
+
+### Logs
+
+- Placing a job that waited at least 30 seconds logs why it waited.
+
 ## 0.1.3
 
 ### Linux container runtime

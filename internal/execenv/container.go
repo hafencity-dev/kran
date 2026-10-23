@@ -233,7 +233,10 @@ func (m *manager) ensureContainerReady(ctx context.Context, onPhase func(proto.P
 	if dk == nil {
 		return fmt.Errorf("%w: %s", ErrRuntimeUnavailable, reason)
 	}
-	for _, rt := range m.Runtimes(ctx) {
+	m.rtMu.Lock()
+	rts := m.runtimes // not Runtimes: a trim pause holds back new slots, not jobs that have one
+	m.rtMu.Unlock()
+	for _, rt := range rts {
 		if rt.Kind == proto.RuntimeContainer && !rt.Available {
 			return fmt.Errorf("%w: %s", ErrRuntimeUnavailable, rt.Reason)
 		}

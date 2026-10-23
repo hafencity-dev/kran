@@ -336,7 +336,9 @@ Flags: `-l/--local`, `-r/--remote`, `-n/--node NAME`, `--gpu`, `--cpus N`,
   fills, deleting its own data only: the cache trim's caches (below), then
   idle slots, least recently used first (by last acquisition or release),
   never one in use or acquired for a job about to start, at most 8 per
-  pass, each logged. This machine's disk (native slots, and container
+  pass, each logged. Above the floor a slot used within the last 30
+  minutes stays: slots are small next to the caches, and on a busy node
+  the next job would sync its whole workspace again. This machine's disk (native slots, and container
   slots on Linux) is checked on every reaper pass; the Docker disk of the
   volume layout (macOS) every 5 minutes through the sync helper (`df`),
   and right after a cache trim that left it short. The 3-day TTL applies
@@ -346,7 +348,13 @@ Flags: `-l/--local`, `-r/--remote`, `-n/--node NAME`, `--gpu`, `--cpus N`,
 * Cache trim (container runtime): the volumes `kran-cache` and
   `kran-tools` only grow as jobs use them, so once an hour (when no
   container job of the node runs or starts) the reaper runs `kran internal
-  cache-trim` in a container of the runner image with both volumes, as the
+  cache-trim`. A node that always runs a container job would never trim:
+  when the trim is 15 minutes overdue and the Docker disk keeps less than
+  its reserve free, the container runtime reports itself unavailable
+  ("kran is trimming its caches …"; jobs queue or go elsewhere, jobs that
+  already hold a slot still start) until the running container jobs ended
+  and the trim ran, at most 15 minutes, then it tries again an hour later.
+  The trim runs in a container of the runner image with both volumes, as the
   node user, without network. It measures them (hard links once) and the
   Docker disk; under the budget (`runtime.container.cache_budget`, default
   min(20 GiB, a quarter of the Docker disk)) with the Docker disk keeping

@@ -228,9 +228,13 @@ func (m *manager) Runtimes(ctx context.Context) []proto.Runtime {
 	m.rtMu.Lock()
 	rts := append([]proto.Runtime(nil), m.runtimes...)
 	m.rtMu.Unlock()
+	paused := m.cachePaused()
 	for i := range rts {
 		if rts[i].Kind == proto.RuntimeContainer {
 			rts[i].Caches = m.cacheStatus()
+			if paused && rts[i].Available {
+				rts[i].Available, rts[i].Reason = false, cachePauseReason
+			}
 		}
 	}
 	return rts
@@ -327,6 +331,9 @@ func (m *manager) AcquireSlot(ctx context.Context, repoID, hint string, rt proto
 	if rt == proto.RuntimeContainer {
 		if err := m.checkDockerDiskFloor(); err != nil {
 			return proto.SlotRef{}, err
+		}
+		if m.cachePaused() {
+			return proto.SlotRef{}, fmt.Errorf("%w: %s", ErrRuntimeUnavailable, cachePauseReason)
 		}
 	}
 	loc := m.slotLocFor(rt)

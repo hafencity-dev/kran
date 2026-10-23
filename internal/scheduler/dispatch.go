@@ -470,6 +470,9 @@ func (s *sched) holdAll(j *sjob, c *cand, holds map[string]hold) bool {
 	return true
 }
 
+// loggedWait: placing a job that waited this long logs why it waited.
+const loggedWait = 30 * time.Second
+
 func (s *sched) place(j *sjob, c *cand, now time.Time, reason string) {
 	res := proto.Resources{CPUs: c.cpu, Mem: c.mem}
 	fallback := c.v.self && len(j.excluded) > 0
@@ -504,12 +507,17 @@ func (s *sched) place(j *sjob, c *cand, now time.Time, reason string) {
 	c.v.running++
 	j.alloc = a
 	j.requeued = false
+	waited := ""
+	if w := now.Sub(j.queuedAt); w >= loggedWait && j.reason != "" {
+		// Why it waited is otherwise lost with the queue entry.
+		waited = fmt.Sprintf(" (after waiting %s: %s)", fmtDur(w.Seconds()), strings.TrimPrefix(j.reason, "waiting: "))
+	}
 	j.reason = ""
 	s.dequeueOwner(j)
 	if o := s.owners[j.owner]; o != nil {
 		o.vt += 1 / prioWeight[j.prio]
 	}
-	s.opts.Logf("scheduler: placed %s on %s (%s): %s", j.id, c.v.name, c.rt.rt.Kind, reason)
+	s.opts.Logf("scheduler: placed %s on %s (%s): %s%s", j.id, c.v.name, c.rt.rt.Kind, reason, waited)
 	j.t.resolve(pl, nil)
 }
 

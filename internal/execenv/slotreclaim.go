@@ -16,6 +16,12 @@ import (
 // slotReclaimMax bounds the slots one pass deletes.
 const slotReclaimMax = 8
 
+// slotReclaimMinIdle keeps slots used this recently while the disk is
+// still above its floor: they are small next to the caches, and the next
+// job would sync the whole workspace again (on a busy node, every few
+// minutes). The cache trim frees space first (ctrtrim.go).
+const slotReclaimMinIdle = 30 * time.Minute
+
 // volumeDiskEvery spaces the Docker disk checks of the volume layout
 // (each is a docker exec).
 const volumeDiskEvery = 5 * time.Minute
@@ -98,11 +104,21 @@ func (m *manager) reclaimSlots(ctx context.Context, loc slotLoc, disk string, sp
 		return
 	}
 	reserve := m.reserveFor(total)
+	floor := m.opts.DiskFloor
+	if floor <= 0 {
+		floor = diskFloor(total)
+	}
 	for i := 0; i < slotReclaimMax && free < reserve && ctx.Err() == nil; i++ {
-		s := m.pool.evictLRU(loc)
+		var before time.Time
+		if free >= floor {
+			before = m.pool.now().Add(-slotReclaimMinIdle) // the clock lastUsed is kept on
+		}
+		s := m.pool.evictLRU(loc, before)
 		if s == nil {
-			m.logf("disk: %s on %s has %s free, below the %s kran keeps free, and no idle slot is left to remove", disk, m.opts.NodeName, fmtGiB(free), fmtGiB(reserve))
-			return
+			if before.IsZero() {
+				m.logf("disk: %s on %s has %s free, below the %s kran keeps free, and no idle slot is left to remove", disk, m.opts.NodeName, fmtGiB(free), fmtGiB(reserve))
+			}
+			return // the rest was used within slotReclaimMinIdle: kept above the floor
 		}
 		m.logf("disk: removing idle slot %s/%d (last used %s): %s has %s free, kran keeps %s free",
 			short(s.repo), s.index, m.slotLastUsed(s).Format(time.DateTime), disk, fmtGiB(free), fmtGiB(reserve))

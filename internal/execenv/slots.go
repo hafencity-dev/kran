@@ -357,9 +357,10 @@ func (p *slotPool) stale(idle time.Duration) []*slot {
 }
 
 // evictLRU takes the idle slot at loc that was used least recently out of
-// the pool, for deletion (nil when every slot there is in use). A slot
-// in use, or acquired for a job about to start, is never taken.
-func (p *slotPool) evictLRU(loc slotLoc) *slot {
+// the pool, for deletion (nil when every slot there is in use, or, with a
+// non-zero usedBefore, when none was last used before it). A slot in use,
+// or acquired for a job about to start, is never taken.
+func (p *slotPool) evictLRU(loc slotLoc, usedBefore time.Time) *slot {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if ents, err := os.ReadDir(p.l.slotsDir()); err == nil {
@@ -382,7 +383,7 @@ func (p *slotPool) evictLRU(loc slotLoc) *slot {
 			}
 		}
 	}
-	if best == nil {
+	if best == nil || (!usedBefore.IsZero() && !bestAt.Before(usedBefore)) {
 		return nil
 	}
 	kept := p.repos[bestKey][:0]

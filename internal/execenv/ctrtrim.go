@@ -21,10 +21,24 @@ import (
 // cacheTrimEvery spaces trims; each walks both volumes.
 const cacheTrimEvery = time.Hour
 
+// A node that always runs a container job never trims its caches. When a
+// trim is overdue by cacheStarveAfter while the Docker disk keeps less free
+// than its reserve, new container jobs pause (the runtime reports itself
+// unavailable, so jobs queue or go elsewhere) until the running ones end
+// and the trim ran, at most cachePauseMax.
+const (
+	cacheStarveAfter = 15 * time.Minute
+	cachePauseMax    = 15 * time.Minute
+)
+
+// cachePauseReason is the container runtime's reason while it pauses.
+const cachePauseReason = "kran is trimming its caches on the Docker disk; container jobs start again in a few minutes"
+
 type cacheTrim struct {
 	mu       sync.Mutex
 	holds    int                // container jobs being started
 	running  context.CancelFunc // non-nil while a trim runs
+	pause    time.Time          // new container jobs wait for a starved trim since then (zero: none)
 	done     chan struct{}
 	last     time.Time
 	report   *cacheReport
@@ -91,17 +105,31 @@ func (m *manager) maybeTrimCaches(ctx context.Context) {
 	}
 	m.ct.mu.Lock()
 	defer m.ct.mu.Unlock()
-	if m.ct.running != nil || m.ct.holds > 0 || m.now().Sub(m.ct.last) < m.tun.cacheTrimEvery {
+	now := m.now()
+	if m.ct.running != nil || m.ct.holds > 0 {
+		return
+	}
+	if m.ct.pause.IsZero() && now.Sub(m.ct.last) < m.tun.cacheTrimEvery {
 		return
 	}
 	if m.containerJobsActive() {
+		switch {
+		case m.ct.pause.IsZero() && m.trimStarvedLocked(now):
+			m.ct.pause = now
+			m.logf("container caches: the Docker disk has %s free, less than kran's reserve, and the caches could not be trimmed for %s (container jobs kept running): new container jobs wait until the running ones end",
+				fmtGiB(m.ct.diskFree), now.Sub(m.ct.last).Round(time.Minute))
+		case !m.ct.pause.IsZero() && now.Sub(m.ct.pause) > cachePauseMax:
+			m.ct.pause, m.ct.last = time.Time{}, now
+			m.logf("container caches: the running container jobs did not end within %s; container jobs start again and the trim waits for the next chance", cachePauseMax)
+		}
 		return // the next pass tries again
 	}
 	// Checked at most once per period: most nodes never run a container
 	// job, and these ask Docker.
 	m.ct.last = m.now()
 	if !m.imageBuilt(ctx, dk) || !m.volumeExists(ctx, dk, m.volume("cache")) {
-		return // no container job ran here yet
+		m.ct.pause = time.Time{} // nothing to trim: never hold jobs back for it
+		return                   // no container job ran here yet
 	}
 	tctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	done := make(chan struct{})
@@ -112,6 +140,9 @@ func (m *manager) maybeTrimCaches(ctx context.Context) {
 		rep, err := m.runCacheTrim(tctx, dk)
 		m.ct.mu.Lock()
 		m.ct.running, m.ct.done = nil, nil
+		if err == nil || tctx.Err() == nil {
+			m.ct.pause = time.Time{} // done, or failed for good: jobs go on either way
+		}
 		if err == nil && rep.Total > 0 { // measured (a trim skipped for a running job was not)
 			m.ct.report, m.ct.reportAt = &rep, m.now()
 			m.ct.diskFree, m.ct.diskTotal, m.ct.diskAt = rep.Free, rep.Total, m.now()
@@ -132,6 +163,26 @@ func (m *manager) maybeTrimCaches(ctx context.Context) {
 				rep.Removed, fmtGiB(rep.Reclaimed), fmtGiB(rep.Used), fmtGiB(rep.After), fmtGiB(rep.Budget), fmtGiB(rep.Free))
 		}
 	}()
+}
+
+// trimStarvedLocked: a trim is overdue by cacheStarveAfter and the Docker
+// disk, as last measured, keeps less free than the reserve (m.ct.mu held).
+func (m *manager) trimStarvedLocked(now time.Time) bool {
+	if m.ct.last.IsZero() || now.Sub(m.ct.last) < m.tun.cacheTrimEvery+cacheStarveAfter {
+		return false
+	}
+	free, total := m.ct.diskFree, m.ct.diskTotal
+	if total <= 0 || now.Sub(m.ct.diskAt) > 2*volumeDiskEvery {
+		return false // unknown or stale
+	}
+	return free < m.reserveFor(total)
+}
+
+// cachePaused reports whether new container jobs wait for a trim.
+func (m *manager) cachePaused() bool {
+	m.ct.mu.Lock()
+	defer m.ct.mu.Unlock()
+	return !m.ct.pause.IsZero()
 }
 
 func (m *manager) volumeExists(ctx context.Context, dk *dockerEnv, name string) bool {
