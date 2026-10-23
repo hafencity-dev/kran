@@ -156,6 +156,10 @@ type Exit struct {
 	// (setup failed, toolchain missing, runtime not ready). Nothing of the
 	// command ran, so the origin may still fall back to running it locally.
 	BeforeStart bool `json:"before_start,omitempty"`
+	// DiskShort: the command failed while a disk it writes to was full
+	// (its output says ENOSPC, or the disk was all but full when it
+	// ended): rerunning it may well pass. The code stays the command's.
+	DiskShort bool `json:"disk_short,omitempty"`
 }
 
 type Reattach struct {

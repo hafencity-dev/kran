@@ -368,7 +368,7 @@ func (d *Daemon) serveFinished(rc *runConn, ra proto.Reattach) {
 }
 
 func exitOf(j proto.Job) proto.Exit {
-	x := proto.Exit{JobID: j.Spec.ID, State: j.State, Signal: j.Signal, Reason: j.Reason, Usage: j.Usage, Node: j.Node, Fallback: j.Fallback}
+	x := proto.Exit{JobID: j.Spec.ID, State: j.State, Signal: j.Signal, Reason: j.Reason, Usage: j.Usage, Node: j.Node, Fallback: j.Fallback, DiskShort: j.DiskShort}
 	if j.ExitCode != nil {
 		x.Code = *j.ExitCode
 	} else if !j.State.Terminal() || j.State == proto.JobInfraErr || j.State == proto.JobLost {

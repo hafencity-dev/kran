@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -46,15 +47,17 @@ func Supervise(args []string) int {
 }
 
 type supervisor struct {
-	dir   string
-	spec  superSpec
-	logf  func(string, ...any)
-	lockF *os.File
-	spool *spoolWriter
-	evMu  sync.Mutex
-	evF   *os.File
-	ln    net.Listener
-	cg    *jobCgroup
+	dir  string
+	spec superSpec
+	// enospc: the job's output said a disk was full (diskshort.go).
+	enospc atomic.Bool
+	logf   func(string, ...any)
+	lockF  *os.File
+	spool  *spoolWriter
+	evMu   sync.Mutex
+	evF    *os.File
+	ln     net.Listener
+	cg     *jobCgroup
 
 	mu         sync.Mutex
 	cmd        *exec.Cmd     // running step, nil between steps
@@ -511,9 +514,13 @@ func (s *supervisor) buildCmd(setup bool) (*exec.Cmd, string, error) {
 func (s *supervisor) pump(wg *sync.WaitGroup, r *os.File, t proto.FrameType, closeAtEOF bool, gate <-chan struct{}) {
 	defer wg.Done()
 	buf := make([]byte, spoolChunk)
+	var sc enospcScan
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
+			if !s.enospc.Load() && sc.see(buf[:n]) {
+				s.enospc.Store(true)
+			}
 			<-gate
 			if werr := s.spool.write(t, buf[:n]); werr != nil {
 				s.logf("spool write: %v", werr)
@@ -836,6 +843,9 @@ func (s *supervisor) mainExit(res stepResult) proto.Exit {
 		exit.State = proto.JobSucceeded
 	default:
 		exit.State = proto.JobFailed
+		if r := s.diskShortReason(); r != "" {
+			exit.DiskShort, exit.Reason = true, r
+		}
 	}
 	return exit
 }

@@ -158,3 +158,22 @@ func TestE2ELocalRecordsMatchExit(t *testing.T) {
 		}
 	}
 }
+
+// A remote job that fails on a full disk keeps its exit code, and kran run
+// says why (a `kran: disk short:` line, disk_short in the exit event), so a
+// caller can rerun it instead of counting a red test.
+func TestE2EDiskShortReported(t *testing.T) {
+	_, a, _, repo := twoNodes(t, map[string]string{"f": "x"}, nil)
+	r := a.kran(runOpts{dir: repo}, "run", "--json-events", "-n", "b", "--", "sh", "-c", `echo "write /tmp/x: no space left on device" >&2; exit 1`)
+	if r.code != 1 || !strings.Contains(string(r.stderr), `"reason":"disk short: the job's output says no space left on device on b; rerun it"`) {
+		t.Fatalf("disk short over json events: %s", r)
+	}
+	ex := event(r.events(), "exit")
+	if ex == nil || ex["disk_short"] != true {
+		t.Fatalf("exit event %v", ex)
+	}
+	r = a.kran(runOpts{dir: repo}, "run", "-n", "b", "--", "sh", "-c", `echo "no space left on device" >&2; exit 3`)
+	if r.code != 3 || !strings.Contains(string(r.stderr), "kran: disk short: ") {
+		t.Fatalf("disk short on stderr: %s", r)
+	}
+}

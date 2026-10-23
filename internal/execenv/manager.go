@@ -540,6 +540,7 @@ func (m *manager) Start(ctx context.Context, req StartRequest) (Process, error) 
 	if spec.Runtime == proto.RuntimeNative && m.systemdRun != "" {
 		spec.Cgroup, spec.Scope = true, m.scopeName(id)
 	}
+	m.diskProbes(&spec, s, dir)
 	b, err := spec.marshal()
 	if err != nil {
 		return nil, err
@@ -557,6 +558,21 @@ func (m *manager) Start(ctx context.Context, req StartRequest) (Process, error) 
 	}
 	ok = true
 	return &process{js: m.track(id, dir, spec, req.OnPhase, s)}, nil
+}
+
+// diskProbes tells the supervisor where to look when the job fails: the
+// disks of its slot and job dir (its tmp), or the Docker disk through the
+// sync helper when the slot is in the volume.
+func (m *manager) diskProbes(spec *superSpec, s *slot, dir string) {
+	spec.DiskPaths = []string{dir}
+	if s == nil {
+		return
+	}
+	if s.loc == locVolume {
+		spec.DiskExec = []string{"exec", m.syncName(), "df", "-B1", "--output=avail,size", ctrSlots}
+		return
+	}
+	spec.DiskPaths = append(spec.DiskPaths, m.pool.hostPath(s))
 }
 
 // nativeSpec fills spec for the native runtime.

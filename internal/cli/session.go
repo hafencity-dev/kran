@@ -643,7 +643,7 @@ func (r *runner) localResult(ex proto.Exit) int {
 
 func (r *runner) onExit(ex proto.Exit) int {
 	r.event("exit", map[string]any{"code": ex.Code, "signal": ex.Signal, "state": ex.State, "reason": ex.Reason,
-		"node": ex.Node, "usage": ex.Usage, "fallback": ex.Fallback})
+		"node": ex.Node, "usage": ex.Usage, "fallback": ex.Fallback, "disk_short": ex.DiskShort})
 	code := ex.Code
 	if (ex.State == proto.JobInfraErr || ex.State == proto.JobLost) && code == 0 {
 		code = proto.ExitInfra

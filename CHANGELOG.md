@@ -2,6 +2,12 @@
 
 All notable changes to kran. Versions follow [semantic versioning](https://semver.org/).
 
+## 0.1.5
+
+### Disk shortage is reported
+
+- A remote job that fails while a disk it writes to is full (an ENOSPC message in its output, or less than 1 GiB free on its disk when it ends) keeps its exit code but says so: `kran: disk short: … rerun it` on stderr and `"disk_short": true` in the `exit` event and the job record, so a caller can rerun it instead of counting a red test.
+
 ## 0.1.4
 
 ### Disk space on busy nodes

@@ -38,4 +38,5 @@ The hook does nothing when no kran daemon socket exists, so an agent never sees 
 - `kran run --json-events` prints progress as one JSON object per line on stderr (`{"kran":"decision",...}`, `phase`, `started`, `notice`, `fallback`, `exit`).
 - `kran status --json` and `kran jobs --json` describe the mesh and history (`reason` says why a job ran where it did).
 - Exit `125` means kran failed after the command started; rerun with `kran run --local`.
+- A failure with a `kran: disk short: …` line (`"disk_short": true` in the `exit` event) happened while a disk on the node was full; the exit code is still the command's, and a rerun may well pass.
 - Set `KRAN_OWNER=claude:<session>` (or `CLAUDE_SESSION_ID`) so the scheduler can share capacity fairly between sessions.

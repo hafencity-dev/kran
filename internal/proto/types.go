@@ -385,6 +385,8 @@ type Job struct {
 	Runtime  RuntimeKind `json:"runtime,omitempty"`
 	Local    bool        `json:"local"`    // ran on origin
 	Fallback bool        `json:"fallback"` // ran locally after a remote failure
+	// DiskShort: it failed while a disk it wrote to was full (Exit.DiskShort).
+	DiskShort bool `json:"disk_short,omitempty"`
 	// Reason is why the job waits (queued), what it is doing when that
 	// says more (syncing, setup, reconnecting), and once it ended: why it
 	// failed (infra error, memory cap, canceled) or else why it ran where

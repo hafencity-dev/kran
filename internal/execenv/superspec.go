@@ -41,6 +41,11 @@ type superSpec struct {
 	Docker  *dockerStep `json:"docker,omitempty"`
 	// Slot is recorded so a restarted daemon knows which slot the job holds.
 	Slot proto.SlotRef `json:"slot"`
+	// DiskPaths are host paths on the disks the job writes to; DiskExec,
+	// docker CLI arguments printing `df -B1 --output=avail,size` of the
+	// Docker disk (volume layout). A failed job is checked against them.
+	DiskPaths []string `json:"disk_paths,omitempty"`
+	DiskExec  []string `json:"disk_exec,omitempty"`
 	// ToolchainNote explains a toolchain substitution, printed nowhere but
 	// kept for `kran doctor` and debugging.
 	ToolchainNote string `json:"toolchain_note,omitempty"`

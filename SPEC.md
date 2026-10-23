@@ -705,6 +705,14 @@ pass, anything that holds the memory is stopped).
   --mem 12G`); the estimate learns the peak, so the next run gets more.
   Linux local jobs: same via scope. macOS native: watchdog kills the job
   tree on cap breach.
+* Disk short: a remote job that fails (exit ≠ 0) while a disk it writes to
+  was full keeps its exit code, but the supervisor marks it
+  (`Exit.DiskShort`, `disk_short` in the job and the `exit` event) and the
+  reason says so (`kran: disk short: the Docker disk on devmac had 300 MiB
+  free when the job failed; rerun it`). Full means the job's output
+  contained an ENOSPC message (`No space left on device`, `ENOSPC`), or at
+  its end less than 1 GiB was free on its slot's or job dir's disk (the
+  Docker disk through the sync helper in the volume layout).
 
 ## 7. Public types (`internal/proto`)
 
