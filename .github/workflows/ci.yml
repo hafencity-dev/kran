@@ -35,8 +35,23 @@ jobs:
           GOOS=linux go vet ./...
           GOOS=darwin go vet ./...
       - name: test
-        # A hung test fails with a goroutine dump instead of the job timeout.
-        run: go test -race -p 4 -timeout 10m ./...
+        # A hung test fails with a goroutine dump instead of the job timeout;
+        # a hang outside a test binary (a leftover child holding its output)
+        # ends at the step timeout and the next step shows what was left.
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -race -p 4 -timeout 10m -v ./... 2>&1 | tee "$RUNNER_TEMP/test.log" | grep -E '^(ok|FAIL|---|panic|\?)'
+      - name: diagnose
+        if: failure() || cancelled()
+        shell: bash
+        run: |
+          echo "== last tests started"; grep -E '^=== (RUN|CONT)' "$RUNNER_TEMP/test.log" | tail -20 || true
+          echo "== packages done"; grep -E '^(ok|FAIL)' "$RUNNER_TEMP/test.log" | tail -40 || true
+          echo "== log tail"; tail -80 "$RUNNER_TEMP/test.log" || true
+          echo "== leftover test processes"
+          ps -axo pid,ppid,pgid,etime,rss,command | grep -E '\.test|helper|kran|sleep|sh -c|go-build' | grep -vE 'ps -axo|grep -E' || true
 
   e2e:
     # Real kran daemons and CLI (internal/e2e, build tag e2e); container
