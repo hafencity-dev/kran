@@ -17,6 +17,18 @@ func helloAs(t *testing.T, c *cluster, name, target string) transport.Session {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
+	// The target opens streams of its own (metrics.subscribe); yamux closes
+	// the whole session when one is never accepted (1.3 s with the test
+	// timings), which a slow runner hit mid-test.
+	go func() {
+		for {
+			st, err := s.Accept()
+			if err != nil {
+				return
+			}
+			st.Close()
+		}
+	}()
 	if err := peerOneShot(context.Background(), s, proto.PeerHello, "", proto.Hello{Node: proto.NodeInfo{Name: name}, Protocol: protocolString()}, nil); err != nil {
 		t.Fatalf("hello as %s: %v", name, err)
 	}
