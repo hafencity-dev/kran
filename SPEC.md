@@ -449,7 +449,31 @@ Reasons name a slowdown of 1.2× or more: "devmac (Linux container): 15.8
 CPUs free, est. 1m3s vs 2m32s here (slowed ~2.5x by memory pressure 40%,
 full swap)".
 Tie-break: origin first, then lowest load. Jobs with estimated duration under
-5 s or sync cost greater than estimated savings stay local.
+5 s or sync cost greater than estimated savings stay local; another node
+wins only when it finishes at least 5% (and 1 s) sooner.
+
+**Relieving a busy origin.** The score asks only which node finishes this
+job first, so a busy origin keeps jobs another node runs about as fast, and
+everything else on the origin (sessions, servers, commands started without
+kran) pays. While the origin is busy, a *check* of at least 30 s (estimated)
+may therefore go to a node where it is expected to take up to 25% longer,
+scaled by how busy the origin is: busy = max(stall / 0.25, (CPUs in use −
+60%) / 30%), clamped to 0–1, from the slowdown above and the origin's CPUs
+in use by kran jobs and other load. A check is a command whose result is
+its output and exit code (`Estimate.ResultOnly`): `go test`/`vet`,
+`go build ./...`, vitest, jest, pytest, `tsc --noEmit`, eslint, cargo
+test/check/clippy, test and type-check package scripts, with `cd`, `grep`,
+`tail`, `pnpm install --frozen-lockfile` and the like around them. A
+redirection into a file, a writing flag (`--fix`, `--write`, `-u`,
+`-update`, `-o`, `-c`, coverage and profile outputs) or any other command
+makes it not a check: files a remote run writes stay there, so only checks
+may move for the origin's sake. The job takes only spare room: after it,
+the node keeps half of its CPUs and memory (of its Linux VM for a
+container job) free for jobs that must run there, such as a pinned or
+`--remote` job. Never for `--local`, `--node`, origin-only or GPU jobs. The
+reason says so: "devmac (Linux container): 12 CPUs free, est. 5m50s vs 5m
+here; gx10 is busy (I/O pressure 46%): relieving it is worth up to 12%
+longer".
 
 A job's record keeps the placement rationale in `place_reason`. Its
 `reason` is the wait reason while queued, may name the transient phase

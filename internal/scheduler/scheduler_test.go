@@ -966,3 +966,85 @@ func TestRestoreCountsRunningJobs(t *testing.T) {
 		t.Fatalf("running %v after release", snap.Running)
 	}
 }
+
+// TestRelieveBusyOrigin: a check that devmac runs a little slower stays on
+// a calm origin and goes to devmac while the origin is busy (CPUs taken by
+// other load, or I/O contention), within a slowdown that grows with how
+// busy it is; it never moves when its files matter, when it is short or
+// pinned, when devmac would be much slower, or when it would eat devmac's
+// spare room.
+func TestRelieveBusyOrigin(t *testing.T) {
+	slowMac := func(now time.Time) proto.NodeState {
+		d := devmac(now)
+		d.Info.SingleCoreScore = 900 // ~11% slower than gx10 per job
+		return d
+	}
+	check := func(id string, dur float64, opts ...jobOpt) *proto.Job {
+		j := newJob(id, id, 2, 2*gib, dur, opts...)
+		j.Estimate.ResultOnly = true
+		return j
+	}
+	busyCPU := func(n proto.NodeState) proto.NodeState { n.Metrics.CPUBusy = 0.85; return n } // other load: 17 of 20 cores
+	busyIO := func(n proto.NodeState) proto.NodeState { n.Metrics.IOPressure = 20; return n }
+	run := func(t *testing.T, g proto.NodeState, d proto.NodeState, j *proto.Job) Placement {
+		t.Helper()
+		s := newTestSched(t, &fakeClock{t0}, self(g), d)
+		return placed(t, s.Submit(j))
+	}
+	for _, tc := range []struct {
+		name   string
+		g      proto.NodeState
+		d      proto.NodeState
+		job    *proto.Job
+		want   string
+		reason string
+	}{
+		{"calm origin keeps it", self(gx10(t0)), slowMac(t0), check("a", 300), "gx10", ""},
+		{"busy CPUs relieve", busyCPU(gx10(t0)), slowMac(t0), check("b", 300), "devmac", "gx10 is busy (83% of its CPUs in use): relieving it is worth up to"},
+		{"I/O pressure relieves", busyIO(gx10(t0)), slowMac(t0), check("c", 300), "devmac", "gx10 is busy (I/O pressure 20%)"},
+		{"files matter", busyCPU(gx10(t0)), slowMac(t0), func() *proto.Job { j := check("d", 300); j.Estimate.ResultOnly = false; return j }(), "gx10", ""},
+		{"too short", busyCPU(gx10(t0)), slowMac(t0), check("e", 20), "gx10", ""},
+		{"local requested", busyCPU(gx10(t0)), slowMac(t0), check("f", 300, withReq(func(r *proto.Requirements) { r.Prefer = proto.PreferLocal })), "gx10", ""},
+		{"origin only", busyCPU(gx10(t0)), slowMac(t0), check("g", 300, withReq(func(r *proto.Requirements) { r.OriginOnly = true })), "gx10", ""},
+		{"devmac much slower", busyCPU(gx10(t0)), func() proto.NodeState { d := devmac(t0); d.Info.SingleCoreScore = 600; return d }(), check("h", 300), "gx10", ""},
+		{"no spare room on devmac", busyCPU(gx10(t0)), slowMac(t0), func() *proto.Job { j := check("i", 300); j.Estimate.Mem = 20 * gib; return j }(), "gx10", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pl := run(t, tc.g, tc.d, tc.job)
+			if pl.Node != tc.want || !strings.Contains(pl.Reason, tc.reason) {
+				t.Fatalf("placed on %s: %s", pl.Node, pl.Reason)
+			}
+			if tc.want == "gx10" && strings.Contains(pl.Reason, "relieving") {
+				t.Fatalf("reason %q", pl.Reason)
+			}
+		})
+	}
+}
+
+// TestRelieveLeavesRoomForPinnedJobs: relieving checks fill at most half of
+// devmac's Linux VM; a pinned job like the land gate's walls run (12 CPUs,
+// 10 GiB) still starts at once.
+func TestRelieveLeavesRoomForPinnedJobs(t *testing.T) {
+	g := self(gx10(t0))
+	g.Metrics.CPUBusy = 0.85
+	d := devmac(t0)
+	d.Info.SingleCoreScore = 900
+	s := newTestSched(t, &fakeClock{t0}, g, d)
+	moved := 0
+	for i := 0; i < 6; i++ {
+		j := newJob(fmt.Sprintf("c%d", i), fmt.Sprintf("o%d", i), 2, 2*gib, 300)
+		j.Estimate.ResultOnly = true
+		pl := placed(t, s.Submit(j))
+		if !strings.Contains(pl.Reason, "relieving") {
+			break // the first one kept here: devmac's spare room is used up
+		}
+		moved++
+	}
+	if moved == 0 || moved > 4 {
+		t.Fatalf("%d checks moved to devmac to relieve gx10, want 1..4 (half of a 16-CPU VM)", moved)
+	}
+	walls := newJob("walls", "gate", 12, 10*gib, 300, withReq(func(r *proto.Requirements) { r.Node = "devmac"; r.Prefer = proto.PreferRemote }))
+	if pl := placed(t, s.Submit(walls)); pl.Node != "devmac" {
+		t.Fatalf("walls placed %+v", pl)
+	}
+}

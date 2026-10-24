@@ -2,6 +2,12 @@
 
 All notable changes to kran. Versions follow [semantic versioning](https://semver.org/).
 
+## 0.1.10
+
+### Placement
+
+- A busy origin is relieved: while it is under contention (memory, I/O, CPU pressure) or most of its CPUs are taken, a check of 30 s or more (tests, vet, type checks, lints: commands whose result is their output and exit code) goes to another node where it is expected to take up to 25% longer, scaled by how busy the origin is. Commands that may write files the caller needs (builds with an output, `--fix`, snapshot updates, coverage files, redirections into files) never move for this. A relieving job takes only spare room: the node keeps half of its CPUs and memory free for jobs that must run there, such as a land gate's pinned runs. The reason says so (`gx10 is busy (I/O pressure 46%): relieving it is worth up to 12% longer`).
+
 ## 0.1.9
 
 ### Fixes

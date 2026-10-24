@@ -374,6 +374,10 @@ type Estimate struct {
 	// RepoSamples counts the runs of the job's family in its repo that a
 	// "repo:" estimate (or duration) is built from.
 	RepoSamples int `json:"repo_samples,omitempty"`
+	// ResultOnly: the command is a check (tests, vet, type check, lint)
+	// whose result is its output and exit code; it writes no file the
+	// caller would need afterwards, so where it runs costs nothing but time.
+	ResultOnly bool `json:"result_only,omitempty"`
 }
 
 type Usage struct {

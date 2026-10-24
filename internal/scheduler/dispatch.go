@@ -362,7 +362,13 @@ func (s *sched) tryPlace(j *sjob, views map[string]*nodeView, names []string, no
 		}
 	}
 
-	s.place(j, best, now, s.placeReason(j, best, selfCand, cands, fits, whys))
+	reason := s.placeReason(j, best, selfCand, cands, fits, whys)
+	if best.v.self {
+		if c, note := s.relieveOrigin(j, selfCand, fits); c != nil {
+			best, reason = c, s.placeReason(j, c, selfCand, cands, fits, whys)+note
+		}
+	}
+	s.place(j, best, now, reason)
 	return placedJob
 }
 

@@ -229,6 +229,7 @@ func (e *estimator) Estimate(spec *proto.JobSpec, fp string, nodeCPUs int) proto
 	if est.Mem < minMem {
 		est.Mem = minMem
 	}
+	est.ResultOnly = resultOnly(spec)
 	return est
 }
 
