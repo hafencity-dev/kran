@@ -89,6 +89,12 @@ func (d *Daemon) drive(ctx context.Context, e *jobEntry, mode driveMode) {
 	case driveRestoreRemote:
 		job := e.snapshot()
 		p := scheduler.Placement{JobID: e.id, Node: job.Node, Runtime: job.Runtime, Alloc: job.Alloc}
+		// The new scheduler does not know it: its room there stays taken
+		// until it ends (finish releases it).
+		d.deps.Sched.Restore(&job, p)
+		e.mu.Lock()
+		e.placed = true
+		e.mu.Unlock()
 		if job.State != proto.JobRunning {
 			// The command had not started (setup on the target). Its kran
 			// run reattaches (SPEC §6.1); until it does, no heartbeat goes
@@ -501,13 +507,12 @@ func (d *Daemon) finishCanceledLocal(e *jobEntry) {
 // restart; without it the result is unknown.
 func (d *Daemon) restoreLocal(ctx context.Context, e *jobEntry) {
 	job := e.snapshot()
-	// The new scheduler does not know this job: account for it as an
-	// admission on this node until it ends.
-	if _, err := d.deps.Sched.Admit(&job, proto.RuntimeNative); err == nil {
-		e.mu.Lock()
-		e.placed = true
-		e.mu.Unlock()
-	}
+	// The new scheduler does not know this job: account for it on this
+	// node until it ends, whether or not it still fits.
+	d.deps.Sched.Restore(&job, scheduler.Placement{JobID: e.id, Node: d.self, Runtime: proto.RuntimeNative, Alloc: job.Alloc})
+	e.mu.Lock()
+	e.placed = true
+	e.mu.Unlock()
 	if !d.waitForCLI(ctx, e) {
 		if ctx.Err() != nil {
 			return

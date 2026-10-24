@@ -65,6 +65,7 @@ type runner struct {
 	gen      int
 	frames   chan frameMsg
 	jobID    string
+	queued   bool // jobID is known from a queued notice; no decision yet
 	decision *proto.Decision
 	remote   bool // a remote placement is active
 	started  bool // the user's command has started (remote running phase, or local start)
@@ -536,6 +537,11 @@ func (r *runner) onNotice(n proto.Notice) {
 	r.event("notice", map[string]any{"kind": n.Kind, "message": n.Message, "job_id": n.JobID})
 	switch n.Kind {
 	case "queued":
+		if r.jobID == "" && n.JobID != "" {
+			// A daemon restart keeps the queued job and waits for this
+			// kran run to reattach (SPEC §6.1): it needs the ID for that.
+			r.jobID, r.queued = n.JobID, true
+		}
 		r.pendNote(n.Message)
 	case "placed":
 		// The decision frame announces remote placement.
@@ -566,7 +572,7 @@ func (r *runner) onPhase(p proto.Phase) {
 
 func (r *runner) onDecision(ctx context.Context, d proto.Decision) (int, bool) {
 	r.clearNote()
-	r.jobID = d.JobID
+	r.jobID, r.queued = d.JobID, false
 	r.event("decision", map[string]any{"job_id": d.JobID, "mode": d.Mode, "node": d.Node, "runtime": d.Runtime,
 		"reason": d.Reason, "estimate": d.Estimate})
 	if d.Mode == "remote" {
@@ -747,6 +753,11 @@ func (r *runner) onReconnect(ctx context.Context, rr reconnectResult) (int, bool
 		}
 		if r.local != nil {
 			return 0, false // keep running locally; the exit code is still ours
+		}
+		if r.queued {
+			// Never placed: a daemon that comes back cancels the job unless
+			// this kran run reattaches, so running it here runs it once.
+			return r.noSession(ctx, "lost the connection to the daemon while the job was queued — running locally", rr.err), true
 		}
 		if r.remote && !r.started {
 			return r.fail("lost the connection to the kran daemon; " + r.mayStillStart())

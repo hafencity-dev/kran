@@ -993,3 +993,65 @@ func TestLocalJobGetsEnvSet(t *testing.T) {
 		}
 	}
 }
+
+// TestQueuedJobReattachesAfterDaemonRestart: a daemon restart keeps a
+// queued job and waits for its kran run; the queued notice gave the ID, so
+// kran run reattaches instead of running the command itself (which ran it
+// next to the daemon's accounting, all queued jobs at once). A daemon that
+// does not come back still gets the command run here, once.
+func TestQueuedJobReattachesAfterDaemonRestart(t *testing.T) {
+	t.Run("daemon comes back", func(t *testing.T) {
+		s1, s2 := newFakeSession(), newFakeSession()
+		cl := &fakeClient{sessions: []*fakeSession{s1}}
+		mark := filepath.Join(t.TempDir(), "ran")
+		h := newHarness(t, cl, "sh", "-c", "echo x >> "+mark+"; exit 5")
+		go func() {
+			waitFor(t, func() bool { return s1.count(proto.FrameSubmit) == 1 })
+			s1.push(proto.FrameNotice, proto.Notice{Kind: "queued", Message: "waiting: gx10 has 1 CPU free", JobID: "jq"})
+			time.Sleep(20 * time.Millisecond)
+			cl.mu.Lock()
+			cl.sessions = append(cl.sessions, s2)
+			cl.mu.Unlock()
+			s1.drop()
+			waitFor(t, func() bool { return s2.count(proto.FrameReattach) == 1 })
+			s2.push(proto.FrameDecision, proto.Decision{JobID: "jq", Mode: "local", Envelope: &proto.LocalEnvelope{}})
+			waitFor(t, func() bool { return s2.count(proto.FrameExit) == 1 })
+			s2.tryPush(proto.FrameExit, proto.Exit{JobID: "jq", Code: 5, State: proto.JobFailed})
+		}()
+		if code := h.run(t); code != 5 {
+			t.Fatalf("code %d, stderr %q", code, h.stderr.String())
+		}
+		f, _ := s2.find(proto.FrameReattach)
+		var ra proto.Reattach
+		json.Unmarshal(f.payload, &ra)
+		if ra.JobID != "jq" {
+			t.Fatalf("reattach %+v", ra)
+		}
+		if b, _ := os.ReadFile(mark); string(b) != "x\n" {
+			t.Fatalf("command ran %q", b)
+		}
+		if strings.Contains(h.stderr.String(), "running locally") {
+			t.Fatalf("ran standalone: %q", h.stderr.String())
+		}
+	})
+	t.Run("daemon stays away", func(t *testing.T) {
+		s1 := newFakeSession()
+		mark := filepath.Join(t.TempDir(), "ran")
+		h := newHarness(t, &fakeClient{sessions: []*fakeSession{s1}}, "sh", "-c", "echo x >> "+mark+"; exit 6")
+		go func() {
+			waitFor(t, func() bool { return s1.count(proto.FrameSubmit) == 1 })
+			s1.push(proto.FrameNotice, proto.Notice{Kind: "queued", Message: "waiting", JobID: "jq"})
+			time.Sleep(20 * time.Millisecond)
+			s1.drop()
+		}()
+		if code := h.run(t); code != 6 {
+			t.Fatalf("code %d, stderr %q", code, h.stderr.String())
+		}
+		if !strings.Contains(h.stderr.String(), "while the job was queued — running locally") {
+			t.Fatalf("stderr %q", h.stderr.String())
+		}
+		if b, _ := os.ReadFile(mark); string(b) != "x\n" {
+			t.Fatalf("command ran %q", b)
+		}
+	})
+}

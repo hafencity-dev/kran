@@ -148,9 +148,7 @@ func (t *targetSide) restore() {
 			started: true, phaseCh: make(chan struct{}), reservedAt: t.d.now()}
 		t.jobs[id] = j
 		// Account for it again; it runs whether or not it still fits.
-		if _, err := t.d.deps.Sched.Admit(j.asJob(), j.Runtime); err != nil {
-			t.d.logf("target: job %s is not counted by the scheduler after the restart: %v", id, err)
-		}
+		t.d.deps.Sched.Restore(j.asJob(), scheduler.Placement{JobID: id, Node: t.d.self, Runtime: j.Runtime, Alloc: j.Alloc})
 		t.d.logf("target: job %s from %s still running; waiting for its origin to reattach", id, r.Origin)
 		t.startWatchLocked(j)
 	}

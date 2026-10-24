@@ -359,6 +359,20 @@ func TestE2EReattachAfterOriginRestart(t *testing.T) {
 	b.waitIdle(30 * time.Second)
 }
 
+// runningOn is how many jobs n's daemon counts on node.
+func runningOn(n *knode, node string) int {
+	st, err := n.state()
+	if err != nil {
+		return -1
+	}
+	for _, ns := range st.Nodes {
+		if ns.Info.Name == node {
+			return ns.Running
+		}
+	}
+	return -1
+}
+
 // TestE2ETargetRestartMidRun: the target daemon dies mid-run; the
 // supervisor keeps the job alive and the origin reattaches.
 func TestE2ETargetRestartMidRun(t *testing.T) {
@@ -377,6 +391,10 @@ func TestE2ETargetRestartMidRun(t *testing.T) {
 		kill.fn()
 		time.Sleep(time.Second)
 		b.start()
+		// The restarted target counts the job it kept running.
+		if !poll(20*time.Second, func() bool { return runningOn(b, "b") == 1 || p.exited() }) || p.exited() {
+			t.Errorf("%s: after the restart b counts %d jobs of its own, want 1", kill.name, runningOn(b, "b"))
+		}
 		r := p.wait()
 		if r.code != 0 || string(r.stdout) != want {
 			t.Errorf("%s restart of the target: %s", kill.name, r)
@@ -449,8 +467,8 @@ func TestE2ELongQueueStaysQueued(t *testing.T) {
 }
 
 // TestE2EOriginRestartBeforeStart: the origin daemon restarts while a job
-// waits; its CLI runs the job locally, so the restarted daemon must not
-// run it a second time.
+// waits; its CLI reattaches (the queued notice gave it the job ID) and the
+// job runs once, where it was pinned, not next to the daemon's accounting.
 func TestE2EOriginRestartBeforeStart(t *testing.T) {
 	c := newCluster(t, []string{"a", "b"}, map[string]nodeOpts{"b": {MaxJobs: 1}})
 	a, b := c.node("a"), c.node("b")
@@ -461,8 +479,18 @@ func TestE2EOriginRestartBeforeStart(t *testing.T) {
 	if !hold.waitStdout("ready", 60*time.Second) {
 		t.Fatal(hold.wait())
 	}
-	waiting := a.startKran(runOpts{dir: repo, env: env}, "run", "-n", "b", "--", "sh", "-c", `echo "${KRAN_NODE:-here}" >> "$MARKS"`)
+	waiting := a.startKran(runOpts{dir: repo, env: env}, "run", "--json-events", "-n", "b", "--", "sh", "-c", `echo "${KRAN_NODE:-here}" >> "$MARKS"`)
 	poll(10*time.Second, func() bool { st, _ := a.state(); return st != nil && len(st.Queue) == 1 })
+	if !poll(10*time.Second, func() bool {
+		for _, ev := range parseEvents(waiting.stderr.Bytes()) {
+			if id, _ := ev["job_id"].(string); ev["kran"] == "notice" && ev["kind"] == "queued" && id != "" {
+				return true
+			}
+		}
+		return false
+	}) {
+		t.Fatalf("no queued notice with the job ID: %s", waiting.wait())
+	}
 	a.restart()
 	if r := waiting.wait(); r.code != 0 {
 		t.Errorf("waiting job: %s", r)
@@ -472,8 +500,11 @@ func TestE2EOriginRestartBeforeStart(t *testing.T) {
 	}
 	time.Sleep(25 * time.Second) // CLI reattach window + placement
 	data, _ := os.ReadFile(marks)
-	if got := strings.Fields(string(data)); strings.Join(got, ",") != "hold,here" {
-		t.Errorf("runs %v, want [hold here]: the waiting job must run exactly once", got)
+	if got := strings.Fields(string(data)); strings.Join(got, ",") != "hold,b" {
+		t.Errorf("runs %v, want [hold b]: the waiting job must run exactly once, on b", got)
+	}
+	if event(waiting.wait().events(), "fallback") != nil {
+		t.Errorf("waiting job ran locally: %s", waiting.wait())
 	}
 	a.waitIdle(30 * time.Second)
 	b.waitIdle(30 * time.Second)

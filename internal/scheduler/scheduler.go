@@ -50,6 +50,10 @@ type Scheduler interface {
 	// reserves resources on this node for a job placed here by another
 	// origin, or returns an *AdmitError saying why not. Release frees it.
 	Admit(job *proto.Job, rt proto.RuntimeKind) (Placement, error)
+	// Restore accounts again for a job that kept running across a daemon
+	// restart, here or on a peer: it holds pl.Alloc on pl.Node, fitting or
+	// not, until Release.
+	Restore(job *proto.Job, pl Placement)
 }
 
 type Ticket interface {

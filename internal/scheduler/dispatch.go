@@ -494,7 +494,7 @@ func (s *sched) place(j *sjob, c *cand, now time.Time, reason string) {
 		Fallback: fallback,
 	}
 	a := &allocation{
-		job: j.id, node: c.v.name, rt: c.rt.rt.Kind, vm: c.rt.vm, res: res, at: now,
+		job: j.id, node: c.v.name, rt: c.rt.rt.Kind, vm: c.rt.vm, vmKnown: true, res: res, at: now,
 		end:  now.Add(time.Duration((c.overhead + c.run) * float64(time.Second))),
 		repo: j.repo, pl: pl,
 	}

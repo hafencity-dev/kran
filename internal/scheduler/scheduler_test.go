@@ -939,3 +939,30 @@ func TestSnapshotAndRemoveNode(t *testing.T) {
 	}
 	s.Release("r", nil) // allocation on a removed node: no panic
 }
+
+// TestRestoreCountsRunningJobs: a job that kept running across a daemon
+// restart holds its room again, even when it no longer fits and its node
+// is not known yet (a target restores before its first self update).
+func TestRestoreCountsRunningJobs(t *testing.T) {
+	clk := &fakeClock{t0}
+	s := newTestSched(t, clk)
+	s.Restore(newJob("r1", "a", 12, 10*gib, 300), Placement{Node: "devmac", Runtime: proto.RuntimeContainer, Alloc: proto.Resources{CPUs: 12, Mem: 10 * gib}})
+	s.UpdateNode(self(gx10(t0)))
+	s.UpdateNode(devmac(t0))
+	s.Restore(newJob("r2", "a", 30, 200*gib, 300), Placement{Node: "gx10", Runtime: proto.RuntimeNative, Alloc: proto.Resources{CPUs: 30, Mem: 200 * gib}})
+	snap := s.Snapshot()
+	if snap.Running["devmac"] != 1 || snap.Allocated["devmac"].CPUs != 12 || snap.Running["gx10"] != 1 || snap.Allocated["gx10"].Mem != 200*gib {
+		t.Fatalf("running %v allocated %v", snap.Running, snap.Allocated)
+	}
+	// devmac's Linux VM (16 CPUs) has 4 left: a 6-CPU job waits.
+	tk := s.Submit(newJob("j", "b", 6, 2*gib, 600, withReq(func(r *proto.Requirements) { r.Node = "devmac" })))
+	pending(t, tk)
+	s.Release("r1", nil)
+	if pl := placed(t, tk); pl.Node != "devmac" {
+		t.Fatalf("placed %+v", pl)
+	}
+	s.Release("r2", nil)
+	if snap := s.Snapshot(); snap.Running["gx10"] != 0 {
+		t.Fatalf("running %v after release", snap.Running)
+	}
+}

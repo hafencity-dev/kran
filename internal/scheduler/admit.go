@@ -76,7 +76,7 @@ func (s *sched) Admit(job *proto.Job, kind proto.RuntimeKind) (Placement, error)
 	}
 	pl := Placement{JobID: id, Node: self, Runtime: kind, Alloc: res, Reason: reason}
 	a := &allocation{
-		job: id, node: self, rt: kind, vm: rv.vm, res: res, at: now,
+		job: id, node: self, rt: kind, vm: rv.vm, vmKnown: true, res: res, at: now,
 		end:     now.Add(time.Duration(est.Duration * float64(time.Second))),
 		foreign: true, repo: job.Spec.Workspace.RepoID, pl: pl,
 	}

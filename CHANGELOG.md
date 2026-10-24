@@ -2,6 +2,13 @@
 
 All notable changes to kran. Versions follow [semantic versioning](https://semver.org/).
 
+## 0.1.9
+
+### Fixes
+
+- A daemon restart (for example `kran upgrade`) no longer makes queued jobs run on their own: `kran run` reattaches to a queued job (its ID comes with the first "waiting" notice) instead of running the command next to the daemon's accounting, so an upgrade on a busy machine does not start every queued job at once.
+- Jobs that keep running across a daemon restart are counted again on both sides: the restarted node showed them as free room ("0 running") until they ended and could take more jobs than it has room for.
+
 ## 0.1.8
 
 ### Fixes

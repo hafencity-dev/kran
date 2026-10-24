@@ -77,7 +77,8 @@ type allocation struct {
 	end     time.Time // expected end, for wait estimates
 	live    *proto.Resources
 	liveAt  time.Time
-	foreign bool // admitted for another origin (Admit)
+	foreign bool // admitted for another origin (Admit), or restored (Restore)
+	vmKnown bool // vm was derived from the node's runtimes (false: restored before they were known)
 	repo    string
 	pl      Placement
 }
@@ -488,6 +489,11 @@ func (s *sched) UpdateNode(n proto.NodeState) {
 		s.nodes[name] = e
 	}
 	e.st = n
+	for _, a := range e.allocs {
+		if !a.vmKnown {
+			a.vm, a.vmKnown = runsInVM(n.Info, a.rt)
+		}
+	}
 	s.dispatch(s.opts.Now())
 }
 

@@ -286,6 +286,10 @@ Flags: `-l/--local`, `-r/--remote`, `-n/--node NAME`, `--gpu`, `--cpus N`,
      graceful stop), and runs a remote job itself only on the daemon's
      word: a `local` decision or a `FrameError` with `run_locally`. If the
      daemon does not come back it exits 125 (the job may still start there).
+     A queued job's `kran run` knows the job ID from its first `queued`
+     notice and reattaches too (the restarted daemon keeps the job queued
+     for it); only a daemon that does not come back, or a job queued too
+     briefly for a notice, has it run the command itself, once.
    * A restarted origin sends no heartbeat to a job still in setup until
      its `kran run` reattached (the supervisor starts the command only
      after a heartbeat newer than the setup); without one it cancels the
@@ -314,6 +318,9 @@ Flags: `-l/--local`, `-r/--remote`, `-n/--node NAME`, `--gpu`, `--cpus N`,
   daemon re-indexes `jobs/*/` and the origin reattaches (`reattach{job,
   offset}`) within the lease window and output continues from the offset.
 * The origin daemon persists active remote jobs; on restart it reattaches.
+  Both daemons count the room of jobs that kept running across a restart
+  again (`Scheduler.Restore`, unconditional: they run whether or not they
+  still fit), so neither node is overbooked until they end.
   The CLI, if its daemon connection drops after the decision, retries the
   connection for 20 s (as long as a restarted daemon waits for it) and
   resumes via `reattach`; otherwise it exits 125 (§6.1 step 8).

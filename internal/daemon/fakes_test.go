@@ -177,6 +177,17 @@ func (s *fakeSched) Snapshot() scheduler.Snapshot {
 	return snap
 }
 
+// Restore records the allocation without checks.
+func (s *fakeSched) Restore(job *proto.Job, pl scheduler.Placement) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.foreign[job.Spec.ID]; ok {
+		return
+	}
+	pl.JobID = job.Spec.ID
+	s.foreign[pl.JobID] = pl
+}
+
 // Admit: capacity of the self node minus every allocation there.
 func (s *fakeSched) Admit(job *proto.Job, rt proto.RuntimeKind) (scheduler.Placement, error) {
 	s.mu.Lock()
