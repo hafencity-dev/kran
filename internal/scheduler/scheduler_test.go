@@ -135,6 +135,28 @@ func TestPlacedAfterWaitLogsReason(t *testing.T) {
 	}
 }
 
+func TestPlacedHereSaysWhyNotElsewhere(t *testing.T) {
+	clk := &fakeClock{t0}
+	s := newTestSched(t, clk, self(gx10(t0)), devmac(t0))
+	// More memory than devmac's Linux VM holds.
+	if r := placed(t, s.Submit(newJob("big", "a", 4, 40*gib, 600))).Reason; !strings.Contains(r, "; devmac (Linux container) cannot hold 40.0 GiB") {
+		t.Errorf("oversize reason %q", r)
+	}
+	// devmac's VM busy: say what it has free.
+	for i := 0; i < 5; i++ {
+		placed(t, s.Submit(newJob(fmt.Sprintf("f%d", i), "b", 1, 6*gib, 600, withReq(func(r *proto.Requirements) { r.Node = "devmac" }))))
+	}
+	if r := placed(t, s.Submit(newJob("j", "c", 4, 4*gib, 600))).Reason; !strings.Contains(r, "; needs 4.0 GiB, devmac's Linux VM has") {
+		t.Errorf("busy reason %q", r)
+	}
+	d := devmac(clk.t)
+	d.Status = proto.NodeDraining
+	s.UpdateNode(d)
+	if r := placed(t, s.Submit(newJob("k", "d", 4, 4*gib, 600))).Reason; !strings.HasSuffix(r, "; devmac: draining") {
+		t.Errorf("draining reason %q", r)
+	}
+}
+
 func TestCPUOvercommitFactor(t *testing.T) {
 	clk := &fakeClock{t0}
 	s := newTestSched(t, clk, self(gx10(t0)))

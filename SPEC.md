@@ -106,6 +106,11 @@ targets linux/darwin × arm64/amd64.
   the link itself nor sync and setup in flight (each prestart RPC is
   bounded by its own 2 min timeout). `KRAN_KEEPALIVE=<interval>,<dead
   after>,<max dead after>` overrides the timings.
+* **Restarted peer**: every hello carries the daemon's start time. A
+  session from a peer whose run started later than the run behind the
+  other direction's session closes that older session at once: after a
+  reboot that took the network down before the daemon, it would otherwise
+  look alive until the keepalive gives up.
 * **Reconnects**: exponential backoff with jitter from 1 s, capped at
   20 s; it starts over when the peer dials in or this machine's
   addresses change. A job waiting for the peer may retry sooner, but never

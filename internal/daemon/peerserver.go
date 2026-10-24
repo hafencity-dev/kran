@@ -179,7 +179,7 @@ func (d *Daemon) handleHello(ps *peerSession, pc *peerConn, req rawPeerRequest) 
 	}
 	if first && ps.inbound {
 		d.logf("peer: %s connected", name)
-		d.peers.attachInbound(name, ps.s)
+		d.peers.attachInbound(name, ps.s, h.Node.StartedAt)
 	}
 }
 

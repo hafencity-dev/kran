@@ -20,7 +20,7 @@ Run `kran doctor` first. Add `--fix` to repair permissions, a missing key, and t
 
 ## Jobs
 
-- Everything ran locally: that is often right. `kran jobs --why` says why each job ran where it did ("too short to send elsewhere", "no other node has room", "not inside a project"). `kran status` shows why a machine was skipped (offline, draining, different OS, missing toolchain, disk floor). Waiting jobs print the reason after two seconds.
+- Everything ran locally: that is often right. `kran jobs --why` says why each job ran where it did ("too short to send elsewhere", "devmac's Linux VM has 2 CPUs free", "not inside a project"). `kran status` shows why a machine was skipped (offline, draining, different OS, missing toolchain, disk floor). Waiting jobs print the reason after two seconds.
 - Jobs outside a git repository, in your home directory or in `/tmp` always stay here; commands that mention `localhost` do too.
 - A job hit its memory cap: the message names the cap and the flag, e.g. `rerun with --mem 12G`. kran learns the peak for next time.
 - Files created by a remote job do not appear locally. Use `kran run --local` for commands whose output files you need here.

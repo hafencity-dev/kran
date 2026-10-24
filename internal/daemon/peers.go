@@ -38,6 +38,7 @@ type peer struct {
 
 	mu            sync.Mutex
 	out, in       transport.Session
+	outRun, inRun time.Time // the peer daemon's start time each session's hello gave
 	subscribed    transport.Session
 	st            peerStatus
 	hasStatus     bool
@@ -159,13 +160,16 @@ func (m *peerManager) reload() {
 		_, still := want[p.cfg.Name]
 		// A changed entry keeps the connection the peer opened to us; only
 		// an unlinked peer loses it.
+		p.mu.Lock()
+		run := p.inRun
+		p.mu.Unlock()
 		in := p.stop(!still)
 		if !still {
 			m.d.deps.Sched.RemoveNode(p.cfg.Name)
 			m.d.history.remove(p.cfg.Name)
 			m.d.logf("peers: %s removed", p.cfg.Name)
 		} else if in != nil {
-			defer m.attachInbound(p.cfg.Name, in)
+			defer m.attachInbound(p.cfg.Name, in, run)
 		}
 		changed = true
 	}
@@ -282,8 +286,9 @@ func (m *peerManager) waitSession(ctx context.Context, name string) (transport.S
 	}
 }
 
-// attachInbound registers a session a peer opened to us (after its hello).
-func (m *peerManager) attachInbound(name string, s transport.Session) {
+// attachInbound registers a session a peer opened to us (after its hello);
+// run is the peer daemon's start time from that hello.
+func (m *peerManager) attachInbound(name string, s transport.Session, run time.Time) {
 	p := m.get(name)
 	if p == nil {
 		return
@@ -292,10 +297,15 @@ func (m *peerManager) attachInbound(name string, s transport.Session) {
 	if p.in != nil && p.in != s {
 		p.in.Close()
 	}
-	p.in = s
+	p.in, p.inRun = s, run
 	p.notifyLocked()
-	outDown := p.out == nil
+	stale := p.staleLocked(p.out, p.outRun, run)
+	outDown := p.out == nil || stale != nil
 	p.mu.Unlock()
+	if stale != nil {
+		m.d.logf("peers: %s restarted; closing the connection to its previous run", name)
+		stale.Close()
+	}
 	if outDown {
 		// The peer reached us, so it is up: try our own direction now
 		// instead of waiting out a long backoff.
@@ -416,6 +426,17 @@ func (p *peer) stop(closeInbound bool) transport.Session {
 		in = nil
 	}
 	return in
+}
+
+// staleLocked returns s when it belongs to an earlier run of the peer
+// daemon than the run a newer session reported: after a reboot that cut the
+// network first, the old session would otherwise look alive until its
+// keepalive gives up (most of a minute).
+func (p *peer) staleLocked(s transport.Session, sRun, run time.Time) transport.Session {
+	if s == nil || sRun.IsZero() || !run.After(sRun) {
+		return nil
+	}
+	return s
 }
 
 func (p *peer) notifyLocked() {
@@ -597,11 +618,16 @@ func (p *peer) connectLoop() {
 		}
 		untrack := d.trackSession(sess)
 		p.mu.Lock()
-		p.out = sess
+		p.out, p.outRun = sess, hello.Node.StartedAt
 		p.lastErr = ""
 		p.incompatible = ""
 		p.notifyLocked()
+		stale := p.staleLocked(p.in, p.inRun, hello.Node.StartedAt)
 		p.mu.Unlock()
+		if stale != nil {
+			d.logf("peers: %s restarted; closing the connection from its previous run", p.cfg.Name)
+			stale.Close()
+		}
 		after := ""
 		if failures > 1 {
 			after = fmt.Sprintf(" after %d failed attempts over %s", failures, time.Since(failingSince).Round(time.Second))

@@ -199,3 +199,91 @@ func TestPeerSocketProbeIsQuiet(t *testing.T) {
 		t.Fatalf("probe connections logged:\n%s", a.logs.all())
 	}
 }
+
+// halfOpen hides the far end going away, as a reboot that takes the network
+// down before the daemon does: the session ends only when a closes it.
+type halfOpen struct {
+	transport.Session
+	once sync.Once
+	done chan struct{}
+}
+
+func (h *halfOpen) Close() error {
+	h.once.Do(func() { close(h.done) })
+	return h.Session.Close()
+}
+func (h *halfOpen) Done() <-chan struct{} { return h.done }
+func (h *halfOpen) Err() error {
+	select {
+	case <-h.done:
+		return transport.ErrKeepalive
+	default:
+		return nil
+	}
+}
+
+type halfOpenDialer struct {
+	inner PeerDialer
+	mu    sync.Mutex
+	all   []*halfOpen
+}
+
+func (d *halfOpenDialer) Dial(ctx context.Context, p PeerConfig) (transport.Session, error) {
+	s, err := d.inner.Dial(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	h := &halfOpen{Session: s, done: make(chan struct{})}
+	d.mu.Lock()
+	d.all = append(d.all, h)
+	d.mu.Unlock()
+	return h, nil
+}
+
+func (d *halfOpenDialer) first() *halfOpen {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.all) == 0 {
+		return nil
+	}
+	return d.all[0]
+}
+
+// A peer that comes back after a reboot says so in its hello (a later
+// start time): the session to its previous run is closed at once instead of
+// looking alive until the keepalive gives up.
+func TestRestartedPeerReplacesItsHalfOpenSession(t *testing.T) {
+	c := newCluster(t, "a", "b")
+	a, b := c.nodes["a"], c.nodes["b"]
+	hd := &halfOpenDialer{inner: memDialer{c.net, "a"}}
+	a.dialer = hd
+	a.logs = &logCapture{}
+	run := time.Now().Add(-time.Hour).UTC()
+	b.prober.info.StartedAt = run
+	b.start()
+	a.start()
+	c.waitOnline("a", "b")
+	waitFor(t, 2*time.Second, "outbound session", func() bool { return hd.first() != nil })
+	old := hd.first()
+
+	b.stop()
+	b.prober.mu.Lock()
+	b.prober.info.StartedAt = run.Add(time.Hour)
+	b.prober.mu.Unlock()
+	b.start()
+	waitFor(t, 3*time.Second, "old session closed", func() bool {
+		select {
+		case <-old.Done():
+			return true
+		default:
+			return false
+		}
+	})
+	if a.logs.count("b restarted") == 0 {
+		t.Fatalf("restart not logged:\n%s", a.logs.all())
+	}
+	waitFor(t, 3*time.Second, "new outbound session", func() bool {
+		out := a.daemon().peers.get("b").outbound()
+		return out != nil && out != transport.Session(old)
+	})
+}

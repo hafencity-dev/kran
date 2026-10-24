@@ -2,6 +2,13 @@
 
 All notable changes to kran. Versions follow [semantic versioning](https://semver.org/).
 
+## 0.1.8
+
+### Fixes
+
+- A peer that rebooted is noticed as soon as it connects again: the connection to its previous run, which a reboot that cut the network first leaves half open, is closed at once instead of after up to a minute of silence (start times in the hello).
+- A job that runs here because no other node could take it says why (`devmac's Linux VM has 409 MiB free`, `devmac: draining`, `devmac (Linux container) cannot hold 40.0 GiB`) instead of "no other node has room", which was also shown for nodes that were offline, draining or missing a toolchain.
+
 ## 0.1.7
 
 ### Fixes

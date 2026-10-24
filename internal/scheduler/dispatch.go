@@ -362,7 +362,7 @@ func (s *sched) tryPlace(j *sjob, views map[string]*nodeView, names []string, no
 		}
 	}
 
-	s.place(j, best, now, s.placeReason(j, best, selfCand, fits, whys))
+	s.place(j, best, now, s.placeReason(j, best, selfCand, cands, fits, whys))
 	return placedJob
 }
 
@@ -521,7 +521,7 @@ func (s *sched) place(j *sjob, c *cand, now time.Time, reason string) {
 	j.t.resolve(pl, nil)
 }
 
-func (s *sched) placeReason(j *sjob, best, selfCand *cand, fits []*cand, whys []*ineligible) string {
+func (s *sched) placeReason(j *sjob, best, selfCand *cand, cands, fits []*cand, whys []*ineligible) string {
 	if best.v.self {
 		switch {
 		case j.req.Prefer == proto.PreferLocal:
@@ -546,8 +546,8 @@ func (s *sched) placeReason(j *sjob, best, selfCand *cand, fits []*cand, whys []
 			return fmt.Sprintf("%s; %s would take %s%s plus ~%s to sync", here,
 				other.label(), fmtDur(other.run), paren(other.press.note()), fmtDur(other.overhead))
 		}
-		if len(fits) == 1 {
-			return here + "; no other node has room"
+		if why := s.elsewhereReason(j, cands, whys); why != "" {
+			return here + "; " + why
 		}
 		return here
 	}
@@ -573,6 +573,34 @@ func (s *sched) placeReason(j *sjob, best, selfCand *cand, fits []*cand, whys []
 		}
 	}
 	return r
+}
+
+// elsewhereReason says why no other node could take a job that runs here:
+// "devmac's Linux VM has 1.5 CPUs free", "devmac: missing toolchain go@1.27".
+func (s *sched) elsewhereReason(j *sjob, cands []*cand, whys []*ineligible) string {
+	var parts []string
+	var short []*cand
+	for _, c := range cands {
+		switch {
+		case c.v.self || c.fits:
+		case c.oversize:
+			parts = append(parts, fmt.Sprintf("%s cannot hold %s", c.label(), fmtBytes(c.mem)))
+		default:
+			short = append(short, c)
+		}
+	}
+	if len(short) > 0 {
+		r := s.resourceReason(j, short)
+		if r != "waiting: no node can take it yet" {
+			parts = append(parts, strings.TrimPrefix(r, "waiting: "))
+		}
+	}
+	for _, w := range whys {
+		if w.node != s.opts.Origin && w.kind != whyPolicy {
+			parts = append(parts, w.reason)
+		}
+	}
+	return strings.Join(parts, "; ")
 }
 
 // paren wraps a non-empty note: " (note)".
