@@ -286,7 +286,7 @@ func TestDockerDiskFloor(t *testing.T) {
 // than its reserve is starved; then new container slots are refused (the
 // runtime reports why) until the trim ran.
 func TestCacheTrimStarvedPause(t *testing.T) {
-	te := newTestEnv(t, func(o *Options, _ *tunables) { o.DiskFloor, o.DiskReserve = 10*gib, 25*gib })
+	te := newTestEnv(t, func(o *Options, _ *tunables) { o.DiskFloor, o.DiskReserve = 1, 25*gib }) // the floor is the host disk's; only the reserve matters here
 	m := te.m
 	m.tun.cacheTrimEvery = cacheTrimEvery
 	now := m.now()

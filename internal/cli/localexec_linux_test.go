@@ -43,11 +43,13 @@ func TestLocalScopeOOMReason(t *testing.T) {
 		t.Errorf("unit %s left behind: %s", p.Started.Scope, out)
 	}
 	// A plain SIGKILL is not reported as a memory cap.
-	p, _ = startLocal(localJob{JobID: "tkill" + randSuffix(), Argv: []string{"sh", "-c", "kill -KILL $$"}, Dir: t.TempDir(), Env: os.Environ(),
+	errF := tmpFile(t, "e")
+	p, _ = startLocal(localJob{JobID: "tkill" + randSuffix(), Argv: []string{"sh", "-c", "kill -9 $$"}, Dir: t.TempDir(), Env: os.Environ(),
 		Envelope: &proto.LocalEnvelope{MemMax: capBytes, Slice: "kran.slice"},
-		Stdio:    localStdio{Out: tmpFile(t, "o"), Err: tmpFile(t, "e")}})
+		Stdio:    localStdio{Out: tmpFile(t, "o"), Err: errF}})
 	if ex := <-p.Done(); ex.Code != 137 || ex.Reason != "" {
-		t.Fatalf("%+v", ex)
+		stderr, _ := os.ReadFile(errF.Name())
+		t.Fatalf("%+v\nstderr: %s", ex, stderr)
 	}
 }
 

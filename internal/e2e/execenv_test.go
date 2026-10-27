@@ -81,7 +81,8 @@ func startNode(t *testing.T, net *transport.MemNetwork, log *logSink, name, peer
 	}
 	self, _ := os.Executable()
 	logf := log.logf(name)
-	ex, err := execenv.New(execenv.Options{StateDir: dirs.State, NodeName: name, Self: self, Namespace: "kran-test", Logf: log.logf(name + " exec")})
+	// DiskFloor/DiskReserve: the host disk (a CI runner may have a few GiB free) must not decide.
+	ex, err := execenv.New(execenv.Options{StateDir: dirs.State, NodeName: name, Self: self, Namespace: "kran-test", Logf: log.logf(name + " exec"), DiskFloor: 1, DiskReserve: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
