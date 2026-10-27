@@ -54,3 +54,27 @@ func TestLocalScopeOOMReason(t *testing.T) {
 }
 
 func randSuffix() string { return strings.ReplaceAll(time.Now().Format("150405.000000"), ".", "") }
+
+// TestLocalScopeKeepsTheCommandLine: newer systemd-run expands "$VAR" and
+// "$$" in the command it runs unless told not to; a job's arguments must
+// arrive exactly as given.
+func TestLocalScopeKeepsTheCommandLine(t *testing.T) {
+	const capBytes = 256 << 20
+	if !scopeUsable(capBytes) {
+		t.Skip("systemd user scopes with a memory cap are not available")
+	}
+	out := tmpFile(t, "o")
+	arg := `a$$b$HOME${USER}c`
+	p, lerr := startLocal(localJob{JobID: "tdollar" + randSuffix(), Argv: []string{"sh", "-c", `printf '%s' "$1"`, "sh", arg}, Dir: t.TempDir(), Env: os.Environ(),
+		Envelope: &proto.LocalEnvelope{MemMax: capBytes, Slice: "kran.slice"},
+		Stdio:    localStdio{Out: out, Err: tmpFile(t, "e")}})
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	if ex := <-p.Done(); ex.Code != 0 {
+		t.Fatalf("%+v", ex)
+	}
+	if got, _ := os.ReadFile(out.Name()); string(got) != arg {
+		t.Fatalf("the job got %q, want %q", got, arg)
+	}
+}

@@ -20,6 +20,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/hafencity-dev/kran/internal/proto"
+	"github.com/hafencity-dev/kran/internal/sysd"
 )
 
 // jobState is the manager's view of one supervised job. Several Process
@@ -431,10 +432,10 @@ func (m *manager) launch(ctx context.Context, dir string, spec *superSpec) error
 	args := []string{"internal", "supervise", dir}
 	var cmd *exec.Cmd
 	if spec.Cgroup {
-		sargs := []string{"--user", "--scope", "--quiet", "--collect",
-			"--unit=" + spec.Scope, "--slice=" + m.slice(),
-			"--description=kran job " + spec.JobID,
-			"-p", "Delegate=yes", "-p", fmt.Sprintf("TasksMax=%d", proto.JobTasksMax)}
+		sargs := append([]string{"--user", "--scope", "--quiet", "--collect"}, sysd.NoExpand()...)
+		sargs = append(sargs, "--unit="+spec.Scope, "--slice="+m.slice(),
+			"--description=kran job "+spec.JobID,
+			"-p", "Delegate=yes", "-p", fmt.Sprintf("TasksMax=%d", proto.JobTasksMax))
 		if spec.MemMax > 0 {
 			// Backstop in case the supervisor cannot set up the job cgroup;
 			// the precise cap lives on the job's own cgroup.

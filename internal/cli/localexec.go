@@ -14,6 +14,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/hafencity-dev/kran/internal/proto"
+	"github.com/hafencity-dev/kran/internal/sysd"
 )
 
 // localStdio are the descriptors the child inherits. Inheriting (instead of
@@ -164,15 +165,17 @@ func startLocal(j localJob) (*localProc, *localError) {
 			scope = "kran-local-" + id + ".scope"
 			// No --collect: a scope the kernel OOM-killed must stay
 			// loaded (failed, Result=oom-kill) until wait has read why.
-			argv = append([]string{"systemd-run", "--user", "--scope", "--quiet",
-				"--slice=" + slice, "--unit=kran-local-" + id,
+			// The command line as given: no "$VAR" expansion by systemd-run.
+			pre := append([]string{"systemd-run", "--user", "--scope", "--quiet"}, sysd.NoExpand()...)
+			pre = append(pre, "--slice="+slice, "--unit=kran-local-"+id,
 				// No swap beyond the cap: a job over it is killed and told so
 				// (SPEC §6.8, as on remote targets), instead of swapping the
 				// machine to a crawl.
-				"-p", "MemoryMax=" + strconv.FormatInt(j.Envelope.MemMax, 10), "-p", "MemorySwapMax=0",
+				"-p", "MemoryMax="+strconv.FormatInt(j.Envelope.MemMax, 10), "-p", "MemorySwapMax=0",
 				// A runaway fork loop stops at the cap instead of taking
 				// the machine with it.
-				"-p", "TasksMax=" + strconv.Itoa(proto.JobTasksMax), "--"}, argv...)
+				"-p", "TasksMax="+strconv.Itoa(proto.JobTasksMax), "--")
+			argv = append(pre, argv...)
 			if p, e := exec.LookPath("systemd-run"); e == nil {
 				argv[0] = p
 			}
