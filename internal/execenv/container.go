@@ -50,6 +50,7 @@ type dockerEnv struct {
 	syncBin string            // kran binary path inside the sync container
 	syncAt  time.Time         // when the sync helper was last seen running with syncBin
 	volDirs map[string]string // volume name → its directory on the Docker host
+	volBorn map[string]string // volume name → CreatedAt when prepareVolumes set it up
 }
 
 // syncRecheck: how long a verified sync helper is trusted without asking
@@ -243,6 +244,13 @@ func (m *manager) ensureContainerReady(ctx context.Context, onPhase func(proto.P
 	}
 	dk.mu.Lock()
 	defer dk.mu.Unlock()
+	if dk.ready && !volumesIntact(ctx, dk) {
+		// Removed or recreated behind kran's back (docker volume rm, a
+		// prune, a cleanup): Docker recreates a missing named volume empty,
+		// without the directories every job mounts from it.
+		m.logf("container runtime: a kran volume was removed or recreated; setting the volumes up again")
+		dk.ready = false
+	}
 	if !dk.ready {
 		if err := m.ensureImage(ctx, dk, onPhase); err != nil {
 			return err
@@ -310,7 +318,52 @@ func (m *manager) prepareVolumes(ctx context.Context, dk *dockerEnv) error {
 		dk.sockGID, _ = strconv.Atoi(f[len(f)-1])
 	}
 	dk.volDirs = nil // (re)created volumes may live elsewhere
+	dk.volBorn = map[string]string{}
+	for _, v := range vols {
+		if born, ok := volumeCreated(ctx, dk, m.volume(v)); ok {
+			dk.volBorn[m.volume(v)] = born
+		}
+	}
 	return nil
+}
+
+// volumeCreated is a volume's creation time as Docker reports it.
+func volumeCreated(ctx context.Context, dk *dockerEnv, name string) (string, bool) {
+	if dk.api == nil {
+		return "", false
+	}
+	var v struct{ CreatedAt string }
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := dk.api.get(ctx, "/volumes/"+name, &v); err != nil || v.CreatedAt == "" {
+		return "", false
+	}
+	return v.CreatedAt, true
+}
+
+// volumesIntact reports whether every volume prepareVolumes set up is
+// still the same one (one API call each, no process). It errs towards
+// true when it cannot tell (no API, Docker busy): a missing directory then
+// fails one job, as before.
+func volumesIntact(ctx context.Context, dk *dockerEnv) bool {
+	if dk.api == nil {
+		return true
+	}
+	for name, born := range dk.volBorn {
+		var v struct{ CreatedAt string }
+		cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err := dk.api.get(cctx, "/volumes/"+name, &v)
+		cancel()
+		switch {
+		case isNotFound(err):
+			return false // gone
+		case err != nil:
+			continue
+		case v.CreatedAt != born:
+			return false // recreated
+		}
+	}
+	return true
 }
 
 // ensureSync keeps the long-lived helper container that writes slots into

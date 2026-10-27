@@ -233,6 +233,33 @@ func testContainerRuntime(t *testing.T, volume bool) {
 		}
 	})
 
+	// A cache volume removed behind kran's back (a disk cleanup) comes back
+	// empty when Docker recreates it on the next mount, without the home
+	// directory jobs mount from it: kran notices and sets it up again
+	// instead of failing every container job until it restarts.
+	t.Run("cache-volume-recreated", func(t *testing.T) {
+		withHome := func(r *StartRequest) {
+			r.Spec.OriginEnv = &proto.OriginEnv{User: "alice", Home: "/work/kran-test"}
+		}
+		if exit := waitExit(t, te.startCtr(ref, sh(`true`), withHome), 120*time.Second); exit.Code != 0 {
+			t.Fatalf("first job: %+v", exit) // sets the volumes up
+		}
+		dk, _ := te.m.docker()
+		if _, err := dk.run(context.Background(), nil, "volume", "rm", te.m.volume("cache")); err != nil {
+			t.Fatal(err)
+		}
+		// Recreated empty, as a job's mount would do.
+		if _, err := dk.run(context.Background(), nil, "volume", "create", te.m.volume("cache")); err != nil {
+			t.Fatal(err)
+		}
+		p := te.startCtr(ref, sh(`touch "$HOME/.kran-test-w" && echo home-writable`), withHome)
+		exit := waitExit(t, p, 120*time.Second)
+		out, errOut := output(t, p)
+		if exit.Code != 0 || !strings.Contains(out, "home-writable") {
+			t.Fatalf("after the cache volume was recreated: exit %+v\n%s\n%s", exit, out, errOut)
+		}
+	})
+
 	// The sync helper writes every repo's slots: a job must not be able to
 	// replace it (it used to live in the job-writable tools volume).
 	if volume {

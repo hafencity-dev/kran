@@ -4,6 +4,8 @@ import (
 	"path"
 	"strconv"
 	"strings"
+
+	"github.com/hafencity-dev/kran/internal/proto"
 )
 
 const gib = int64(1) << 30
@@ -386,4 +388,26 @@ func hasFlag(argv []string, flag string) bool {
 		}
 	}
 	return false
+}
+
+// Commands splits a job's command line into its simple commands, wrappers
+// (env, timeout, nice, …) stripped: what each part actually runs.
+func Commands(spec *proto.JobSpec) [][]string {
+	text := spec.Shell
+	if text == "" && len(spec.Argv) >= 3 && isShell(spec.Argv[0]) && (spec.Argv[1] == "-c" || spec.Argv[1] == "-lc" || spec.Argv[1] == "-ec") {
+		text = spec.Argv[2]
+	}
+	if text == "" {
+		if w := unwrap(spec.Argv); len(w) > 0 {
+			return [][]string{w}
+		}
+		return nil
+	}
+	var out [][]string
+	for _, seg := range splitShell(escapedParen.Replace(text)) {
+		if w := unwrap(shellWords(seg)); len(w) > 0 {
+			out = append(out, w)
+		}
+	}
+	return out
 }

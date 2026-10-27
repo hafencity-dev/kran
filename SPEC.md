@@ -420,7 +420,15 @@ Eligibility filters, each failing filter gives a reason string:
   present) — else reason `missing toolchain node@24`;
 * the job needs things only the origin has: cwd outside the workspace,
   `--sh` strings mentioning `localhost`/`127.0.0.1` ports, or an explicit
-  `--local` rule → origin only.
+  `--local` rule → origin only. So does a command that runs a workspace
+  file git ignores (a locally built `bin/lk`; not in `sync.include`, not
+  under a directory the target maintains itself such as `node_modules`,
+  `.venv`, `target`), a personal tool from `~/.local/bin`, `~/bin` or
+  `~/go/bin` (not one kran provides: go, node, pnpm, python, …), or that
+  changes into an existing directory outside the workspace: elsewhere it
+  would fail with "No such file". Programs after a build step in the same
+  command line (`make lk && bin/lk docs check`) are not checked, since the
+  command builds them where it runs.
 * disk floor ok on target.
 
 Admission (resources): `need = estimate(cpu, mem)` (§6.6). A runtime admits

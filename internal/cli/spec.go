@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hafencity-dev/kran/internal/config"
+	"github.com/hafencity-dev/kran/internal/estimate"
 	"github.com/hafencity-dev/kran/internal/proto"
 	"github.com/hafencity-dev/kran/internal/workspace"
 )
@@ -164,6 +165,11 @@ func BuildSpec(ctx context.Context, in SpecInput) (proto.JobSpec, error) {
 	if reason := originOnlyReason(spec, ws, wsErr, in.Home); reason != "" && !req.OriginOnly {
 		req.OriginOnly, req.OriginOnlyReason = true, reason
 	}
+	if !req.OriginOnly && wsErr == nil && ws.Git {
+		if reason := unsyncedProgram(ctx, spec, ws, pc.Sync.Include, in.Home, envValue(in.Env, "PATH")); reason != "" {
+			req.OriginOnly, req.OriginOnlyReason = true, reason
+		}
+	}
 	// submit.prefer = "remote" in config.toml is a default, not --remote: a
 	// job that can only run here stays here instead of failing with 125.
 	if req.OriginOnly && req.Prefer == proto.PreferRemote && !f.Remote {
@@ -305,6 +311,122 @@ func originOnlyReason(spec proto.JobSpec, ws proto.Workspace, wsErr error, home 
 	return ""
 }
 
+// unsyncedProgram names a workspace file the command runs that would not
+// reach another node (ignored by git, like a locally built bin/lk), or "".
+// Run there, the job would fail with "No such file". Programs after a
+// build step (make, go build, a package script, …) are not checked: the
+// command may build them where it runs. Directories the target maintains
+// itself (node_modules, .venv, target) count as present.
+func unsyncedProgram(ctx context.Context, spec proto.JobSpec, ws proto.Workspace, include []string, home, pathEnv string) string {
+	dir := spec.Cwd
+	for _, w := range estimate.Commands(&spec) {
+		base := filepath.Base(w[0])
+		if base == "cd" {
+			if len(w) > 1 && !strings.ContainsAny(w[1], "$~`") {
+				if filepath.IsAbs(w[1]) {
+					dir = w[1]
+				} else {
+					dir = filepath.Join(dir, w[1])
+				}
+				if rel, err := filepath.Rel(ws.Root, dir); err == nil && strings.HasPrefix(rel, "..") {
+					if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+						return "it changes into " + w[1] + ", outside the workspace, which other nodes do not have"
+					}
+				}
+			}
+			continue
+		}
+		if mayBuild(w) {
+			return ""
+		}
+		if p := homeTool(w[0], home, pathEnv); p != "" {
+			return fmt.Sprintf("it runs %s from %s, which other nodes do not have", w[0], p)
+		}
+		progs := []string{w[0]}
+		if scriptRunners[base] || strings.HasPrefix(base, "python") {
+			for _, a := range w[1:] {
+				if !strings.HasPrefix(a, "-") {
+					progs = append(progs, a)
+					break
+				}
+			}
+		}
+		for _, p := range progs {
+			if !strings.Contains(p, "/") || strings.ContainsAny(p, "$~`*?") {
+				continue
+			}
+			abs := p
+			if !filepath.IsAbs(abs) {
+				abs = filepath.Join(dir, p)
+			}
+			rel, err := filepath.Rel(ws.Root, abs)
+			if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+				continue // outside the workspace: not ours to judge
+			}
+			if fi, err := os.Stat(abs); err != nil || fi.IsDir() {
+				continue
+			}
+			if !workspace.Synced(ctx, ws.Root, filepath.ToSlash(rel), include) {
+				return fmt.Sprintf("it runs %s, which git ignores, so it would not be on another node (build it in the command, or list it in sync.include in .kran.toml)", p)
+			}
+		}
+	}
+	return ""
+}
+
+// homeTool returns the directory a bare command name resolves to when that
+// is a personal bin directory in home (~/.local/bin/lk, ~/go/bin/x): such
+// tools exist only on this machine. Toolchains kran provides on a target
+// (mise installs, go, node, python, …) are not.
+func homeTool(name, home, pathEnv string) string {
+	if home == "" || strings.Contains(name, "/") || providedTools[name] || strings.HasPrefix(name, "python") {
+		return ""
+	}
+	personal := []string{filepath.Join(home, ".local", "bin"), filepath.Join(home, "bin"), filepath.Join(home, "go", "bin")}
+	for _, d := range filepath.SplitList(pathEnv) {
+		if d == "" {
+			continue
+		}
+		fi, err := os.Stat(filepath.Join(d, name))
+		if err != nil || fi.IsDir() || fi.Mode()&0o111 == 0 {
+			continue
+		}
+		for _, p := range personal {
+			if filepath.Clean(d) == p {
+				return strings.Replace(p, home, "~", 1)
+			}
+		}
+		return "" // the first match decides, as for the shell
+	}
+	return ""
+}
+
+// providedTools are commands a target has or kran installs there.
+var providedTools = map[string]bool{
+	"go": true, "gofmt": true, "node": true, "npm": true, "npx": true, "pnpm": true, "pnpx": true, "yarn": true,
+	"corepack": true, "bun": true, "deno": true, "pip": true, "pip3": true, "uv": true, "uvx": true, "cargo": true,
+	"rustc": true, "rustup": true, "java": true, "mise": true, "git": true, "make": true, "docker": true,
+}
+
+var scriptRunners = map[string]bool{"sh": true, "bash": true, "zsh": true, "node": true, "bun": true, "deno": true, "ruby": true, "perl": true}
+
+// mayBuild reports whether a command may produce programs a later part of
+// the same command line runs.
+func mayBuild(w []string) bool {
+	base := filepath.Base(w[0])
+	switch base {
+	case "make", "gmake", "ninja", "cmake", "bazel", "just", "task", "npm", "pnpm", "yarn", "bun", "npx", "pnpx", "cp", "mv", "ln", "install", "tar", "unzip", "curl", "wget":
+		return true
+	case "go", "cargo":
+		for _, a := range w[1:] {
+			if a == "build" || a == "install" || a == "generate" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // forwardedSecrets lists the variables that a repo's env.forward sends
 // although the filter would drop them as secrets (and the user did not ask
 // with --env): the repo's own file decides that, so the user hears of it.
@@ -326,4 +448,14 @@ func forwardedSecrets(environ, forward, extra []string) []string {
 		}
 	}
 	return out
+}
+
+// envValue is name's value in an environment list ("" when unset).
+func envValue(env []string, name string) string {
+	for i := len(env) - 1; i >= 0; i-- {
+		if v, ok := strings.CutPrefix(env[i], name+"="); ok {
+			return v
+		}
+	}
+	return ""
 }

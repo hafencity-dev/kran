@@ -2,6 +2,13 @@
 
 All notable changes to kran. Versions follow [semantic versioning](https://semver.org/).
 
+## 0.1.11
+
+### Fixes
+
+- A command that runs something only this machine has stays here with the reason, instead of failing on another node with "No such file": a workspace file git ignores (a locally built `bin/lk`, unless `sync.include` names it), a personal tool from `~/.local/bin`, `~/bin` or `~/go/bin`, or a `cd` out of the workspace. A command that builds the program first (`make lk && bin/lk docs check`) may still go. Before, `bin/lk docs check` failed on the Mac every time, so kran also never learned that the docs check runs about 5× faster there.
+- A kran volume removed or recreated behind kran's back (a disk cleanup ran `docker volume rm`) no longer stops every container job on that node until the daemon restarts: Docker recreates a missing volume empty, without the directories jobs mount from it ("cannot access path …/kran-cache/_data/home"). kran checks the volumes it set up before each container job (one API call each) and sets them up again.
+
 ## 0.1.10
 
 ### Placement
