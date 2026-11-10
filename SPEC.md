@@ -261,7 +261,13 @@ Flags: `-l/--local`, `-r/--remote`, `-n/--node NAME`, `--gpu`, `--cpus N`,
       flow back; origin daemon sends heartbeats every 2 s;
    f. `exit` frame → CLI exits with the same code.
    Any failure in a–c (before `running`) → automatic local fallback (if local
-   is eligible), announced on one stderr line. After `running` starts, an
+   is eligible), announced on one stderr line. A node that failed to start
+   a job sits out for that job only for a backoff (1 min, doubling per
+   failure on that node, capped at 5 min); the waiting job is placed again
+   on every scheduler tick by the rules of a new job and takes any node with
+   room, including that one once its backoff ended. Its wait reason names the
+   backoff and when the node is tried again. A job that may run nowhere else
+   (`--remote`, `--no-fallback`) still fails at once. After `running` starts, an
    infrastructure failure ends the job with exit 125 and a clear message;
    no automatic re-run.
 7. Ctrl-C in the CLI → `signal{INT}` forwarded; a second Ctrl-C within 2 s
@@ -494,7 +500,9 @@ Queue: per-owner FIFO, owners served round-robin (weighted by priority:
 high 4, normal 2, low 1). Interactive (tty) jobs default to `high`. Every
 queued job carries a live `reason`. No job waits behind a job that cannot be
 admitted anywhere (no head-of-line blocking). Starvation guard: a job queued
-> 2 min gets priority boost.
+> 2 min gets priority boost. A queued job is placed again on every
+scheduler tick: a failed start excludes the node for that job only for a
+bounded backoff (§6.1 step 6), never for the rest of the job's life.
 
 ### 6.4 Owner detection (CLI)
 

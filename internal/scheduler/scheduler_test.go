@@ -1048,3 +1048,117 @@ func TestRelieveLeavesRoomForPinnedJobs(t *testing.T) {
 		t.Fatalf("walls placed %+v", pl)
 	}
 }
+
+// TestFailedStartBacksNodeOffForThisJobOnly is the land-gate docs job of
+// 09.11.2026: devmac refused one start while it was short of memory, and the
+// job then waited for gx10 for hours although devmac soon had room and no
+// jobs. A failed start only sits the node out for a bounded backoff; the
+// waiting job takes the node as soon as it is back and has room.
+func TestFailedStartBacksNodeOffForThisJobOnly(t *testing.T) {
+	clk := &fakeClock{t0}
+	g := self(gx10(t0))
+	g.Metrics.MemAvailable = 12 * gib // 4 GiB free after the reserve
+	s := newTestSched(t, clk, g, devmac(t0))
+	big := 12 * gib
+	tk := s.Submit(newJob("docs", "gate", 4, big, 600))
+	if pl := placed(t, tk); pl.Node != "devmac" {
+		t.Fatalf("first placement %+v", pl)
+	}
+	tk = s.Reject("docs", "devmac", &AdmitError{Code: "busy", Reason: "devmac: needs 12.0 GiB, devmac has 7.2 GiB free"})
+	pending(t, tk)
+	r := reason(s, "docs")
+	for _, want := range []string{"devmac: failed to start this job", "7.2 GiB free", "backed off for 1m", "tried again in 1m"} {
+		if !strings.Contains(r, want) {
+			t.Errorf("reason %q lacks %q", r, want)
+		}
+	}
+	// Inside the backoff devmac is out although it has room, and the
+	// countdown moves with the clock.
+	clk.Advance(30 * time.Second)
+	s.Tick(clk.Now())
+	pending(t, tk)
+	if r := reason(s, "docs"); !strings.Contains(r, "tried again in 30s") {
+		t.Errorf("reason %q", r)
+	}
+	// Past the backoff the job takes devmac on the next tick, by the same
+	// rules as a new job: not a fallback, no manual retry.
+	clk.Advance(31 * time.Second)
+	s.Tick(clk.Now())
+	pl := placed(t, tk)
+	if pl.Node != "devmac" || pl.Fallback || pl.Local {
+		t.Fatalf("after the backoff: %+v", pl)
+	}
+}
+
+// TestFailedStartBackoffGrowsAndIsCapped: 1, 2, 4 minutes, then the cap.
+func TestFailedStartBackoffGrowsAndIsCapped(t *testing.T) {
+	clk := &fakeClock{t0}
+	g := self(gx10(t0))
+	g.Metrics.MemAvailable = 12 * gib
+	s := newTestSched(t, clk, g, devmac(t0))
+	s.Submit(newJob("j", "a", 4, 12*gib, 600))
+	for _, want := range []string{"1m", "2m", "4m", "5m", "5m"} {
+		s.Reject("j", "devmac", errors.New("setup failed"))
+		if r := reason(s, "j"); !strings.Contains(r, "backed off for "+want+", tried again in "+want) {
+			t.Fatalf("want a %s backoff: %q", want, r)
+		}
+		wait, _ := time.ParseDuration(want)
+		clk.Advance(wait + time.Second)
+		s.Tick(clk.Now())
+		// The node is back: the job is placed there again (which fails again).
+		if pl, ok := isPlaced(s.jobs["j"].t); !ok || pl.Node != "devmac" {
+			t.Fatalf("not tried again after %s: %v %+v", want, ok, pl)
+		}
+	}
+}
+
+// TestFailedStartAnotherNodeTakesItAtOnce: the backoff only concerns the
+// node that failed; another node with room takes the waiting job right away.
+func TestFailedStartAnotherNodeTakesItAtOnce(t *testing.T) {
+	clk := &fakeClock{t0}
+	g := self(gx10(t0))
+	g.Metrics.MemAvailable = 12 * gib
+	studio := devmac(t0)
+	studio.Info.Name = "studio2"
+	studio.Metrics.MemAvailable = 4 * gib // no room yet
+	studio.Metrics.Runtimes = nil
+	s := newTestSched(t, clk, g, devmac(t0), studio)
+	tk := s.Submit(newJob("j", "a", 4, 12*gib, 600))
+	if pl := placed(t, tk); pl.Node != "devmac" {
+		t.Fatalf("%+v", pl)
+	}
+	tk = s.Reject("j", "devmac", &AdmitError{Code: "busy", Reason: "devmac: busy"})
+	pending(t, tk)
+	studio.Metrics.MemAvailable = 80 * gib
+	s.UpdateNode(studio)
+	if pl := placed(t, tk); pl.Node != "studio2" || pl.Fallback {
+		t.Fatalf("%+v", pl)
+	}
+}
+
+// TestRemoteAttemptsUsedUpEndWithTheBackoff: after the allowed number of
+// failed remote starts the origin takes the job, but the remote nodes are
+// only out until the last backoff ends; a job that waits on a busy origin
+// goes remote again as soon as a node has room.
+func TestRemoteAttemptsUsedUpEndWithTheBackoff(t *testing.T) {
+	clk := &fakeClock{t0}
+	g := self(gx10(t0))
+	g.Metrics.MemAvailable = 10 * gib // 2 GiB free: the origin cannot take it
+	p3 := devmac(t0)
+	p3.Info.Name = "studio2"
+	s := newTestSched(t, clk, g, devmac(t0), p3)
+	tk := s.Submit(newJob("j", "a", 4, 4*gib, 60))
+	placed(t, tk)
+	tk = s.Reject("j", "devmac", errors.New("slot.commit: disk full"))
+	placed(t, tk)
+	tk = s.Reject("j", "studio2", errors.New("setup: pnpm install failed"))
+	pending(t, tk)
+	clk.Advance(30 * time.Second)
+	s.Tick(clk.Now())
+	pending(t, tk) // devmac's backoff ended, but attempts are used up until studio2's does
+	clk.Advance(31 * time.Second)
+	s.Tick(clk.Now())
+	if pl := placed(t, tk); pl.Local || pl.Fallback {
+		t.Fatalf("after the backoff: %+v", pl)
+	}
+}

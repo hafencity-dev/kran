@@ -47,12 +47,17 @@ func (s *sched) policyAllows(j *sjob, node string) bool {
 		return false
 	case j.req.Node != "" && j.req.Node != node:
 		return false
-	case !self && j.rejects >= s.opts.MaxRemoteAttempts:
-		return false // remote attempts used up: fall back to origin
 	case self && j.rejects > 0 && j.noFallback && !j.originOnly():
 		return false
 	}
 	return true
+}
+
+// remoteHeld: the job's remote attempts are used up, so the origin takes it
+// rather than another remote node, but only until the last backoff ends;
+// then every node competes again.
+func (s *sched) remoteHeld(j *sjob, now time.Time) bool {
+	return j.rejects >= s.opts.MaxRemoteAttempts && now.Before(j.backoffUntil)
 }
 
 func (s *sched) originOS() string {
@@ -129,8 +134,13 @@ func (s *sched) eligible(j *sjob, v *nodeView, now time.Time) ([]rtView, *inelig
 			return no(whyUnknown, "resources not known yet")
 		}
 	}
-	if msg, bad := j.excluded[name]; bad {
-		return no(whyFailed, "failed to start this job (%s)", msg)
+	if x := j.excluded[name]; x != nil && x.active(now) {
+		return no(whyFailed, "failed to start this job (%s); backed off for %s, tried again in %s",
+			x.msg, fmtDur(x.wait.Seconds()), fmtDur(x.until.Sub(now).Seconds()))
+	}
+	if !v.self && s.remoteHeld(j, now) {
+		return no(whyFailed, "%d remote starts failed for this job; remote nodes are tried again in %s",
+			j.rejects, fmtDur(j.backoffUntil.Sub(now).Seconds()))
 	}
 	if !v.self {
 		if r := s.breakerReason(v.e, now); r != "" {

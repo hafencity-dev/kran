@@ -20,6 +20,12 @@ const (
 	breakerThreshold    = 3
 	breakerBaseCooldown = 30 * time.Second
 	breakerMaxCooldown  = 5 * time.Minute
+
+	// A node that failed to start one job sits out for this job only: the
+	// first failure for failBackoffBase, doubling per failure on that node,
+	// capped at failBackoffMax.
+	failBackoffBase = time.Minute
+	failBackoffMax  = 5 * time.Minute
 	// A job may wait for a busy but clearly better node at most this long
 	// after submission before it takes what is free.
 	maxDefer = 60 * time.Second
@@ -59,12 +65,40 @@ type sjob struct {
 	interactive bool
 	t           *ticket
 
-	alloc    *allocation // non-nil once placed
-	excluded map[string]string
-	rejects  int
-	requeued bool
-	reason   string
-	shape    string // cached shapeKey; reset when priority changes
+	alloc *allocation // non-nil once placed
+	// excluded remembers each node that failed to start this job: why, how
+	// often, and until when the node sits out. The entry outlives its
+	// backoff so the next failure backs off longer.
+	excluded     map[string]*exclusion
+	backoffUntil time.Time // the latest end of any exclusion above
+	rejects      int
+	requeued     bool
+	reason       string
+	shape        string // cached shapeKey; reset when priority changes
+}
+
+// exclusion is one node's failed starts for one job. The node is out for
+// this job only until `until` (SPEC §6.3), then competes again like for a
+// new job.
+type exclusion struct {
+	msg   string
+	fails int
+	until time.Time
+	wait  time.Duration // the backoff set at the last failure
+}
+
+func (x *exclusion) active(now time.Time) bool { return now.Before(x.until) }
+
+// activeExclusions lists the nodes (sorted) that still sit out for j.
+func (j *sjob) activeExclusions(now time.Time) []string {
+	var out []string
+	for n, x := range j.excluded {
+		if x.active(now) {
+			out = append(out, n)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 type allocation struct {
@@ -410,9 +444,23 @@ func (s *sched) Reject(jobID string, node string, err error) Ticket {
 		msg = err.Error()
 	}
 	if j.excluded == nil {
-		j.excluded = map[string]string{}
+		j.excluded = map[string]*exclusion{}
 	}
-	j.excluded[node] = msg
+	x := j.excluded[node]
+	if x == nil {
+		x = &exclusion{}
+		j.excluded[node] = x
+	}
+	x.msg = msg
+	x.fails++
+	x.wait = failBackoffBase << min(x.fails-1, 8)
+	if x.wait > failBackoffMax {
+		x.wait = failBackoffMax
+	}
+	x.until = now.Add(x.wait)
+	if x.until.After(j.backoffUntil) {
+		j.backoffUntil = x.until
+	}
 	// A node that is full (another origin got there first; our view of it
 	// lags) is busy, not broken: no breaker, no used-up remote attempt.
 	var ae *AdmitError
@@ -425,7 +473,7 @@ func (s *sched) Reject(jobID string, node string, err error) Ticket {
 	}
 	j.requeued = true
 	j.t = newTicket(jobID)
-	if !s.canStillRun(j) {
+	if !s.canStillRun(j, now) {
 		delete(s.jobs, jobID)
 		reason := fmt.Sprintf("%s failed to start the job (%s) and no other node can run it", node, msg)
 		switch {
@@ -443,13 +491,17 @@ func (s *sched) Reject(jobID string, node string, err error) Ticket {
 }
 
 // canStillRun reports whether any node is still allowed for the job after
-// exclusions (ignoring transient state such as resources or offline).
-func (s *sched) canStillRun(j *sjob) bool {
+// failed starts (ignoring transient state such as resources or offline).
+// A node that failed counts as gone here although it is tried again after
+// its backoff: a job that may run nowhere else (--remote, --no-fallback)
+// fails now, so its caller can decide, instead of waiting for a node that
+// just failed it.
+func (s *sched) canStillRun(j *sjob, now time.Time) bool {
 	for name := range s.nodes {
 		if _, bad := j.excluded[name]; bad {
 			continue
 		}
-		if s.policyAllows(j, name) {
+		if s.policyAllows(j, name) && (name == s.opts.Origin || !s.remoteHeld(j, now)) {
 			return true
 		}
 	}

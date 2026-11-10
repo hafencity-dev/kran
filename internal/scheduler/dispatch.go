@@ -52,7 +52,7 @@ func (s *sched) dispatch(now time.Time) {
 	memo := map[string]string{}
 	for _, j := range queue {
 		key := ""
-		if j.rejects == 0 && now.Sub(j.queuedAt) < s.opts.StarvationAfter {
+		if len(j.excluded) == 0 && now.Sub(j.queuedAt) < s.opts.StarvationAfter {
 			if j.shape == "" {
 				j.shape = j.shapeKey()
 			}
@@ -481,14 +481,12 @@ const loggedWait = 30 * time.Second
 
 func (s *sched) place(j *sjob, c *cand, now time.Time, reason string) {
 	res := proto.Resources{CPUs: c.cpu, Mem: c.mem}
-	fallback := c.v.self && len(j.excluded) > 0
+	// A fallback is the origin taking the job while the nodes that failed
+	// it still sit out; once they are back, placing it anywhere is normal.
+	failed := j.activeExclusions(now)
+	fallback := c.v.self && len(failed) > 0
 	if fallback {
-		failed := make([]string, 0, len(j.excluded))
-		for n := range j.excluded {
-			failed = append(failed, n)
-		}
-		sort.Strings(failed)
-		reason = fmt.Sprintf("here: fallback after %s failed to start it (%s)", joinList(failed), j.excluded[failed[0]])
+		reason = fmt.Sprintf("here: fallback after %s failed to start it (%s)", joinList(failed), j.excluded[failed[0]].msg)
 	}
 	pl := Placement{
 		JobID:    j.id,
