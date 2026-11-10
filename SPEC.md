@@ -650,6 +650,15 @@ pass, anything that holds the memory is stopped).
   start would take those away. The fix names `kran upgrade` only for a
   release version (x.y.z, which has a published asset); a development build
   gets the path to copy a build to, and nothing is downloaded for it.
+  **`kran upgrade`** on a non-Linux node (container jobs not switched off)
+  fetches the `linux-<arch>` asset of the target release through the same
+  path as a peer's (`link.FetchRelease`: `checksums.txt` verified, temp file,
+  fsync, rename into the cache), after the native asset is fetched and
+  before the native binary is replaced and the daemon restarted. If it
+  cannot be fetched or verified the upgrade fails with nothing replaced;
+  `runtime.container.enabled = false` skips it, a Linux node never fetches
+  it. Run on a node that already has the target version it fills in a
+  missing linux binary. The cache of older versions is not pruned.
   `kran service restart` and `install` print the same line after the
   restart. Debian stable-slim with git, build-essential, pkg-config,
   ca-certificates, curl, wget, locales with common UTF-8 locales prebuilt,

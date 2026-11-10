@@ -329,14 +329,27 @@ func extractKran(tgz, dest string) error {
 		if err != nil {
 			return err
 		}
+		// Temp file, fsync, rename: nothing is ever visible under the final
+		// name unless it is whole and on disk.
 		if _, err := io.Copy(w, io.LimitReader(tr, 512<<20)); err != nil {
 			w.Close()
+			os.Remove(tmp)
+			return err
+		}
+		if err := w.Sync(); err != nil {
+			w.Close()
+			os.Remove(tmp)
 			return err
 		}
 		if err := w.Close(); err != nil {
+			os.Remove(tmp)
 			return err
 		}
-		return os.Rename(tmp, dest)
+		if err := os.Rename(tmp, dest); err != nil {
+			os.Remove(tmp)
+			return err
+		}
+		return nil
 	}
 }
 

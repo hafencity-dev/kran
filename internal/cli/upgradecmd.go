@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/hafencity-dev/kran/internal/config"
+	"github.com/hafencity-dev/kran/internal/execenv"
 	"github.com/hafencity-dev/kran/internal/link"
 	"github.com/hafencity-dev/kran/internal/service"
 	"github.com/hafencity-dev/kran/internal/version"
@@ -20,8 +22,12 @@ import (
 // upgrader holds the side effects of `kran upgrade` so the order of steps is
 // testable.
 type upgrader struct {
-	Latest      func(ctx context.Context) (string, error)
-	Fetch       func(ctx context.Context, ver string) (path string, err error)
+	Latest func(ctx context.Context) (string, error)
+	Fetch  func(ctx context.Context, ver string) (path string, err error)
+	// FetchLinux downloads and verifies the linux runtime binary of release
+	// ver into this node's cache and returns its path. nil when this node
+	// does not need one (a Linux node, or container jobs switched off).
+	FetchLinux  func(ctx context.Context, ver string) (path string, err error)
 	Install     func(src, dst string) error
 	Restart     func(ctx context.Context, force bool) error
 	Peers       func() []string
@@ -70,11 +76,36 @@ running jobs have finished, then do the same on every linked machine.`,
 
 func (a *App) newUpgrader(self string, f upgradeFlags) *upgrader {
 	lo := link.Options{Version: version.Version, SelfPath: self, Force: f.Force}
-	return &upgrader{
+	enabled := ""
+	if cfg, err := config.Load(""); err == nil {
+		enabled = cfg.Runtime.Container.Enabled
+	}
+	return a.upgraderFor(self, f, lo, runtime.GOOS, enabled)
+}
+
+// containerJobsOff reads runtime.container.enabled the way the daemon does.
+func containerJobsOff(enabled string) bool {
+	switch strings.ToLower(strings.TrimSpace(enabled)) {
+	case "false", "off", "no", "0", "disabled":
+		return true
+	}
+	return false
+}
+
+// linuxRuntimeWanted: a node that is not Linux runs container jobs with the
+// linux kran of its own version in its cache, unless container jobs are off.
+func linuxRuntimeWanted(goos, enabled string) bool {
+	return goos != "linux" && !containerJobsOff(enabled)
+}
+
+// upgraderFor builds the upgrader for a node of the given OS. goos and the
+// container setting are parameters so the darwin path is testable anywhere.
+func (a *App) upgraderFor(self string, f upgradeFlags, lo link.Options, goos, enabled string) *upgrader {
+	u := &upgrader{
 		Self: self, Current: version.Version, Out: a.Out, Err: a.Err,
 		Latest: func(ctx context.Context) (string, error) { return link.LatestRelease(ctx, lo) },
 		Fetch: func(ctx context.Context, ver string) (string, error) {
-			return link.FetchRelease(ctx, lo, ver, runtime.GOOS, runtime.GOARCH)
+			return link.FetchRelease(ctx, lo, ver, goos, runtime.GOARCH)
 		},
 		Install: installBinary,
 		Restart: func(ctx context.Context, force bool) error {
@@ -115,6 +146,21 @@ func (a *App) newUpgrader(self string, f upgradeFlags) *upgrader {
 			return link.Upgrade(ctx, name, o)
 		},
 	}
+	if linuxRuntimeWanted(goos, enabled) {
+		// The same download, checksum check and atomic cache install a
+		// peer's linux binary goes through (link.FetchRelease).
+		u.FetchLinux = func(ctx context.Context, ver string) (string, error) {
+			p, err := link.FetchRelease(ctx, lo, ver, "linux", runtime.GOARCH)
+			if err != nil {
+				return "", err
+			}
+			if prob := execenv.CheckLinuxRuntime(p, ver); prob != nil {
+				return "", errors.New(execenv.LinuxRuntimeCause(prob))
+			}
+			return p, nil
+		}
+	}
+	return u
 }
 
 func (u *upgrader) run(ctx context.Context, f upgradeFlags) error {
@@ -138,19 +184,35 @@ func (u *upgrader) run(ctx context.Context, f upgradeFlags) error {
 	bin := u.Self
 	if target == cur {
 		fmt.Fprintf(u.Out, "kran %s is already installed here.\n", cur)
-	} else {
-		if cur == "dev" && f.Version == "" {
-			return fmt.Errorf("this is a development build; upgrading would replace it with release %s. Pass --version %s to do that", target, target)
-		}
+	} else if cur == "dev" && f.Version == "" {
+		return fmt.Errorf("this is a development build; upgrading would replace it with release %s. Pass --version %s to do that", target, target)
+	}
+	// Everything is fetched and verified before anything is replaced, so a
+	// failure leaves the node exactly as it was. (A node that already runs
+	// the target but lacks its linux binary gets it here too.)
+	var src, linuxPath string
+	if target != cur {
 		fmt.Fprintf(u.Out, "Downloading kran %s...\n", target)
-		src, err := u.Fetch(ctx, target)
-		if err != nil {
+		var err error
+		if src, err = u.Fetch(ctx, target); err != nil {
 			return err
 		}
+	}
+	if u.FetchLinux != nil {
+		fmt.Fprintf(u.Out, "Downloading the linux runtime for container jobs (kran %s)...\n", target)
+		var err error
+		if linuxPath, err = u.FetchLinux(ctx, target); err != nil {
+			return fmt.Errorf("cannot get the linux runtime of kran %s that container jobs on this node need: %w. Nothing was changed. Retry `kran upgrade`, or set runtime.container.enabled = false in the config if this node should not run container jobs", target, err)
+		}
+	}
+	if src != "" {
 		if err := u.Install(src, u.Self); err != nil {
 			return fmt.Errorf("cannot replace %s: %w (is it writable? install into ~/.local/bin or rerun with the needed permissions)", u.Self, err)
 		}
 		fmt.Fprintf(u.Out, "Installed kran %s at %s.\n", target, u.Self)
+	}
+	if linuxPath != "" {
+		fmt.Fprintf(u.Out, "Linux runtime for container jobs: kran %s at %s.\n", target, linuxPath)
 	}
 	if err := u.Restart(ctx, f.Force); err != nil {
 		fmt.Fprintf(u.Err, "kran: could not restart the local service: %v\n", err)
@@ -215,6 +277,11 @@ func installBinary(src, dst string) error {
 		return err
 	}
 	if err := tmp.Chmod(0o755); err != nil {
+		tmp.Close()
+		os.Remove(name)
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
 		tmp.Close()
 		os.Remove(name)
 		return err
