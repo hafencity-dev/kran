@@ -10,8 +10,10 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/hafencity-dev/kran/internal/client"
+	"github.com/hafencity-dev/kran/internal/execenv"
 	"github.com/hafencity-dev/kran/internal/proto"
 	"github.com/hafencity-dev/kran/internal/service"
+	"github.com/hafencity-dev/kran/internal/version"
 )
 
 func (a *App) serviceManager() (service.Manager, error) { return a.serviceManagerFor(false) }
@@ -116,6 +118,7 @@ func (a *App) serviceCommand() *cobra.Command {
 			}
 			a.waitDaemon(cmd.Context(), 15*time.Second)
 			fmt.Fprintln(a.Out, "service restarted")
+			a.printLinuxRuntimeAdvice()
 			return nil
 		},
 	}
@@ -167,6 +170,24 @@ func (a *App) printServiceAdvice(ctx context.Context, m service.Manager) {
 			fmt.Fprintln(a.Out, adv)
 		}
 	}
+}
+
+// printLinuxRuntimeAdvice says, after the daemon was (re)started, when the
+// binary it needs for container jobs is not in place for its version. The
+// daemon logs and reports the same sentence; this is where the person who just
+// put a new binary in place looks. It changes nothing.
+func (a *App) printLinuxRuntimeAdvice() {
+	if line := linuxRuntimeAdvice(execenv.LinuxRuntimePath(), version.Version); line != "" {
+		fmt.Fprintln(a.Err, line)
+	}
+}
+
+func linuxRuntimeAdvice(path, ver string) string {
+	p := execenv.CheckLinuxRuntime(path, ver)
+	if p == nil {
+		return ""
+	}
+	return "kran: this node cannot run container jobs until it is fixed (native jobs are unaffected): " + execenv.LinuxRuntimeCause(p)
 }
 
 // waitDaemon polls until the daemon answers (after a service start).
@@ -255,6 +276,7 @@ where launch agents cannot load. It needs sudo once. On Linux,
 				fmt.Fprintln(a.Out, "service already installed; running")
 			}
 			a.printServiceAdvice(ctx, m)
+			a.printLinuxRuntimeAdvice()
 			return nil
 		},
 	}

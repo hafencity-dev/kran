@@ -2,6 +2,12 @@
 
 All notable changes to kran. Versions follow [semantic versioning](https://semver.org/).
 
+## 0.1.12
+
+### Fixes
+
+- A node whose own Linux binary is missing no longer looks healthy (10.11.2026: devmac's daemon was replaced by hand with a `0.1.10-6-gc9403ef` build, only the darwin binary; the container runtime's `…/kran/bin/<version>/linux-arm64/kran` was not there, the daemon came up online, and for over an hour every container job offered to it waited with "devmac: no linux runtime" and ran on the other machine, unnoticed). The daemon now checks that file (present, a regular file, executable) at start and whenever it re-probes: it logs one line per change with the exact path and the fix, `kran status` prints `! devmac cannot run container jobs: its linux runtime for … is missing at …` (JSON: `info.runtimes[].problem`; the dashboard node card too), and the wait reason of a job says the same instead of only "no linux runtime". The node stays online for native jobs and is simply not eligible for container jobs. It does not refuse to start, because that would also take its native jobs away. The fix names `kran upgrade` only for a release version; a development build has no published asset, so nothing is downloaded and the message gives the path to copy a build to. `kran service restart` and `kran service install` print the line too.
+
 ## 0.1.11
 
 ### Fixes

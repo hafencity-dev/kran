@@ -104,6 +104,11 @@ const Berth = memo(function Berth({ node: n, jobs, samples, onOpenJob }: { node:
           {n.self && <span class="tag">this machine</span>}
         </p>
         {n.reason && <NodeReason node={n} />}
+        {i.runtimes?.filter(r => r.problem && r.reason).map(r => (
+          <p class="node-reason" key={r.kind}>
+            Cannot run container jobs: {r.reason}
+          </p>
+        ))}
         <p class="node-spec">
           {i.os_version || osLabel(i.os, i.arch)}, {i.arch}
         </p>

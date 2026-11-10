@@ -122,6 +122,33 @@ type Runtime struct {
 	// Caches: the container runtime's shared caches as its last trim
 	// found them (nil until one ran).
 	Caches *CacheStatus `json:"caches,omitempty"`
+	// Problem: a defect of the node itself (not of Docker) that keeps this
+	// runtime unavailable and that an operator fixes by hand. Reason carries
+	// the same thing as one sentence.
+	Problem *RuntimeProblem `json:"problem,omitempty"`
+}
+
+// RuntimeProblem codes.
+const (
+	// ProblemLinuxBinaryMissing: the Linux kran for this daemon's own
+	// version is not in the node's binary cache, so the container runtime
+	// (macOS: the sync helper and the runner image) cannot be set up.
+	ProblemLinuxBinaryMissing = "linux_binary_missing"
+	// ProblemLinuxBinaryNotFile: the path exists but is not a regular file.
+	ProblemLinuxBinaryNotFile = "linux_binary_not_a_file"
+	// ProblemLinuxBinaryNotExecutable: the file exists without execute permission.
+	ProblemLinuxBinaryNotExecutable = "linux_binary_not_executable"
+)
+
+// RuntimeProblem says what is wrong with a runtime and how to fix it.
+type RuntimeProblem struct {
+	Code    string `json:"code"`
+	Version string `json:"version,omitempty"` // the daemon's version the file is for
+	Path    string `json:"path,omitempty"`    // where the daemon looks for it
+	// Release: the version is a published release, so the file is the same
+	// asset `kran upgrade` fetches. False for a development build.
+	Release bool   `json:"release,omitempty"`
+	Fix     string `json:"fix,omitempty"` // what to do, one sentence
 }
 
 // CacheStatus describes the container runtime's shared caches (toolchains,

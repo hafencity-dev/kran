@@ -46,6 +46,7 @@ func (a *App) statusCommand() *cobra.Command {
 func (a *App) printStatus(st *proto.State, now time.Time) {
 	s := a.styleOut()
 	w := tabwriter.NewWriter(a.Out, 0, 4, 2, ' ', 0)
+	var problems []string // under the node table, so the columns stay aligned
 	for _, n := range st.Nodes {
 		name := n.Info.Name
 		if n.Self {
@@ -80,9 +81,18 @@ func (a *App) printStatus(st *proto.State, now time.Time) {
 		if !n.Accepts && !n.Self {
 			detail += " · not accepting jobs"
 		}
+		for _, rt := range n.Info.Runtimes {
+			if rt.Problem != nil && rt.Reason != "" {
+				detail += " · no container jobs"
+				problems = append(problems, fmt.Sprintf("%s cannot run container jobs: %s", n.Info.Name, rt.Reason))
+			}
+		}
 		fmt.Fprintf(w, "%s\t%s\t%s\n", s.Bold(name), status, detail)
 	}
 	w.Flush()
+	for _, p := range problems {
+		fmt.Fprintln(a.Out, s.Yellow("! "+p))
+	}
 
 	var active []proto.Job
 	for _, j := range st.Jobs {

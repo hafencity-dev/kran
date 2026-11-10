@@ -151,11 +151,22 @@ func (m *manager) useVolume() bool { return runtime.GOOS != "linux" || m.tun.for
 
 func (m *manager) containerRuntime(ctx context.Context, dk *dockerEnv, reason string) (proto.Runtime, bool) {
 	rt := proto.Runtime{Kind: proto.RuntimeContainer, OS: "linux", Arch: runtime.GOARCH}
+	// The Linux binary is the node's own defect, whatever Docker does: say
+	// so even while Docker is down, so fixing Docker does not uncover it.
+	var prob *proto.RuntimeProblem
+	if m.useVolume() && m.opts.LinuxBinary != "" && m.containerSetting() != "off" {
+		prob = CheckLinuxRuntime(m.opts.LinuxBinary, version.Version)
+	}
+	m.reportLinuxRuntime(prob)
 	if dk == nil {
 		// Worth showing on macOS (that is where Linux jobs need it) or when
 		// the user enabled it explicitly; noise elsewhere.
 		if runtime.GOOS == "darwin" || m.containerSetting() == "on" {
 			rt.Reason = reason
+			if prob != nil {
+				rt.Reason += "; and " + LinuxRuntimeCause(prob)
+			}
+			rt.Problem = prob
 			return rt, true
 		}
 		return rt, false
@@ -171,12 +182,38 @@ func (m *manager) containerRuntime(ctx context.Context, dk *dockerEnv, reason st
 		rt.Reason = fmt.Sprintf("Docker %s is too old: same-path workspace mounts need Docker 26 or newer", dk.ver.Version)
 	case m.useVolume() && m.opts.LinuxBinary == "":
 		rt.Reason = "no Linux kran binary for the sync helper; run `kran upgrade` to fetch it"
-	case m.useVolume() && checkFile(m.opts.LinuxBinary) != nil:
-		rt.Reason = fmt.Sprintf("Linux kran binary %s is missing; run `kran upgrade`", m.opts.LinuxBinary)
+	case prob != nil:
+		rt.Reason = LinuxRuntimeCause(prob)
 	default:
 		rt.Available = true
 	}
+	rt.Problem = prob
 	return rt, true
+}
+
+// reportLinuxRuntime logs the Linux binary's state once at start and again
+// whenever it changes (Refresh runs every 30 s while a runtime is
+// unavailable; the log gets the line once, `kran status` keeps showing it).
+func (m *manager) reportLinuxRuntime(prob *proto.RuntimeProblem) {
+	if !m.useVolume() || m.opts.LinuxBinary == "" || m.containerSetting() == "off" {
+		return
+	}
+	key := "ok"
+	if prob != nil {
+		key = prob.Code + "|" + prob.Path
+	}
+	m.rtMu.Lock()
+	same := m.lrKey == key
+	m.lrKey = key
+	m.rtMu.Unlock()
+	if same {
+		return
+	}
+	if prob == nil {
+		m.logf("container runtime: linux runtime for %s found at %s", strings.TrimPrefix(version.Version, "v"), m.opts.LinuxBinary)
+		return
+	}
+	m.logf("container runtime: this node cannot run container jobs until it is fixed (native jobs are unaffected): %s", LinuxRuntimeCause(prob))
 }
 
 func checkFile(p string) error {

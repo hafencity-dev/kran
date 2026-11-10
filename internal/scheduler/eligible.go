@@ -174,6 +174,12 @@ func (s *sched) eligible(j *sjob, v *nodeView, now time.Time) ([]rtView, *inelig
 		if osName == "" || osAny {
 			osName = "usable"
 		}
+		for _, u := range unavailable {
+			if u.rt.Problem != nil && u.rt.Reason != "" {
+				// The node's own defect, with its fix: say it once, by name.
+				return no(whyRuntime, "cannot run container jobs: %s", u.rt.Reason)
+			}
+		}
 		if len(unavailable) > 0 && unavailable[0].rt.Reason != "" {
 			return no(whyRuntime, "no %s runtime (%s)", osName, unavailable[0].rt.Reason)
 		}

@@ -81,6 +81,7 @@ type manager struct {
 	systemdRun string // path when transient user scopes work, else ""
 
 	rtMu     sync.Mutex
+	lrKey    string // last logged state of the Linux runtime binary (reportLinuxRuntime); guarded by rtMu
 	runtimes []proto.Runtime
 	dk       *dockerEnv // nil when Docker is not usable
 	dkReason string     // why not

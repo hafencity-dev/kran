@@ -18,6 +18,8 @@ export interface Runtime {
   mem: number
   available: boolean
   reason?: string
+  // the node's own defect that keeps this runtime unavailable (e.g. the linux kran of its version is missing)
+  problem?: { code: string; version?: string; path?: string; release?: boolean; fix?: string }
   toolchains?: Record<string, string>
   docker: boolean
 }

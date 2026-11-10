@@ -633,7 +633,25 @@ pass, anything that holds the memory is stopped).
   embedded Dockerfile, `kran-init` and the node's Linux kran binary (the
   one `kran link` placed for the Docker VM on macOS, the running binary on
   Linux; the image label hashes all three, so a new binary rebuilds the
-  last layer). Debian stable-slim with git, build-essential, pkg-config,
+  last layer). **Node health:** on macOS that binary must sit in the cache
+  at `<cache>/bin/<version>/linux-<arch>/kran` for the daemon's *own*
+  version, present, a regular file and executable (the cache keeps no
+  checksum beside it; a download was verified against `checksums.txt`).
+  Replacing only the native binary by hand leaves it out. The daemon checks
+  at start and on every runtime refresh (30 s while the runtime is
+  unavailable): it logs one line per state change naming the path and the
+  fix, sets `Runtime.Problem` (`code`, `version`, `path`, `release`, `fix`)
+  and `Reason` on the container runtime (`available: false`), `kran status`
+  prints `! <node> cannot run container jobs: …` under the node table
+  (`--json`: `info.runtimes[].problem`; the dashboard shows the same on the
+  node card), and a job that waits for it reads `<node>: cannot run
+  container jobs: its linux runtime for <version> is missing at <path>;
+  <fix>`. The node stays online and keeps taking native jobs: refusing to
+  start would take those away. The fix names `kran upgrade` only for a
+  release version (x.y.z, which has a published asset); a development build
+  gets the path to copy a build to, and nothing is downloaded for it.
+  `kran service restart` and `install` print the same line after the
+  restart. Debian stable-slim with git, build-essential, pkg-config,
   ca-certificates, curl, wget, locales with common UTF-8 locales prebuilt,
   tzdata, setpriv, mise, the Docker CLI with the compose and buildx plugins
   (also as `/usr/bin/docker` and `/usr/bin/docker-compose`, for scripts

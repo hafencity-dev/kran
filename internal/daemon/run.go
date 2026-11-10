@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -23,7 +22,6 @@ import (
 	"github.com/hafencity-dev/kran/internal/store"
 	"github.com/hafencity-dev/kran/internal/transport"
 	"github.com/hafencity-dev/kran/internal/ui"
-	"github.com/hafencity-dev/kran/internal/version"
 	"github.com/hafencity-dev/kran/internal/workspace"
 )
 
@@ -238,21 +236,8 @@ func orderAddresses(addrs []string, preferred string) []string {
 }
 
 // linuxBinary is the Linux kran for the container runtime's sync helper on
-// macOS ("" when absent: execenv then reports the runtime unavailable).
-func linuxBinary() string {
-	if runtime.GOOS == "linux" {
-		return ""
-	}
-	p := paths.BinaryCache(strings.TrimPrefix(version.Version, "v"), "linux", runtime.GOARCH)
-	if _, err := os.Stat(p); err != nil {
-		if p2 := paths.BinaryCache(version.Version, "linux", runtime.GOARCH); p2 != p {
-			if _, err := os.Stat(p2); err == nil {
-				return p2
-			}
-		}
-	}
-	return p
-}
+// macOS ("" on Linux). Its absence is reported by execenv (log, status).
+func linuxBinary() string { return execenv.LinuxRuntimePath() }
 
 // supervisor names the service manager that started this process, from
 // the environment it sets for its services ("" = on demand or by hand).

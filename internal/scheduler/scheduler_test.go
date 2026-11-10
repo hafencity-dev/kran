@@ -1162,3 +1162,51 @@ func TestRemoteAttemptsUsedUpEndWithTheBackoff(t *testing.T) {
 		t.Fatalf("after the backoff: %+v", pl)
 	}
 }
+
+// A node whose own linux binary is missing stays online: it takes a native
+// job, a container job goes to the other machine, and the reason for a job
+// pinned to it names the cause once.
+func TestNodeWithoutLinuxRuntimeBinary(t *testing.T) {
+	const cause = "its linux runtime for 0.1.10-6-gc9403ef is missing at /cache/bin/0.1.10-6-gc9403ef/linux-arm64/kran; copy it there"
+	clk := &fakeClock{t0}
+	broken := func() proto.NodeState {
+		d := devmac(t0)
+		d.Info.Runtimes = append([]proto.Runtime(nil), d.Info.Runtimes...)
+		d.Info.Runtimes[1].Available = false
+		d.Info.Runtimes[1].Reason = cause
+		d.Info.Runtimes[1].Problem = &proto.RuntimeProblem{Code: proto.ProblemLinuxBinaryMissing, Version: "0.1.10-6-gc9403ef", Path: "/cache/bin/0.1.10-6-gc9403ef/linux-arm64/kran"}
+		return d
+	}
+
+	t.Run("native job runs there", func(t *testing.T) {
+		s := newTestSched(t, clk, self(gx10(t0)), broken())
+		tk := s.Submit(newJob("n", "a", 1, gib, 60, withReq(func(r *proto.Requirements) { r.Node, r.OS = "devmac", proto.OSAny })))
+		if pl := placed(t, tk); pl.Node != "devmac" || pl.Runtime != proto.RuntimeNative {
+			t.Fatalf("placed %+v", pl)
+		}
+	})
+	t.Run("container job goes elsewhere", func(t *testing.T) {
+		s := newTestSched(t, clk, self(gx10(t0)), broken())
+		pl := placed(t, s.Submit(newJob("c", "a", 1, gib, 60)))
+		if pl.Node != "gx10" {
+			t.Fatalf("placed on %s, want gx10", pl.Node)
+		}
+	})
+	t.Run("pinned container job names cause and is not re-offered", func(t *testing.T) {
+		s := newTestSched(t, clk, self(gx10(t0)), broken())
+		tk := s.Submit(newJob("p", "a", 1, gib, 60, withReq(func(r *proto.Requirements) { r.Node = "devmac" })))
+		pending(t, tk)
+		want := "devmac: cannot run container jobs: " + cause
+		if r := reason(s, "p"); r != want {
+			t.Fatalf("reason\n got %q\nwant %q", r, want)
+		}
+		// Time passing and fresh node updates change nothing: the node is
+		// not a candidate, so nothing is offered to it.
+		clk.Advance(time.Minute)
+		s.UpdateNode(broken())
+		pending(t, tk)
+		if r := reason(s, "p"); r != want {
+			t.Fatalf("reason changed: %q", r)
+		}
+	})
+}
