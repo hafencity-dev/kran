@@ -136,7 +136,11 @@ func TestE2EWorkspaceSync(t *testing.T) {
 		t.Logf("native runtime ran in the origin path itself (same machine)")
 	}
 
-	statCmd := `stat -c '%n %.9Y %a %F' main.go sub/code.txt bin/run.sh link.txt; readlink link.txt`
+	// The mtime comes from find, not stat: uutils coreutils (the default on
+	// Ubuntu 26.04) prints stat's %.9Y through a float and rounds the last
+	// digits (.123456789 -> .123456800). find -printf keeps all nine.
+	statCmd := `stat -c '%n %a %F' main.go sub/code.txt bin/run.sh link.txt; ` +
+		`find main.go sub/code.txt bin/run.sh link.txt -printf '%p %T@\n'; readlink link.txt`
 	if hostOS() == "darwin" {
 		statCmd = `stat -f '%N %Fm %Lp %HT' main.go sub/code.txt bin/run.sh link.txt; readlink link.txt`
 	}
