@@ -45,12 +45,7 @@ func (s *sched) Admit(job *proto.Job, kind proto.RuntimeKind) (Placement, error)
 		return Placement{}, &AdmitError{Code: "no_runtime", Reason: fmt.Sprintf("%s: no %s runtime available", self, kind)}
 	}
 	if h, ok := s.holds[self]; ok {
-		v.host.holdCPU += h.res.CPUs
-		v.host.holdMem += h.res.Mem
-		if h.vm && v.vm != nil {
-			v.vm.holdCPU += h.res.CPUs
-			v.vm.holdMem += h.res.Mem
-		}
+		v.hold(rtView{vm: h.vm}, h.res)
 	}
 	est := job.Estimate
 	normalizeEstimate(&est)
@@ -65,12 +60,7 @@ func (s *sched) Admit(job *proto.Job, kind proto.RuntimeKind) (Placement, error)
 		res.Mem = v.capMem(rv)
 		reason = "admitted alone (larger than this node)"
 	case !v.fits(rv, res.CPUs, res.Mem, false):
-		var fm int64 = math.MaxInt64
-		fc := math.Inf(1)
-		for _, p := range v.pools(rv) {
-			fm = min(fm, p.freeMem())
-			fc = math.Min(fc, p.freeCPU())
-		}
+		fm, fc := v.freeFor(rv, false)
 		return Placement{}, &AdmitError{Code: "busy", Reason: fmt.Sprintf("%s: needs %s and %s, has %s and %s free",
 			self, fmtCPUs(res.CPUs), fmtBytes(res.Mem), fmtCPUs(nonNeg(fc)), fmtBytes(max(0, fm)))}
 	}

@@ -454,10 +454,7 @@ func (s *sched) maybeHold(j *sjob, cands []*cand, starving bool, holds map[strin
 		return false
 	}
 	res := proto.Resources{CPUs: target.cpu, Mem: target.mem}
-	for _, p := range target.v.pools(target.rt) {
-		p.holdCPU += res.CPUs
-		p.holdMem += res.Mem
-	}
+	target.v.hold(target.rt, res)
 	holds[target.v.name] = hold{job: j.id, res: res, vm: target.rt.vm}
 	j.reason += "; next in line on " + target.v.name
 	return true
@@ -468,9 +465,13 @@ func (s *sched) holdAll(j *sjob, c *cand, holds map[string]hold) bool {
 		return false
 	}
 	res := proto.Resources{CPUs: c.v.capCPU(c.rt), Mem: c.v.capMem(c.rt)}
-	for _, p := range c.v.pools(c.rt) {
-		p.holdCPU += p.capCPU
-		p.holdMem += p.capMem
+	for _, n := range c.v.needs(c.rt, c.v.capMem(c.rt)) {
+		n.p.holdCPU += n.p.capCPU
+		if n.p == &c.v.host && c.rt.vm && c.v.vmCredit {
+			n.p.holdMem += n.mem // the host's share of the VM's room
+		} else {
+			n.p.holdMem += n.p.capMem
+		}
 	}
 	holds[c.v.name] = hold{job: j.id, res: res, vm: c.rt.vm}
 	return true
@@ -505,9 +506,7 @@ func (s *sched) place(j *sjob, c *cand, now time.Time, reason string) {
 	c.v.e.allocs[j.id] = a
 	c.v.allocs = append(c.v.allocs, a)
 	sort.Slice(c.v.allocs, func(x, y int) bool { return c.v.allocs[x].end.Before(c.v.allocs[y].end) })
-	for _, p := range c.v.pools(c.rt) {
-		p.take(res)
-	}
+	c.v.place(c.rt, a, res)
 	c.v.running++
 	j.alloc = a
 	j.requeued = false
@@ -655,9 +654,10 @@ func (s *sched) resourceReason(j *sjob, cands []*cand) string {
 			shorts = append(shorts, sh)
 			continue
 		}
-		for _, p := range c.v.pools(c.rt) {
+		for _, n := range c.v.needs(c.rt, c.mem) {
+			p := n.p
 			fm, fc := p.freeMem()+p.holdMem, p.freeCPU()+p.holdCPU
-			m, cp := c.mem > fm, c.cpu > fc*cpuOvercommit+1e-9
+			m, cp := n.mem > fm, c.cpu > fc*cpuOvercommit+1e-9
 			if !m && !cp {
 				continue
 			}

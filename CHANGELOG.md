@@ -2,6 +2,12 @@
 
 All notable changes to kran. Versions follow [semantic versioning](https://semver.org/).
 
+## Unreleased
+
+### Placement
+
+- A container job on a Mac is admitted against the Linux VM's memory, not again against the host's (11.11.2026: devmac showed 0.3–5 GiB "free" for container jobs while 32 GiB sat unused inside its 40 GiB Colima VM; in 24 hours 68 jobs fell back to gx10, and a 17 GiB container build reservation kept a job waiting 43.6 minutes with 23.5 CPUs idle). The VM's memory is resident on the host and never handed back, so the host is charged for the VM once: container jobs count against the host's memory only up to the part of the VM the host has not paid for yet, measured as the Lima host agent's physical footprint (`runtimes.container.host_resident` in the node's metrics; Colima only). Without a reading (a VM just booted, Docker Desktop or OrbStack, an older node), with a stale or failed one, or while the host is under memory pressure, container jobs count against the host in full as before. Native jobs are admitted against the host as before, and container jobs' unused reservations no longer shrink their room. Linux nodes are unchanged. `kran status` shows such a node's host and VM pools apart (`host: … mem free · Linux VM: … mem free`; JSON `free_vm`).
+
 ## 0.1.12
 
 ### Fixes

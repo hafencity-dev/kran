@@ -125,6 +125,12 @@ type dockerProbe struct {
 	memUsed  int64   // Σ container memory
 	byName   map[string]dockerStat
 	idByName map[string]string
+	// The VM's footprint on the host (vmresident.go); residentAt is zero
+	// while there is no valid reading.
+	resident      int64
+	residentAt    time.Time
+	residentTried time.Time
+	readFile      func(string) ([]byte, error) // nil: os.ReadFile
 }
 
 func newDockerProbe(p *prober) *dockerProbe {
@@ -182,6 +188,9 @@ func (d *dockerProbe) refresh(ctx context.Context) {
 	d.mu.Lock()
 	info := d.info
 	d.mu.Unlock()
+	if info.Reachable && d.vm {
+		d.refreshResident(ctx, info.Binary, now, stressed)
+	}
 	if !info.Reachable || !d.vm || !d.statsGate.allow(now, stressed) {
 		return
 	}
@@ -318,6 +327,9 @@ func (d *dockerProbe) runtimeMetrics(host proto.NodeMetrics) (proto.RuntimeMetri
 	if !d.statsAt.IsZero() && host.Time.Sub(d.statsAt) <= dockerStatsFresh {
 		rm.CPUBusy = clamp01(d.cpus / float64(d.info.CPUs))
 		rm.MemAvailable = max(0, d.info.MemTotal-d.memUsed)
+	}
+	if !d.residentAt.IsZero() && host.Time.Sub(d.residentAt) <= vmResidentStale {
+		rm.HostResident = d.resident
 	}
 	return rm, true
 }

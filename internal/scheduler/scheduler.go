@@ -86,6 +86,9 @@ type Snapshot struct {
 	// Jobs lists the job IDs counted in Allocated per node (fill
 	// proto.NodeState.AllocatedJobs of the self node from Jobs[self]).
 	Jobs map[string][]string
+	// FreeVM: node → what a container job in its Linux VM could get now
+	// (nodes with a VM only; Free is then the host's, a native job's).
+	FreeVM map[string]proto.Resources
 	// Unavailable says why the scheduler currently avoids a node although
 	// its status is online (failed starts cool-down), node → reason.
 	Unavailable map[string]string

@@ -133,7 +133,7 @@ targets linux/darwin × arm64/amd64.
 | `internal/execenv` | target-side execution: slots, manifest apply, blob cache, deps setup, runtimes (native/container), supervisor, pty, process-tree kill, resource caps, reaper |
 | `internal/workspace` | origin-side: repo root/ID detection, file scan, manifest with hash cache, toolchain detection, project config `.kran.toml` |
 | `internal/scheduler` | queue, fair share, admission, placement scoring, reasons |
-| `internal/metrics` | node probe (static info) + live metrics, linux + darwin + docker VM + nvidia |
+| `internal/metrics` | node probe (static info) + live metrics, linux + darwin + docker VM (capacity, live use, host footprint) + nvidia |
 | `internal/estimate` | fingerprints, learned estimates (cpu, mem, duration, per-node speed) |
 | `internal/store` | sqlite (modernc.org/sqlite), migrations, job history |
 | `internal/ui` + `web/` | embedded web dashboard (Vite + Preact + TS, built to `internal/ui/dist`, committed) |
@@ -335,6 +335,13 @@ Flags: `-l/--local`, `-r/--remote`, `-n/--node NAME`, `--gpu`, `--cpus N`,
   is overloaded (the last reading stands in). The container runtime counts
   as unavailable only after 3 consecutive failed probes; engine capacity
   comes from the Engine API when the endpoint is a unix socket.
+* VM footprint (macOS, Colima): every 30 s the prober reads the physical
+  footprint of the Lima host agent behind the Docker endpoint
+  (`~/.colima/_lima/<instance>/ha.pid`) with `top -l 1 -pid <pid> -stats
+  pid,mem` and publishes it, rounded down by one displayed unit, as the
+  container runtime's `host_resident` (§6.3, container jobs in a VM). While
+  the node is overloaded the last reading stands in for up to 2 minutes; a
+  failed or older reading publishes none.
 * Reaper (every 30 s, and at daemon start): kills scopes/containers/process
   groups labelled kran whose job is not active; deletes job dirs older than
   7 days; trims blob cache (LRU, cap default 20 GiB or 10% of disk) and
@@ -444,6 +451,39 @@ and `free_cpu = capacity_cpu - reserve_cpus - Σ allocated_cpu` adjusted down
 by live non-kran CPU busy. Memory is never overcommitted. A job larger than
 any node's total schedulable memory is admitted alone on the largest node
 (reason shown) rather than queued forever.
+
+**Container jobs in a VM** (macOS: Colima, Docker Desktop, …). The VM's
+memory is one block of the host's: the guest takes a host page when it
+first touches it and does not hand it back (no free-page reporting), so a
+VM that is resident at its size serves a new container job from pages the
+host has already paid for. A container job is therefore admitted against
+the VM pool (the VM's memory less its overhead, its live available memory,
+kran's allocations in it) and against the host pool for CPU, but for memory
+only up to the part of the VM the host has not paid for yet:
+`vm_unpaid = vm_mem − resident`. `resident` is the VM process's physical
+footprint as the node measures it (`RuntimeMetrics.HostResident`), capped at
+the VM's memory and at what the host shows in use (`mem_total −
+mem_available`). Container jobs' memory, as far as the live metrics do not
+show it used yet (it may still grow the VM), counts against the host
+together at most `vm_unpaid`, in the host's ledger and in its live figure
+alike. The VM itself is thereby charged to the host once: its resident
+part is already gone from the host's available memory, its unpaid part is
+what container jobs may still take. A native job on that node is admitted
+against the host pool as before; container jobs count in it only with that
+share. **Guard:** without proof of residency the VM earns no credit and
+container jobs count against the host in full, as before this rule: no
+reading (a VM just booted before its first reading, a VM other than Colima,
+a node running an older kran), a failed reading or one older than 2
+minutes, or a host under memory pressure (memorystatus level ≤ 25: guest
+pages may sit compressed or in swap, and touching them again costs host
+memory). A freshly booted VM earns credit only as far as its footprint has
+grown: with 12 of 40 GiB resident, container jobs still count against the
+host up to 28 GiB. The footprint is a lower bound of what the host has paid:
+the reading is rounded down by one displayed unit, and a failed reading is
+reported as none, never as the last one (a restarted VM starts unpaid).
+Linux nodes have no VM pool: container jobs share the host pool exactly as
+before. `kran status` shows such a node's two pools apart: the host's free
+memory (what a native job gets) and the VM's (what a container job gets).
 
 Scoring among admissible nodes — minimize expected completion:
 `wait + sync_bytes/bandwidth + setup_estimate + duration_estimate × speed(node) × slowdown(node)`

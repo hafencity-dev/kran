@@ -628,6 +628,7 @@ func (s *sched) Snapshot() Snapshot {
 		Reasons:     make(map[string]string, len(s.order)),
 		Allocated:   make(map[string]proto.Resources, len(s.nodes)),
 		Free:        make(map[string]proto.Resources, len(s.nodes)),
+		FreeVM:      map[string]proto.Resources{},
 		Running:     make(map[string]int, len(s.nodes)),
 		Jobs:        make(map[string][]string, len(s.nodes)),
 		Unavailable: map[string]string{},
@@ -642,6 +643,9 @@ func (s *sched) Snapshot() Snapshot {
 		v := s.view(name, now)
 		snap.Allocated[name] = proto.Resources{CPUs: v.host.allocCPU, Mem: v.host.allocMem}
 		snap.Free[name] = proto.Resources{CPUs: nonNeg(v.host.freeCPU()), Mem: max(0, v.host.freeMem())}
+		if f := v.freeVM(); f != nil {
+			snap.FreeVM[name] = *f
+		}
 		snap.Running[name] = v.running
 		ids := make([]string, 0, len(v.e.allocs))
 		for id := range v.e.allocs {

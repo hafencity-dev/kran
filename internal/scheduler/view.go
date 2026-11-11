@@ -39,11 +39,13 @@ func (p *pool) freeCPU() float64 {
 	return p.capCPU - p.allocCPU - p.cpuPenalty - p.holdCPU
 }
 
-func (p *pool) take(r proto.Resources) {
-	p.allocCPU += r.CPUs
-	p.allocMem += r.Mem
+// take books a placed job: cpu and mem are what it draws from this pool
+// (a container job draws only its unpaid share from the host, needs).
+func (p *pool) take(cpu float64, mem int64) {
+	p.allocCPU += cpu
+	p.allocMem += mem
 	if p.liveMem < unlimited {
-		p.liveMem -= r.Mem
+		p.liveMem -= mem
 	}
 }
 
@@ -61,6 +63,36 @@ type nodeView struct {
 	running int
 	rts     []rtView
 	allocs  []*allocation // sorted by expected end
+	// VM credit (SPEC §6.3, container jobs in a VM): with vmCredit the
+	// host has proven paid for most of the VM, and container jobs count
+	// against the host's memory only up to vmRoom, the unpaid part of the
+	// VM not yet charged to container jobs. Without it container jobs
+	// count against the host in full.
+	vmCredit bool
+	vmRoom   int64
+	// hostMem is what each allocation is charged on the host's memory
+	// (a container job's share under vmCredit; else its reservation).
+	hostMem map[*allocation]int64
+}
+
+// poolNeed is what a job takes from one pool of its runtime.
+type poolNeed struct {
+	p   *pool
+	mem int64
+}
+
+// needs lists the pools a job of mem runs in and the memory it draws from
+// each: a container job in a VM takes its memory from the VM, and from the
+// host only as far as the VM is not paid for yet (vmRoom).
+func (v *nodeView) needs(rt rtView, mem int64) []poolNeed {
+	if rt.vm && v.vm != nil {
+		h := mem
+		if v.vmCredit {
+			h = min(mem, max(0, v.vmRoom))
+		}
+		return []poolNeed{{&v.host, h}, {v.vm, mem}}
+	}
+	return []poolNeed{{&v.host, mem}}
 }
 
 func (v *nodeView) pools(rt rtView) []*pool {
@@ -70,12 +102,45 @@ func (v *nodeView) pools(rt rtView) []*pool {
 	return []*pool{&v.host}
 }
 
+// place books a placed job of res in the runtime's pools.
+func (v *nodeView) place(rt rtView, a *allocation, res proto.Resources) {
+	for _, n := range v.needs(rt, res.Mem) {
+		n.p.take(res.CPUs, n.mem)
+		if n.p == &v.host {
+			v.hostMem[a] = n.mem
+			if rt.vm && v.vmCredit {
+				v.vmRoom -= n.mem
+			}
+		}
+	}
+}
+
+// vmPaid is how much of the node's VM memory the host has proven paid for
+// (SPEC §6.3): the VM's measured footprint, capped at the VM's memory and
+// at what the host shows in use; 0 without proof (no reading, or the host
+// under memory pressure, where guest pages may sit compressed or swapped).
+func vmPaid(info proto.NodeInfo, m proto.NodeMetrics, vmMem int64) int64 {
+	if m.Time.IsZero() || vmMem <= 0 {
+		return 0
+	}
+	rm, ok := m.Runtimes[proto.RuntimeContainer]
+	if !ok || rm.HostResident <= 0 {
+		return 0
+	}
+	if info.OS == "darwin" && m.MemPressure >= macMemFloor {
+		return 0
+	}
+	used := info.MemTotal - m.MemAvailable
+	return max(0, min(rm.HostResident, vmMem, used))
+}
+
 // view computes the schedulable state of a node. Callers hold s.mu.
 func (s *sched) view(name string, now time.Time) *nodeView {
 	e := s.nodes[name]
 	st := e.st
 	info := st.Info
-	v := &nodeView{name: name, e: e, self: name == s.opts.Origin}
+	m := st.Metrics
+	v := &nodeView{name: name, e: e, self: name == s.opts.Origin, hostMem: map[*allocation]int64{}}
 
 	capCPU, capMem := st.Capacity.CPUs, st.Capacity.Mem
 	if capCPU <= 0 {
@@ -85,7 +150,25 @@ func (s *sched) view(name string, now time.Time) *nodeView {
 		capMem = info.MemTotal - st.Reserve.Mem
 	}
 	v.host = pool{capCPU: math.Max(0, capCPU), capMem: max(0, capMem), liveMem: unlimited,
-		press: hostPressure(st.Metrics, info)}
+		press: hostPressure(m, info)}
+
+	// The Linux VM behind the container runtime of a non-Linux host, if any.
+	var vmRT *proto.Runtime
+	for i, rt := range info.Runtimes {
+		if rt.Kind == proto.RuntimeContainer && rt.OS != info.OS && rt.Available {
+			vmRT = &info.Runtimes[i]
+			break
+		}
+	}
+	paid := int64(0)
+	if vmRT != nil {
+		paid = vmPaid(info, m, vmRT.Mem)
+	}
+	v.vmCredit = paid > 0
+	unpaid := int64(0)
+	if v.vmCredit {
+		unpaid = vmRT.Mem - paid
+	}
 
 	// Allocations: this scheduler's own (and, on the self node, foreign
 	// admits). A peer's report also counts jobs other origins placed there.
@@ -96,23 +179,8 @@ func (s *sched) view(name string, now time.Time) *nodeView {
 	for _, id := range st.AllocatedJobs {
 		inReport[id] = true
 	}
-	var notReportedCPU float64
-	var notReportedMem int64
-	notReported := 0
 	for _, a := range e.allocs {
 		v.allocs = append(v.allocs, a)
-		ownCPU += a.res.CPUs
-		ownMem += a.res.Mem
-		ownCount++
-		if a.vm {
-			vmCPU += a.res.CPUs
-			vmMem += a.res.Mem
-		}
-		if !inReport[a.job] {
-			notReportedCPU += a.res.CPUs
-			notReportedMem += a.res.Mem
-			notReported++
-		}
 	}
 	sort.Slice(v.allocs, func(i, k int) bool {
 		if !v.allocs[i].end.Equal(v.allocs[k].end) {
@@ -120,6 +188,37 @@ func (s *sched) view(name string, now time.Time) *nodeView {
 		}
 		return v.allocs[i].job < v.allocs[k].job
 	})
+	// What each allocation is charged on the host: its reservation, or
+	// under VM credit a container job's untouched part (it may still grow
+	// the VM), all of them together at most the VM's unpaid part. In end
+	// order, so the sum does not depend on map order.
+	room := unpaid
+	for _, a := range v.allocs {
+		h := a.res.Mem
+		if a.vm && v.vmCredit {
+			h = min(pendingMem(a, m.Time, v.self), max(0, room))
+			room -= h
+		}
+		v.hostMem[a] = h
+	}
+	v.vmRoom = max(0, room)
+	var notReportedCPU float64
+	var notReportedMem int64
+	notReported := 0
+	for _, a := range v.allocs {
+		ownCPU += a.res.CPUs
+		ownMem += v.hostMem[a]
+		ownCount++
+		if a.vm {
+			vmCPU += a.res.CPUs
+			vmMem += a.res.Mem
+		}
+		if !inReport[a.job] {
+			notReportedCPU += a.res.CPUs
+			notReportedMem += v.hostMem[a]
+			notReported++
+		}
+	}
 	switch {
 	case v.self:
 		v.host.allocCPU, v.host.allocMem, v.running = ownCPU, ownMem, ownCount
@@ -136,12 +235,15 @@ func (s *sched) view(name string, now time.Time) *nodeView {
 	}
 	foreignCPU := v.host.allocCPU - ownCPU // kran jobs of other origins on a peer
 
-	m := st.Metrics
 	if !m.Time.IsZero() {
 		pending := int64(0)
 		visibleCPU := math.Max(0, foreignCPU)
-		for _, a := range e.allocs {
-			pending += pendingMem(a, m.Time, v.self)
+		for _, a := range v.allocs {
+			if a.vm && v.vmCredit {
+				pending += v.hostMem[a] // already its untouched part, capped
+			} else {
+				pending += pendingMem(a, m.Time, v.self)
+			}
 			visibleCPU += visibleCPUOf(a, m.Time)
 		}
 		v.host.liveMem = m.MemAvailable - st.Reserve.Mem - pending
@@ -166,19 +268,16 @@ func (s *sched) view(name string, now time.Time) *nodeView {
 	}
 	// The VM pool exists whenever the node runs Linux containers in a VM,
 	// also on the self node (foreign jobs are admitted into it).
-	for _, rt := range info.Runtimes {
-		rv := rtView{rt: rt, vm: rt.Kind == proto.RuntimeContainer && rt.OS != info.OS}
-		if !rv.vm || !rv.rt.Available || v.vm != nil {
-			continue
-		}
+	if vmRT != nil {
+		rt := *vmRT
 		// The VM keeps some memory for its own kernel and Docker.
-		overhead := max(512*mib, rv.rt.Mem/20)
-		vp := &pool{capCPU: float64(rv.rt.CPUs), capMem: max(0, rv.rt.Mem-overhead), liveMem: unlimited,
+		overhead := max(512*mib, rt.Mem/20)
+		vp := &pool{capCPU: float64(rt.CPUs), capMem: max(0, rt.Mem-overhead), liveMem: unlimited,
 			allocCPU: vmCPU, allocMem: vmMem, press: vmPressure(v.host.press, 0)}
 		if rm, ok := m.Runtimes[proto.RuntimeContainer]; ok && !m.Time.IsZero() {
 			pending := int64(0)
 			visible := 0.0
-			for _, a := range e.allocs {
+			for _, a := range v.allocs {
 				if a.vm {
 					pending += pendingMem(a, m.Time, false)
 					visible += visibleCPUOf(a, m.Time)
@@ -187,7 +286,7 @@ func (s *sched) view(name string, now time.Time) *nodeView {
 			if rm.MemAvailable > 0 {
 				vp.liveMem = rm.MemAvailable - pending
 			}
-			vp.cpuPenalty = math.Max(0, rm.CPUBusy*float64(rv.rt.CPUs)-visible)
+			vp.cpuPenalty = math.Max(0, rm.CPUBusy*float64(rt.CPUs)-visible)
 			vp.press = vmPressure(v.host.press, rm.CPUBusy)
 		}
 		v.vm = vp
@@ -228,13 +327,14 @@ func visibleCPUOf(a *allocation, mt time.Time) float64 {
 // fits reports whether need fits the runtime's pools now. cpu is the
 // clamped CPU need.
 func (v *nodeView) fits(rt rtView, cpu float64, mem int64, ignoreHolds bool) bool {
-	for _, p := range v.pools(rt) {
+	for _, n := range v.needs(rt, mem) {
+		p := n.p
 		freeMem, freeCPU := p.freeMem(), p.freeCPU()
 		if ignoreHolds {
 			freeMem += p.holdMem
 			freeCPU += p.holdCPU
 		}
-		if mem > freeMem || cpu > freeCPU*cpuOvercommit+1e-9 {
+		if n.mem > freeMem || cpu > freeCPU*cpuOvercommit+1e-9 {
 			return false
 		}
 	}
@@ -242,6 +342,27 @@ func (v *nodeView) fits(rt rtView, cpu float64, mem int64, ignoreHolds bool) boo
 		return false
 	}
 	return true
+}
+
+// freeFor is the runtime's free memory (the largest job it takes now) and
+// the free CPUs of its tightest pool. Under VM credit the host does not
+// limit a container job's memory while the VM's unpaid room fits in it.
+func (v *nodeView) freeFor(rt rtView, withHolds bool) (int64, float64) {
+	var fm int64 = math.MaxInt64
+	fc := math.Inf(1)
+	for _, p := range v.pools(rt) {
+		pm, pc := p.freeMem(), p.freeCPU()
+		if withHolds {
+			pm += p.holdMem
+			pc += p.holdCPU
+		}
+		if p == &v.host && rt.vm && v.vm != nil && v.vmCredit && max(0, v.vmRoom) <= pm {
+			pm = math.MaxInt64
+		}
+		fm = min(fm, pm)
+		fc = math.Min(fc, pc)
+	}
+	return fm, fc
 }
 
 // pressure is the contention a job in the runtime would run under.
@@ -299,6 +420,8 @@ func (v *nodeView) waitFor(rt rtView, cpu float64, mem int64, now time.Time) flo
 	for i, p := range ps {
 		cur[i] = state{p.freeCPU(), p.freeMem()}
 	}
+	credit := rt.vm && v.vm != nil && v.vmCredit
+	room := v.vmRoom
 	running := v.running
 	for _, a := range v.allocs {
 		for i, p := range ps {
@@ -306,12 +429,23 @@ func (v *nodeView) waitFor(rt rtView, cpu float64, mem int64, now time.Time) flo
 				continue
 			}
 			cur[i].freeCPU += a.res.CPUs
-			cur[i].freeMem += a.res.Mem
+			if p == &v.host {
+				cur[i].freeMem += v.hostMem[a]
+			} else {
+				cur[i].freeMem += a.res.Mem
+			}
+		}
+		if a.vm && v.vmCredit {
+			room += v.hostMem[a]
 		}
 		running--
 		ok := true
-		for i := range ps {
-			if mem > cur[i].freeMem || cpu > cur[i].freeCPU*cpuOvercommit+1e-9 {
+		for i, p := range ps {
+			need := mem
+			if credit && p == &v.host {
+				need = min(mem, max(0, room))
+			}
+			if need > cur[i].freeMem || cpu > cur[i].freeCPU*cpuOvercommit+1e-9 {
 				ok = false
 			}
 		}
@@ -354,8 +488,9 @@ const shortCPUOvercommit = 2.0
 // fitsShort is the admission check for short local jobs: memory must fit,
 // CPU only within shortCPUOvercommit × capacity.
 func (v *nodeView) fitsShort(rt rtView, cpu float64, mem int64) bool {
-	for _, p := range v.pools(rt) {
-		if mem > p.freeMem() || p.allocCPU+p.holdCPU+cpu > shortCPUOvercommit*p.capCPU+1e-9 {
+	for _, n := range v.needs(rt, mem) {
+		p := n.p
+		if n.mem > p.freeMem() || p.allocCPU+p.holdCPU+cpu > shortCPUOvercommit*p.capCPU+1e-9 {
 			return false
 		}
 	}
@@ -363,4 +498,22 @@ func (v *nodeView) fitsShort(rt rtView, cpu float64, mem int64) bool {
 		return false
 	}
 	return true
+}
+
+// hold sets res aside in the runtime's pools for a job that waits longest.
+func (v *nodeView) hold(rt rtView, res proto.Resources) {
+	for _, n := range v.needs(rt, res.Mem) {
+		n.p.holdCPU += res.CPUs
+		n.p.holdMem += n.mem
+	}
+}
+
+// freeVM is what a container job in the node's VM could get now, or nil
+// on a node without a VM.
+func (v *nodeView) freeVM() *proto.Resources {
+	if v.vm == nil {
+		return nil
+	}
+	fm, fc := v.freeFor(rtView{vm: true}, false)
+	return &proto.Resources{CPUs: nonNeg(fc), Mem: max(0, fm)}
 }

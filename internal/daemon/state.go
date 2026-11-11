@@ -24,6 +24,7 @@ func (d *Daemon) State() proto.State {
 		if f, ok := snap.Free[ns.Info.Name]; ok {
 			ns.Free = f
 		}
+		ns.FreeVM = freeVM(snap, ns.Info.Name)
 		if r := snap.Unavailable[ns.Info.Name]; r != "" && ns.Status == proto.NodeOnline {
 			ns.Reason = r
 		}
@@ -100,6 +101,7 @@ func (d *Daemon) selfNodeState(snap scheduler.Snapshot) proto.NodeState {
 		Allocated:     snap.Allocated[d.self],
 		AllocatedJobs: append([]string{}, snap.Jobs[d.self]...),
 		Free:          snap.Free[d.self],
+		FreeVM:        freeVM(snap, d.self),
 		Running:       snap.Running[d.self],
 		Guests:        d.target.guests(),
 	}
@@ -111,6 +113,15 @@ func (d *Daemon) selfNodeState(snap scheduler.Snapshot) proto.NodeState {
 		ns.Reason = r
 	}
 	return ns
+}
+
+// freeVM is what a container job in the node's Linux VM could get now, or
+// nil on a node without a VM.
+func freeVM(snap scheduler.Snapshot, node string) *proto.Resources {
+	if f, ok := snap.FreeVM[node]; ok {
+		return &f
+	}
+	return nil
 }
 
 // publishSelf pushes this node to the scheduler and the UI.

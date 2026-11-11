@@ -65,6 +65,13 @@ func (a *App) printStatus(st *proto.State, now time.Time) {
 		if n.Status == proto.NodeOnline || n.Status == proto.NodeDraining || n.Status == proto.NodeDegraded {
 			detail = fmt.Sprintf("%.0f of %d cpus free · %s of %s mem free · %d running",
 				n.Free.CPUs, n.Info.CPUs, humanBytes(n.Free.Mem), humanBytes(n.Info.MemTotal), n.Running)
+			if vm, size := n.FreeVM, vmRuntime(n.Info); vm != nil && size != nil {
+				// Two pools: a native job gets the host's, a container job the
+				// VM's; one figure for both misleads (SPEC §6.3).
+				detail = fmt.Sprintf("host: %.0f of %d cpus, %s of %s mem free · Linux VM: %.0f of %d cpus, %s of %s mem free · %d running",
+					n.Free.CPUs, n.Info.CPUs, humanBytes(n.Free.Mem), humanBytes(n.Info.MemTotal),
+					vm.CPUs, size.CPUs, humanBytes(vm.Mem), humanBytes(size.Mem), n.Running)
+			}
 			if !n.Self && n.Link.Connected {
 				detail += fmt.Sprintf(" · rtt %.0f ms", n.Link.RTTMillis)
 				if n.Link.BandwidthBps > 0 {
@@ -146,6 +153,17 @@ func (a *App) printStatus(st *proto.State, now time.Time) {
 	if len(st.Nodes) == 1 {
 		fmt.Fprintln(a.Out, "only this machine so far; add another with `kran link <host>`")
 	}
+}
+
+// vmRuntime is the node's container runtime when it runs in a VM (its OS
+// differs from the host's), else nil.
+func vmRuntime(info proto.NodeInfo) *proto.Runtime {
+	for i, rt := range info.Runtimes {
+		if rt.Kind == proto.RuntimeContainer && rt.OS != info.OS && rt.Available {
+			return &info.Runtimes[i]
+		}
+	}
+	return nil
 }
 
 func plural(n int, one, many string) string {

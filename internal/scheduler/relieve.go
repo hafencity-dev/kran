@@ -74,10 +74,22 @@ func originBusy(self *cand) (float64, string) {
 }
 
 // keepsSpare reports whether the runtime keeps at least share of its CPUs
-// and memory free after taking cpu and mem.
+// and memory free after taking cpu and mem. A container job under VM
+// credit keeps the share of the VM's memory (the host's is not its own;
+// SPEC §6.3), and of both pools' CPUs.
 func (v *nodeView) keepsSpare(rt rtView, cpu float64, mem int64, share float64) bool {
-	for _, p := range v.pools(rt) {
-		if p.freeCPU()-cpu < share*p.capCPU || float64(p.freeMem()-mem) < share*float64(p.capMem) {
+	for _, n := range v.needs(rt, mem) {
+		p := n.p
+		if p.freeCPU()-cpu < share*p.capCPU {
+			return false
+		}
+		if p == &v.host && rt.vm && v.vm != nil && v.vmCredit {
+			if n.mem > p.freeMem() {
+				return false
+			}
+			continue
+		}
+		if float64(p.freeMem()-n.mem) < share*float64(p.capMem) {
 			return false
 		}
 	}

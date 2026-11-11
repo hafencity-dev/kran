@@ -189,6 +189,11 @@ type NodeMetrics struct {
 type RuntimeMetrics struct {
 	CPUBusy      float64 `json:"cpu_busy"`
 	MemAvailable int64   `json:"mem_available"`
+	// HostResident is how much of a VM-backed runtime's memory the host
+	// has already paid for: the VM process's physical footprint, rounded
+	// down (macOS, Colima). 0 = not measured; the scheduler then gives the
+	// VM no credit on the host (SPEC §6.3).
+	HostResident int64 `json:"host_resident,omitempty"`
 }
 
 // Resources is an amount of CPU (cores, fractional) and memory (bytes).
@@ -212,6 +217,10 @@ type NodeState struct {
 	Running   int         `json:"running"`   // kran jobs running here
 	Accepts   bool        `json:"accepts"`   // accept.enabled
 	LastSeen  time.Time   `json:"last_seen,omitempty"`
+	// FreeVM is what a container job in the node's Linux VM could get now
+	// (VM and host limits applied); nil on nodes without a VM. Free is then
+	// the host's, i.e. what a native job gets.
+	FreeVM *Resources `json:"free_vm,omitempty"`
 	// config accept.max_jobs (0 = unlimited) so origins
 	// respect a peer's job limit when placing.
 	MaxJobs int `json:"max_jobs,omitempty"`
