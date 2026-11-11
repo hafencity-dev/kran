@@ -44,6 +44,46 @@ type SpecInput struct {
 	GoVersion func(ctx context.Context, dir string, env []string) string
 	// Notice receives one-line messages for stderr (nil = dropped).
 	Notice func(string)
+	// InTTY and ErrTTY tell whether stdin and stderr are terminals (a human
+	// is there); KRAN_FALLBACK=terminal falls back only then.
+	InTTY, ErrTTY bool
+}
+
+// Fallback modes of KRAN_FALLBACK: whether `kran run` may run a job here
+// when no other machine can take it.
+const (
+	FallbackNever    = "never"
+	FallbackTerminal = "terminal"
+	FallbackAlways   = "always"
+	fallbackEnv      = "KRAN_FALLBACK"
+)
+
+// fallbackMode reads KRAN_FALLBACK. Unset or empty is "terminal"; an unknown
+// value is a usage error, never a silent default.
+func fallbackMode(env []string) (string, error) {
+	v := envMap(env)[fallbackEnv]
+	switch m := strings.ToLower(strings.TrimSpace(v)); m {
+	case "":
+		return FallbackTerminal, nil
+	case FallbackNever, FallbackTerminal, FallbackAlways:
+		return m, nil
+	}
+	return "", usagef("%s=%q is not one of never, terminal, always", fallbackEnv, v)
+}
+
+// noFallback decides whether running here is forbidden. The flags win over
+// the setting: --no-fallback and --remote forbid it whatever it says.
+func noFallback(f RunFlags, mode string, inTTY, errTTY bool) bool {
+	if f.NoFallback || f.Remote {
+		return true
+	}
+	switch mode {
+	case FallbackNever:
+		return true
+	case FallbackTerminal:
+		return !(inTTY && errTTY)
+	}
+	return false
 }
 
 var localhostRe = regexp.MustCompile(`(?i)(^|[^a-z0-9.-])(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])([^a-z0-9.-]|$)`)
@@ -52,12 +92,16 @@ var localhostRe = regexp.MustCompile(`(?i)(^|[^a-z0-9.-])(localhost|127\.0\.0\.1
 // (SPEC §6.1 step 1).
 func BuildSpec(ctx context.Context, in SpecInput) (proto.JobSpec, error) {
 	f := in.Flags
+	mode, err := fallbackMode(in.Env)
+	if err != nil {
+		return proto.JobSpec{}, err
+	}
 	spec := proto.JobSpec{
 		Cwd:         in.Cwd,
 		Owner:       in.Owner,
 		SubmittedAt: in.Now.UTC(),
 		ClientPID:   in.PID,
-		NoFallback:  f.NoFallback || f.Remote,
+		NoFallback:  noFallback(f, mode, in.InTTY, in.ErrTTY),
 		Stdin:       f.Stdin,
 		TTY:         in.TTY,
 	}
@@ -176,6 +220,9 @@ func BuildSpec(ctx context.Context, in SpecInput) (proto.JobSpec, error) {
 		req.Prefer = proto.PreferAuto
 	}
 	spec.Req = req
+	if req.OriginOnly && !f.NoFallback && !f.Remote {
+		spec.NoFallback = false // it was always meant to run here: nothing falls back
+	}
 
 	// Priority: flag, rule, tty default.
 	prio := proto.Priority(f.Priority)

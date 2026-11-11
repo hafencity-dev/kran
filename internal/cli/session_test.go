@@ -1055,3 +1055,45 @@ func TestQueuedJobReattachesAfterDaemonRestart(t *testing.T) {
 		}
 	})
 }
+
+// Running here is never silent: the notice of a fallback reaches stderr as
+// one "kran:" line even with -q, in both ways it can happen.
+func TestFallbackNoticeShownUnderQuiet(t *testing.T) {
+	s := newFakeSession()
+	h := newHarness(t, &fakeClient{sessions: []*fakeSession{s}}, "sh", "-c", "exit 0")
+	h.r.flags.Quiet = true
+	go func() {
+		s.push(proto.FrameDecision, proto.Decision{JobID: "j", Mode: "remote", Node: "devmac"})
+		s.push(proto.FrameNotice, proto.Notice{Kind: "fallback", Message: "devmac failed before the job started (sync: deadline exceeded); running it here"})
+		s.push(proto.FrameDecision, proto.Decision{JobID: "j", Mode: "local", Envelope: &proto.LocalEnvelope{}})
+	}()
+	if code := h.run(t); code != 0 {
+		t.Fatal(code)
+	}
+	if want := "kran: devmac failed before the job started (sync: deadline exceeded); running it here\n"; h.stderr.String() != want {
+		t.Fatalf("%q, want %q", h.stderr.String(), want)
+	}
+}
+
+func TestNoDaemonFallbackNoticeShownUnderQuiet(t *testing.T) {
+	h := newHarness(t, nil, "true")
+	h.r.flags.Quiet = true
+	if code := h.run(t); code != 0 {
+		t.Fatal(code)
+	}
+	if !strings.HasPrefix(h.stderr.String(), "kran: daemon not running — running locally") {
+		t.Fatalf("%q", h.stderr.String())
+	}
+}
+
+func TestNoDaemonRefusedBySettingNamesIt(t *testing.T) {
+	h := newHarness(t, nil, "sh", "-c", "exit 5")
+	h.r.spec.NoFallback = true
+	h.r.fallbackBy = "KRAN_FALLBACK"
+	if code := h.run(t); code != 125 {
+		t.Fatal(code)
+	}
+	if want := "kran: daemon not running; KRAN_FALLBACK forbids running here (start it: kran service start)\n"; h.stderr.String() != want {
+		t.Fatalf("%q, want %q", h.stderr.String(), want)
+	}
+}

@@ -266,6 +266,7 @@ func (n *knode) env(extra ...string) []string {
 		// this machine too.
 		"KRAN_NAMESPACE=kran-e2e",
 		"KRAN_NO_HOOK=1",
+		"KRAN_FALLBACK=always", // the e2e runs have no terminal; tests of the other modes set their own
 		"GORACE=log_path="+filepath.Join(raceDir, "race")+" halt_on_error=0",
 	)
 	env = append(env, n.opts.Env...)

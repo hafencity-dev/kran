@@ -204,7 +204,7 @@ func (d *Daemon) drive(ctx context.Context, e *jobEntry, mode driveMode) {
 				if p.Reason != "" && lastFail == nil {
 					reason += " (" + p.Reason + ")"
 				}
-				e.finish(proto.Exit{Code: proto.ExitInfra, State: proto.JobInfraErr, Reason: reason + "; not running it locally because of --remote/--no-fallback"})
+				e.finish(proto.Exit{Code: proto.ExitInfra, State: proto.JobInfraErr, Reason: reason + "; not running it locally because of --remote/--no-fallback/KRAN_FALLBACK"})
 				return
 			}
 			d.runLocal(ctx, e, p)

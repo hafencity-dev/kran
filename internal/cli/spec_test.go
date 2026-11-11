@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -257,5 +258,72 @@ func TestBuildSpecNoticesForwardedSecrets(t *testing.T) {
 	}
 	if got := run([]string{"GITHUB_TOKEN"}, []string{"GITHUB_TOKEN"}); len(got) != 0 {
 		t.Fatalf("--env must stay silent: %q", got)
+	}
+}
+
+func TestFallbackSetting(t *testing.T) {
+	envWith := func(v string, set bool) []string {
+		e := []string{"SHELL=/bin/zsh"}
+		if set {
+			e = append(e, "KRAN_FALLBACK="+v)
+		}
+		return e
+	}
+	for _, tc := range []struct {
+		name         string
+		value        string
+		set          bool
+		flags        RunFlags
+		inTTY, errTT bool
+		want         bool // NoFallback in the spec
+	}{
+		{"unset, terminal: falls back", "", false, RunFlags{}, true, true, false},
+		{"unset, no terminal: refused (the default is terminal)", "", false, RunFlags{}, false, false, true},
+		{"empty counts as unset", "", true, RunFlags{}, false, false, true},
+		{"terminal, both terminals", "terminal", true, RunFlags{}, true, true, false},
+		{"terminal, stdin piped", "terminal", true, RunFlags{}, false, true, true},
+		{"terminal, stderr redirected", "terminal", true, RunFlags{}, true, false, true},
+		{"never, on a terminal", "never", true, RunFlags{}, true, true, true},
+		{"always, without a terminal", "always", true, RunFlags{}, false, false, false},
+		{"always is case-insensitive", "ALWAYS", true, RunFlags{}, false, false, false},
+		{"--no-fallback wins over always", "always", true, RunFlags{NoFallback: true}, true, true, true},
+		{"--remote wins over always", "always", true, RunFlags{Remote: true}, true, true, true},
+		{"--no-fallback with terminal on a terminal", "terminal", true, RunFlags{NoFallback: true}, true, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := testInput("go", "test")
+			in.Env = envWith(tc.value, tc.set)
+			in.Flags, in.InTTY, in.ErrTTY = tc.flags, tc.inTTY, tc.errTT
+			spec, err := BuildSpec(context.Background(), in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if spec.NoFallback != tc.want {
+				t.Fatalf("NoFallback = %v, want %v", spec.NoFallback, tc.want)
+			}
+		})
+	}
+}
+
+func TestFallbackUnknownValueIsAUsageError(t *testing.T) {
+	for _, v := range []string{"sometimes", "yes", "1", "never!"} {
+		in := testInput("go", "test")
+		in.Env = []string{"KRAN_FALLBACK=" + v}
+		_, err := BuildSpec(context.Background(), in)
+		var ue *UsageError
+		if !asUsage(err, &ue) || !strings.Contains(ue.Msg, "KRAN_FALLBACK") || !strings.Contains(ue.Msg, "never, terminal, always") {
+			t.Errorf("%q: err = %v, want a usage error naming the setting and its values", v, err)
+		}
+	}
+}
+
+// A job that only ever runs here (a local rule, localhost) is not a fallback:
+// the setting never refuses it.
+func TestFallbackSettingNeverRefusesOriginOnly(t *testing.T) {
+	in := testInput("curl", "http://localhost:3000")
+	in.Env = []string{"KRAN_FALLBACK=never"}
+	spec, err := BuildSpec(context.Background(), in)
+	if err != nil || !spec.Req.OriginOnly || spec.NoFallback {
+		t.Fatalf("err %v origin-only %v no-fallback %v", err, spec.Req.OriginOnly, spec.NoFallback)
 	}
 }

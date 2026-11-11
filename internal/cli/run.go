@@ -24,7 +24,14 @@ func (a *App) runCommand() *cobra.Command {
 		Short:   "Run a command where it fits (here or on a linked machine)",
 		Long: `Run a command on whichever of your machines has room. Output, colors and the
 exit code are the same as running it directly. If kran cannot place the job it
-runs it here, so it is never worse than running it yourself.
+runs it here when a person is at the terminal, so it is never worse than
+running it yourself. Without a terminal (scripts, agents, CI) it exits 125
+instead and names the machine that failed and why; KRAN_FALLBACK sets this:
+  never     exit 125, never run here
+  terminal  run here only when stdin and stderr are terminals (the default)
+  always    always run here
+--no-fallback and --remote win over it. Running here is always announced on
+stderr as a "kran:" line, also with -q.
 
 Everything after the first non-flag argument (or after --) is the command.
 kran says something on stderr only when it adds information, as one line
@@ -34,7 +41,7 @@ A job that runs on another machine works on a synced copy of your files: files
 it creates stay there. Use --local when you need them here.
 
 Exit codes: the command's own; 125 kran failed after the command started (or
---remote/--no-fallback could not be honored); 126 not executable; 127 not
+--remote/--no-fallback/KRAN_FALLBACK could not be honored); 126 not executable; 127 not
 found; 128+n killed by signal n; 2 usage error.`,
 		Example: `  kran run -- go test ./...
   kran run go build ./...                 # -- is optional
@@ -68,7 +75,7 @@ found; 128+n killed by signal n; 2 usage error.`,
 	fs.BoolVar(&f.JSONEvents, "json-events", false, "print progress as JSON lines on stderr")
 	fs.StringVar(&f.Priority, "priority", "", "high, normal or low (default: high on a terminal, else normal)")
 	fs.StringArrayVar(&f.Labels, "label", nil, "label the job, key=value (repeatable)")
-	fs.BoolVar(&f.NoFallback, "no-fallback", false, "exit 125 instead of running here when kran cannot place the job")
+	fs.BoolVar(&f.NoFallback, "no-fallback", false, "exit 125 instead of running here when kran cannot place the job (wins over KRAN_FALLBACK)")
 	fs.BoolVar(&f.NoDocker, "no-docker", false, "do not give a container job the Docker socket (root-equivalent on rootful Docker)")
 	fs.StringArrayVar(&f.ExtraEnv, "env", nil, "also forward this environment variable, even if it looks secret (repeatable)")
 	fs.StringVar(&f.Sh, "sh", "", "run this string with your shell instead of a command")
@@ -116,6 +123,7 @@ func (a *App) doRun(ctx context.Context, f RunFlags, args []string) int {
 		Flags: f, Argv: args, Cwd: cwd, Env: env, Home: home, TTY: tty, Now: time.Now(), PID: os.Getpid(),
 		Owner:  DetectOwner(OwnerInput{Env: envMap(env), PID: os.Getpid(), User: userName(), TTY: ttyName(), Procs: newProcReader()}),
 		Config: cfg,
+		InTTY:  a.In != nil && isTerminal(a.In), ErrTTY: a.errTTY,
 		Notice: func(msg string) { a.errorf("%s", msg) },
 	})
 	if err != nil {
@@ -142,6 +150,9 @@ func (a *App) doRun(ctx context.Context, f RunFlags, args []string) int {
 			return unknownNodeError(n, cfg.Name, func() (*config.Peers, error) { return config.LoadPeers("") })
 		},
 		size: termSize,
+	}
+	if !f.NoFallback && !f.Remote && spec.NoFallback {
+		r.fallbackBy = fallbackEnv // the setting, not a flag, forbade running here
 	}
 	return r.Run(ctx)
 }

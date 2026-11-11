@@ -228,12 +228,19 @@ Flags: `-l/--local`, `-r/--remote`, `-n/--node NAME`, `--gpu`, `--cpus N`,
 `-q/--quiet`, `--json-events` (machine-readable progress on stderr),
 `--priority high|normal|low`, `--label k=v`, `--no-fallback`.
 
+`KRAN_FALLBACK` sets whether the job may run here when it cannot be placed
+elsewhere: `never` (= `--no-fallback`), `terminal` (default: only when stdin
+and stderr are terminals) or `always`. The flags `--no-fallback`/`--remote`
+win; an unknown value is a usage error (exit 2). A job that is origin-only
+(local rule, localhost) is not a fallback and is never refused by it. Running
+here is announced on stderr as a `kran:` line even with `-q`.
+
 1. CLI resolves cwd, workspace (git toplevel; else cwd), owner (§6.4),
    env (§6.5), tty info, flags + `.kran.toml` rules → `proto.JobSpec`.
 2. CLI dials the local daemon. **If the daemon is unreachable** (or answers
    with an incompatible version), the CLI runs the command locally right away
    (`kran: daemon not running — running locally (start it: kran service start)`),
-   unless `--remote`/`--no-fallback` → exit 125.
+   unless `--remote`/`--no-fallback`/`KRAN_FALLBACK` forbids it → exit 125.
 3. CLI opens a run session (`POST /api/v1/run`, upgraded to a framed stream,
    §8.2) and sends `submit`.
 4. The scheduler queues the job, then places it. While queued the daemon
@@ -987,7 +994,7 @@ unset, every error says what to do next. `--json` everywhere it makes sense.
 | Code | Meaning |
 |---|---|
 | the command's | normal |
-| 125 | kran infrastructure failure after the job started, or `--no-fallback` failure |
+| 125 | kran infrastructure failure after the job started, or a `--no-fallback`/`--remote`/`KRAN_FALLBACK` refusal |
 | 126/127 | command not executable / not found (as a shell would) |
 | 128+n | killed by signal n (as a shell would) |
 | 2 | kran usage error |

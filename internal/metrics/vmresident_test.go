@@ -360,3 +360,27 @@ func TestVMResidentDroppedWhenEngineStopsAnswering(t *testing.T) {
 		t.Fatalf("after recovery host_resident %d, want a fresh reading", got)
 	}
 }
+
+// The VM is only ever read: the metrics package never runs colima or
+// limactl (no start, stop, restart or ssh), and its one command on the VM
+// process is the read-only /usr/bin/top.
+func TestMetricsNeverTouchesVMLifecycle(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil || len(files) == 0 {
+		t.Fatal("no sources", err)
+	}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, bad := range []string{`"limactl"`, `"ssh"`, `"colima ssh"`, `colima start`, `colima stop`, `colima restart`} {
+			if strings.Contains(string(b), bad) {
+				t.Errorf("%s runs or names %s: the metrics only read the VM", f, bad)
+			}
+		}
+	}
+}

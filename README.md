@@ -47,7 +47,9 @@ A job that runs on another machine works on a synced copy of your files: files i
 
 kran is quiet: it prints one `kran:` line on stderr only when that tells you something (running on another machine, waiting for room, falling back). Output, colors and exit codes are the command's own.
 
-Exit codes: the command's own; `125` kran failed after your command started (or `--remote`/`--no-fallback` could not be honored); `126`/`127` not executable / not found; `128+n` killed by signal n; `2` usage error.
+**Running here instead.** When no other machine can take a job, or one fails before the command starts, `kran run` can run it on this machine. `KRAN_FALLBACK` decides: `never` (exit `125`, never run here), `terminal` (the default: run here only when stdin and stderr are terminals, so a person is there; scripts, agents and CI get `125`) or `always` (run here whatever happens). `--no-fallback` and `--remote` win over the setting; any other value is a usage error (exit `2`). Running here is always announced, also with `-q`, as one `kran:` line on stderr; a refusal names the machine that failed and why.
+
+Exit codes: the command's own; `125` kran failed after your command started (or `--remote`/`--no-fallback`/`KRAN_FALLBACK` could not be honored); `126`/`127` not executable / not found; `128+n` killed by signal n; `2` usage error.
 
 ## How kran decides
 

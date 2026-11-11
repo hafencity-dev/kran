@@ -37,20 +37,21 @@ func defaultTiming() timing {
 
 // runner drives one `kran run` (SPEC §6.1).
 type runner struct {
-	spec    proto.JobSpec
-	flags   RunFlags
-	env     []string          // full local environment, for local execution
-	envSet  map[string]string // .kran.toml env.set, applied on top of env
-	dial    func(ctx context.Context) (client.Client, error)
-	stdin   *os.File
-	stdout  io.Writer
-	stderr  *lineWriter
-	stdio   localStdio
-	signals <-chan os.Signal
-	winch   <-chan os.Signal
-	size    func() *proto.TTY
-	tm      timing
-	start   func(localJob) (*localProc, *localError)
+	fallbackBy string // "" or KRAN_FALLBACK: what forbade running here besides the flags
+	spec       proto.JobSpec
+	flags      RunFlags
+	env        []string          // full local environment, for local execution
+	envSet     map[string]string // .kran.toml env.set, applied on top of env
+	dial       func(ctx context.Context) (client.Client, error)
+	stdin      *os.File
+	stdout     io.Writer
+	stderr     *lineWriter
+	stdio      localStdio
+	signals    <-chan os.Signal
+	winch      <-chan os.Signal
+	size       func() *proto.TTY
+	tm         timing
+	start      func(localJob) (*localProc, *localError)
 	// watcher builds `kran internal watch-parent <pgid>` (nil: the real one).
 	watcher func(pgid int) *exec.Cmd
 	probe   func(int64) bool
@@ -273,6 +274,8 @@ func (r *runner) noSession(ctx context.Context, why string, cause error) int {
 		flag := "--no-fallback"
 		if r.spec.Req.Prefer == proto.PreferRemote {
 			flag = "--remote"
+		} else if r.fallbackBy != "" {
+			flag = r.fallbackBy
 		}
 		hint := "check: kran doctor"
 		if i := strings.LastIndex(why, "("); i >= 0 && strings.HasSuffix(why, ")") {
@@ -284,7 +287,7 @@ func (r *runner) noSession(ctx context.Context, why string, cause error) int {
 	}
 	r.event("fallback", map[string]any{"reason": why})
 	if !r.flags.JSONEvents { // the fallback event already carries the reason
-		r.say("%s", why)
+		r.sayAlways("%s", why) // running here is never silent, not even with -q
 	}
 	return r.standalone(ctx)
 }
@@ -549,7 +552,11 @@ func (r *runner) onNotice(n proto.Notice) {
 		r.clearNote()
 		r.lastSaid = n.Message
 		if !r.flags.JSONEvents {
-			r.say("%s", n.Message)
+			if n.Kind == "fallback" {
+				r.sayAlways("%s", n.Message) // not hidden by -q
+			} else {
+				r.say("%s", n.Message)
+			}
 		}
 	}
 }
