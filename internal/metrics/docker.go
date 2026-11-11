@@ -191,7 +191,14 @@ func (d *dockerProbe) refresh(ctx context.Context) {
 	d.mu.Lock()
 	info := d.info
 	d.mu.Unlock()
-	if info.Reachable && d.vm {
+	d.mu.Lock()
+	failing := d.failures > 0
+	d.mu.Unlock()
+	switch {
+	case !d.vm:
+	case !info.Reachable || failing:
+		d.dropResident() // the engine does not answer: the VM may be gone
+	default:
 		d.refreshResident(ctx, info.Binary, now, stressed)
 	}
 	if !info.Reachable || !d.vm || !d.statsGate.allow(now, stressed) {

@@ -346,7 +346,10 @@ Flags: `-l/--local`, `-r/--remote`, `-n/--node NAME`, `--gpu`, `--cpus N`,
   `+`/`-` ignored). If `cmprs` is absent, `N/A` or unparsable, the reading is
   published as none (no credit) and the daemon logs why once per change. While
   the node is overloaded the last reading stands in for up to 2 minutes; a
-  failed or older reading publishes none.
+  failed or older reading publishes none. A reading belongs to the VM process
+  it was taken from: it is dropped at once (also while overloaded) when
+  `ha.pid` is missing, unreadable or names another process, and when the
+  Docker endpoint stops answering; there is no credit until a new reading.
 * Reaper (every 30 s, and at daemon start): kills scopes/containers/process
   groups labelled kran whose job is not active; deletes job dirs older than
   7 days; trims blob cache (LRU, cap default 20 GiB or 10% of disk) and

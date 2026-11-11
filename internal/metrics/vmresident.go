@@ -29,10 +29,16 @@ var errNoCmprs = errors.New("top shows no readable compressed-memory (cmprs) fig
 
 var errNotColima = errors.New("the Docker endpoint is not Colima's; only a Colima VM's footprint is measured")
 
+// A reading is only ever valid for the VM process it was taken from: it is
+// dropped at once, without waiting for the next measurement or for it to go
+// stale, when ha.pid is missing, unreadable or names another process, and
+// when the Docker endpoint stops answering (a stopped or restarted VM).
+
 // refreshResident measures the VM's footprint at most every
 // vmResidentEvery. On an overloaded node it forks nothing; the last reading
 // stands in until it is stale.
 func (d *dockerProbe) refreshResident(ctx context.Context, bin string, now time.Time, stressed bool) {
+	d.checkResidentPid()
 	d.mu.Lock()
 	due := d.residentTried.IsZero() || now.Sub(d.residentTried) >= vmResidentEvery
 	d.mu.Unlock()
@@ -62,6 +68,35 @@ func (d *dockerProbe) refreshResident(ctx context.Context, bin string, now time.
 	d.mu.Unlock()
 	if msg != "" {
 		d.p.logf("metrics: the Linux VM's footprint on this host is unknown, so container jobs count against the host's memory in full: %s", msg)
+	}
+}
+
+// dropResident forgets the reading at once (the VM changed or went away).
+func (d *dockerProbe) dropResident() {
+	d.mu.Lock()
+	d.resident, d.residentAt, d.residentPid, d.residentDir = 0, time.Time{}, 0, ""
+	d.residentTried = time.Time{} // measure again at the next chance
+	d.mu.Unlock()
+}
+
+// checkResidentPid drops a reading whose VM process is gone: ha.pid is
+// missing, unreadable or names another process than the reading did. It
+// only reads a small file, so it also runs on a stressed node.
+func (d *dockerProbe) checkResidentPid() {
+	d.mu.Lock()
+	valid, pid, dir := !d.residentAt.IsZero(), d.residentPid, d.residentDir
+	d.mu.Unlock()
+	if !valid {
+		return
+	}
+	read := d.readFile
+	if read == nil {
+		read = os.ReadFile
+	}
+	raw, err := read(filepath.Join(dir, "ha.pid"))
+	cur, perr := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || perr != nil || cur != pid {
+		d.dropResident()
 	}
 }
 

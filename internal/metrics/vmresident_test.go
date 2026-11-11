@@ -243,3 +243,120 @@ func TestVMResidentOnlyForColima(t *testing.T) {
 		t.Fatalf("linux rm %+v", rm)
 	}
 }
+
+// A reading belongs to the VM process it was taken from (ha.pid) and to a
+// Docker engine that answers; neither may outlive a VM change, however fresh
+// the reading still is.
+type residentRig struct {
+	t      *testing.T
+	d      *dockerProbe
+	p      *prober
+	fr     *fakeRunner
+	now    time.Time
+	pid    string // ha.pid contents; "" = file missing
+	badPid bool   // ha.pid unreadable
+}
+
+func newResidentRig(t *testing.T) *residentRig {
+	home := t.TempDir()
+	t.Setenv("DOCKER_HOST", "unix://"+filepath.Join(home, ".colima", "default", "docker.sock"))
+	pidFile := filepath.Join(home, ".colima", "_lima", "colima", "ha.pid")
+	rg := &residentRig{t: t, pid: "21401\n", now: time.Date(2026, 11, 11, 8, 30, 0, 0, time.UTC)}
+	rg.fr = &fakeRunner{out: map[string]string{
+		"info --format":                 "24 41971261440\n",
+		"stats --no-stream --f":         fixtureDockerStats,
+		"top -l 1 -pid 21401 -stats pi": fixtureTopPid,
+		"top -l 1 -pid 30077 -stats pi": "PID    MEM    CMPRS\n30077  4G     0B\n",
+	}}
+	rg.p = newProberWith(Options{}, rg.fr.run)
+	rg.p.now = func() time.Time { return rg.now }
+	rg.d = rg.p.docker
+	rg.d.vm = true
+	rg.d.lookup = func() string { return "/opt/homebrew/bin/docker" }
+	rg.d.readFile = func(path string) ([]byte, error) {
+		switch {
+		case path != pidFile || rg.pid == "" || rg.badPid:
+			return nil, os.ErrNotExist
+		}
+		return []byte(rg.pid), nil
+	}
+	rg.d.refresh(context.Background())
+	if rg.resident() != 28<<30 {
+		t.Fatalf("setup: host_resident %d", rg.resident())
+	}
+	return rg
+}
+
+func (rg *residentRig) resident() int64 {
+	rm, _ := rg.d.runtimeMetrics(proto.NodeMetrics{Time: rg.now})
+	return rm.HostResident
+}
+
+// tick advances a little, inside the 30 s interval and the 2 min staleness,
+// so only the pid or engine check can drop the reading.
+func (rg *residentRig) tick(stressed bool) { rg.tickBy(stressed, 5*time.Second) }
+
+func (rg *residentRig) tickBy(stressed bool, by time.Duration) {
+	rg.p.stressed.Store(stressed)
+	rg.now = rg.now.Add(by)
+	rg.d.refresh(context.Background())
+}
+
+func TestVMResidentDroppedWhenVMProcessChanges(t *testing.T) {
+	for _, stressed := range []bool{false, true} {
+		rg := newResidentRig(t)
+		rg.pid = "30077\n" // the VM restarted: a new host agent
+		rg.tick(stressed)
+		// Stressed: nothing is measured, so none. Otherwise the new
+		// process is measured at once (4G, nothing compressed: 3 GiB).
+		want := int64(3 << 30)
+		if stressed {
+			want = 0
+		}
+		if got := rg.resident(); got != want {
+			t.Fatalf("stressed=%v: host_resident %d, want %d (never the old process's 28 GiB)", stressed, got, want)
+		}
+	}
+}
+
+func TestVMResidentDroppedWhenPidFileGoes(t *testing.T) {
+	for name, mutate := range map[string]func(*residentRig){
+		"missing":    func(rg *residentRig) { rg.pid = "" },
+		"unreadable": func(rg *residentRig) { rg.badPid = true },
+		"garbage":    func(rg *residentRig) { rg.pid = "not-a-pid\n" },
+	} {
+		for _, stressed := range []bool{false, true} {
+			rg := newResidentRig(t)
+			mutate(rg)
+			rg.tick(stressed)
+			if got := rg.resident(); got != 0 {
+				t.Fatalf("%s stressed=%v: host_resident %d, want none", name, stressed, got)
+			}
+		}
+	}
+}
+
+func TestVMResidentDroppedWhenEngineStopsAnswering(t *testing.T) {
+	rg := newResidentRig(t)
+	rg.fr.mu.Lock()
+	rg.fr.err = map[string]error{"info --format": errors.New("cannot connect to the Docker daemon")}
+	rg.fr.mu.Unlock()
+	rg.tickBy(false, dockerInfoEvery) // the info probe fails; the engine still counts as up (1 failure)
+	if got := rg.resident(); got != 0 {
+		t.Fatalf("a failing engine keeps a reading alive: %d", got)
+	}
+	// And it does not come back by itself while the engine is down.
+	rg.tick(false)
+	rg.tick(false)
+	if got := rg.resident(); got != 0 {
+		t.Fatalf("host_resident %d with the engine down", got)
+	}
+	// A VM that answers again is measured afresh, at once.
+	rg.fr.mu.Lock()
+	rg.fr.err = nil
+	rg.fr.mu.Unlock()
+	rg.tickBy(false, dockerStatsEvery)
+	if got := rg.resident(); got != 28<<30 {
+		t.Fatalf("after recovery host_resident %d, want a fresh reading", got)
+	}
+}
