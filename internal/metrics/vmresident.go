@@ -25,6 +25,8 @@ const (
 	vmResidentStale = 2 * time.Minute
 )
 
+var errNoCmprs = errors.New("top shows no readable compressed-memory (cmprs) figure")
+
 var errNotColima = errors.New("the Docker endpoint is not Colima's; only a Colima VM's footprint is measured")
 
 // refreshResident measures the VM's footprint at most every
@@ -38,29 +40,37 @@ func (d *dockerProbe) refreshResident(ctx context.Context, bin string, now time.
 		return
 	}
 	_, endpoint := d.resolve(ctx, bin, now)
-	v, err := d.measureResident(ctx, endpoint)
+	r, err := d.measureResident(ctx, endpoint)
 	if ctx.Err() != nil {
 		return
 	}
 	d.mu.Lock()
 	d.residentTried = now
+	var msg string
 	if err != nil {
-		d.resident, d.residentAt = 0, time.Time{}
+		d.resident, d.residentAt, d.residentPid, d.residentDir = 0, time.Time{}, 0, ""
+		// One log line per change of reason, not per tick.
+		if msg = err.Error(); msg == d.residentWhy {
+			msg = ""
+		} else {
+			d.residentWhy = err.Error()
+		}
 	} else {
-		d.resident, d.residentAt = v, now
+		d.resident, d.residentAt, d.residentPid, d.residentDir = r.resident, now, r.pid, r.dir
+		d.residentWhy = ""
 	}
 	d.mu.Unlock()
-	if err != nil {
-		d.p.logOnce("vm-resident", "metrics: the Linux VM's footprint on this host is unknown, so container jobs count against the host's memory in full: %v", err)
+	if msg != "" {
+		d.p.logf("metrics: the Linux VM's footprint on this host is unknown, so container jobs count against the host's memory in full: %s", msg)
 	}
 }
 
 // measureResident reads the physical footprint of the Lima host agent
 // behind a Colima endpoint, rounded down by one displayed unit.
-func (d *dockerProbe) measureResident(ctx context.Context, endpoint string) (int64, error) {
+func (d *dockerProbe) measureResident(ctx context.Context, endpoint string) (reading, error) {
 	dir := colimaLimaDir(endpoint)
 	if dir == "" {
-		return 0, errNotColima
+		return reading{}, errNotColima
 	}
 	read := d.readFile
 	if read == nil {
@@ -68,21 +78,33 @@ func (d *dockerProbe) measureResident(ctx context.Context, endpoint string) (int
 	}
 	raw, err := read(filepath.Join(dir, "ha.pid"))
 	if err != nil {
-		return 0, fmt.Errorf("Lima host agent: %w", err)
+		return reading{}, fmt.Errorf("Lima host agent: %w", err)
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
 	if err != nil || pid <= 1 {
-		return 0, fmt.Errorf("Lima host agent: bad pid file %s", filepath.Join(dir, "ha.pid"))
+		return reading{}, fmt.Errorf("Lima host agent: bad pid file %s", filepath.Join(dir, "ha.pid"))
 	}
-	out, err := d.p.run(ctx, 5*time.Second, "/usr/bin/top", "-l", "1", "-pid", strconv.Itoa(pid), "-stats", "pid,mem")
+	out, err := d.p.run(ctx, 5*time.Second, "/usr/bin/top", "-l", "1", "-pid", strconv.Itoa(pid), "-stats", "pid,mem,cmprs")
 	if err != nil {
-		return 0, fmt.Errorf("footprint of pid %d: %w", pid, err)
+		return reading{}, fmt.Errorf("footprint of pid %d: %w", pid, err)
 	}
-	v, ok := parseTopMem(string(out), pid)
+	row, ok := parseTopRow(string(out), pid)
 	if !ok {
-		return 0, fmt.Errorf("footprint of pid %d: no MEM figure in top's output", pid)
+		return reading{}, fmt.Errorf("footprint of pid %d: no MEM figure in top's output", pid)
 	}
-	return v, nil
+	if !row.cmprsOK {
+		// MEM counts pages macOS compressed or swapped; without the
+		// compressed part the resident share is unknown: no credit.
+		return reading{}, fmt.Errorf("%w (pid %d): the VM gets no credit", errNoCmprs, pid)
+	}
+	return reading{resident: max(0, row.mem-row.cmprs), pid: pid, dir: dir}, nil
+}
+
+// reading is one valid measurement of the VM and the process it came from.
+type reading struct {
+	resident int64
+	pid      int
+	dir      string // the Lima instance directory holding ha.pid
 }
 
 // colimaLimaDir maps a Colima Docker endpoint to its Lima instance
@@ -111,42 +133,84 @@ func colimaLimaDir(endpoint string) string {
 	return filepath.Join(base, "_lima", inst)
 }
 
-// parseTopMem finds pid's row in `top -l 1 -pid <pid> -stats pid,mem` and
-// returns its MEM (the physical footprint), rounded down by one displayed
-// unit so that it never overstates: "40G" → 39 GiB, "2318M+" → 2317 MiB.
-func parseTopMem(out string, pid int) (int64, bool) {
-	want := strconv.Itoa(pid)
-	for _, line := range strings.Split(out, "\n") {
-		f := strings.Fields(line)
-		if len(f) < 2 || f[0] != want {
-			continue
-		}
-		return parseTopSize(f[1])
-	}
-	return 0, false
+// topRow is the pid row of `top -stats pid,mem,cmprs`: mem rounded down and
+// cmprs rounded up by one displayed unit, so that mem-cmprs never overstates
+// what is resident. cmprsOK is false when the column is absent, "N/A" or
+// unparsable.
+type topRow struct {
+	mem, cmprs int64
+	cmprsOK    bool
 }
 
+// parseTopRow finds pid's row. Columns are located by the header line when
+// there is one (PID MEM CMPRS), else by position.
+func parseTopRow(out string, pid int) (topRow, bool) {
+	want := strconv.Itoa(pid)
+	memCol, cmprsCol := 1, 2
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 2 && f[0] == "PID" {
+			memCol, cmprsCol = -1, -1
+			for i, h := range f {
+				switch strings.ToUpper(strings.TrimRight(h, "+-*")) {
+				case "MEM":
+					memCol = i
+				case "CMPRS":
+					cmprsCol = i
+				}
+			}
+			continue
+		}
+		if len(f) < 2 || f[0] != want || memCol < 0 || memCol >= len(f) {
+			continue
+		}
+		mem, _, ok := parseTopSizeBounds(f[memCol])
+		if !ok {
+			return topRow{}, false
+		}
+		row := topRow{mem: mem}
+		if cmprsCol >= 0 && cmprsCol < len(f) {
+			if _, hi, ok := parseTopSizeBounds(f[cmprsCol]); ok {
+				row.cmprs, row.cmprsOK = hi, true
+			}
+		}
+		return row, true
+	}
+	return topRow{}, false
+}
+
+// parseTopSize returns the lower bound of a top size such as "40G" or
+// "2318M+": one displayed unit below the figure.
 func parseTopSize(s string) (int64, bool) {
+	lo, _, ok := parseTopSizeBounds(s)
+	return lo, ok
+}
+
+// parseTopSizeBounds returns the range a rounded top figure stands for,
+// widened by one unit of the last displayed digit on each side: "40G" is
+// [39, 41] GiB. Use lo for what must not be overstated, hi for what must not
+// be understated.
+func parseTopSizeBounds(s string) (lo, hi int64, ok bool) {
 	s = strings.TrimRight(s, "+-*")
 	if s == "" {
-		return 0, false
+		return 0, 0, false
 	}
 	units := map[byte]float64{'B': 1, 'K': 1 << 10, 'M': 1 << 20, 'G': 1 << 30, 'T': 1 << 40}
-	unit, ok := units[s[len(s)-1]]
-	if !ok {
-		return 0, false
+	unit, found := units[s[len(s)-1]]
+	if !found {
+		return 0, 0, false
 	}
 	num := s[:len(s)-1]
 	n, err := strconv.ParseFloat(num, 64)
 	if err != nil || n < 0 || math.IsNaN(n) || math.IsInf(n, 0) {
-		return 0, false
+		return 0, 0, false
 	}
 	step := 1.0 // one unit of the last displayed digit
-	if _, frac, ok := strings.Cut(num, "."); ok {
+	if _, frac, has := strings.Cut(num, "."); has {
 		step = math.Pow(10, -float64(len(frac)))
 	}
 	if unit == 1 {
 		step = 0 // bytes are exact
 	}
-	return int64(math.Max(0, n-step) * unit), true
+	return int64(math.Max(0, n-step) * unit), int64((n + step) * unit), true
 }

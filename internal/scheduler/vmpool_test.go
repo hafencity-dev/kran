@@ -117,6 +117,16 @@ func TestVMPoolAdmission(t *testing.T) {
 		{name: "d: a footprint the host does not show in use earns no more than that", hostFree: 70 * gib, resident: paid,
 			// host used 96 − 78 = 18 GiB caps the credit: 21 GiB unpaid
 			steps: []step{{"c", proto.RuntimeContainer, 20 * gib, true}, {"n", proto.RuntimeNative, 51 * gib, false}, {"n2", proto.RuntimeNative, 50 * gib, true}}},
+		// (e) The VM's compressed pages earn no credit: top's MEM (40G, read
+		// as 39 GiB) holds about 10 GiB the host compressed or swapped, so
+		// the resident part is 28 GiB (cmprs 10G read as 11) and a new job
+		// writing into those guest pages needs real host memory.
+		{name: "e: footprint fully resident, host 5 GiB: 6 GiB container job admitted", hostFree: 5 * gib, resident: paid,
+			steps: []step{{"c", proto.RuntimeContainer, 6 * gib, true}}},
+		{name: "e: 10 GiB of the footprint compressed: the same job is refused", hostFree: 5 * gib, resident: paid - 11*gib,
+			steps: []step{{"c", proto.RuntimeContainer, 6 * gib, false}}},
+		{name: "e: 10 GiB compressed, a job within the host's room is admitted", hostFree: 5 * gib, resident: paid - 11*gib,
+			steps: []step{{"c", proto.RuntimeContainer, 4 * gib, true}}},
 		// (f) The VM itself full: container jobs refused however much the
 		// host has.
 		{name: "f: VM full, host plenty: container job refused", hostFree: 60 * gib, resident: paid, vmAvail: 2 * gib,

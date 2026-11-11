@@ -130,6 +130,9 @@ type dockerProbe struct {
 	resident      int64
 	residentAt    time.Time
 	residentTried time.Time
+	residentPid   int                          // the VM process (ha.pid) the reading came from
+	residentDir   string                       // its Lima instance directory
+	residentWhy   string                       // last logged reason for having no reading
 	readFile      func(string) ([]byte, error) // nil: os.ReadFile
 }
 

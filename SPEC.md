@@ -338,8 +338,13 @@ Flags: `-l/--local`, `-r/--remote`, `-n/--node NAME`, `--gpu`, `--cpus N`,
 * VM footprint (macOS, Colima): every 30 s the prober reads the physical
   footprint of the Lima host agent behind the Docker endpoint
   (`~/.colima/_lima/<instance>/ha.pid`) with `top -l 1 -pid <pid> -stats
-  pid,mem` and publishes it, rounded down by one displayed unit, as the
-  container runtime's `host_resident` (§6.3, container jobs in a VM). While
+  pid,mem,cmprs` and publishes `mem − cmprs` as the container runtime's
+  `host_resident` (§6.3, container jobs in a VM): `mem` is the footprint,
+  which also counts the pages macOS compressed or swapped, and a new job
+  writes into exactly those, so the compressed part earns no credit. `mem` is
+  rounded down and `cmprs` up by one displayed unit (`K`/`M`/`G`, a trailing
+  `+`/`-` ignored). If `cmprs` is absent, `N/A` or unparsable, the reading is
+  published as none (no credit) and the daemon logs why once per change. While
   the node is overloaded the last reading stands in for up to 2 minutes; a
   failed or older reading publishes none.
 * Reaper (every 30 s, and at daemon start): kills scopes/containers/process
@@ -478,8 +483,9 @@ minutes, or a host under memory pressure (memorystatus level ≤ 25: guest
 pages may sit compressed or in swap, and touching them again costs host
 memory). A freshly booted VM earns credit only as far as its footprint has
 grown: with 12 of 40 GiB resident, container jobs still count against the
-host up to 28 GiB. The footprint is a lower bound of what the host has paid:
-the reading is rounded down by one displayed unit, and a failed reading is
+host up to 28 GiB. The footprint less its compressed part is a lower bound of
+what the host has paid: the figures are rounded against credit, a reading
+without a readable compressed figure is none, and a failed reading is
 reported as none, never as the last one (a restarted VM starts unpaid).
 Linux nodes have no VM pool: container jobs share the host pool exactly as
 before. `kran status` shows such a node's two pools apart: the host's free
