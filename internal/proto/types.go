@@ -134,8 +134,10 @@ type Runtime struct {
 	// Toolchains found on this runtime, e.g. {"go":"1.25.10","node":"24.8.0","mise":"2026.10.1"}.
 	Toolchains map[string]string `json:"toolchains,omitempty"`
 	Docker     bool              `json:"docker"` // jobs can reach a Docker daemon
-	// the container runtime's image is not built yet; the
-	// first container job builds it (about 30 s) before it can start.
+	// the container runtime's image is not built yet. On a node that ran
+	// container jobs before, the daemon builds it at start and the runtime
+	// is unavailable until then (Reason says so); elsewhere the first
+	// container job builds it (about 30 s) before it can start.
 	FirstUse bool `json:"first_use,omitempty"`
 	// Caches: the container runtime's shared caches as its last trim
 	// found them (nil until one ran).

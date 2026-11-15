@@ -42,6 +42,9 @@ type tunables struct {
 	forceVolume      bool          // tests: keep container slots in the volume on Linux too
 	runnerDockerfile string        // tests: a lighter image
 	memMax           int64         // tests: force this memory cap
+	// prepare builds the runner image when the daemon starts on a node
+	// that ran container jobs before (image.go); tests build on demand.
+	prepare bool
 }
 
 func defaultTunables() tunables {
@@ -55,6 +58,7 @@ func defaultTunables() tunables {
 		reapEvery:      30 * time.Second,
 		trimEvery:      10 * time.Minute,
 		cacheTrimEvery: cacheTrimEvery,
+		prepare:        true,
 		jobMaxAge:      7 * 24 * time.Hour,
 		slotMaxIdle:    3 * 24 * time.Hour,
 		slotHoldIdle:   30 * time.Minute,
@@ -279,6 +283,9 @@ func (m *manager) Refresh(ctx context.Context) error {
 	if crt, ok := m.containerRuntime(ctx, dk, reason); ok {
 		if crt.Available {
 			crt.FirstUse = !m.imageBuilt(ctx, dk)
+			if why := m.prepare(ctx, dk); why != "" {
+				crt.Available, crt.Reason = false, why
+			}
 		}
 		rts = append(rts, crt)
 	}

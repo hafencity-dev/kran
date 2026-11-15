@@ -171,3 +171,90 @@ func TestStaleRunnerImages(t *testing.T) {
 		t.Fatalf("%v", got)
 	}
 }
+
+// TestRunnerImagePreparedBeforeTheFirstJob (devmac, 15.11.2026: the first
+// container job after the upgrade ended with infra_error "still being
+// prepared"): a node that ran container jobs before builds the image of a
+// new version without a job and reports the runtime unavailable until it
+// is done; a node that never did builds lazily (nothing at start).
+func TestRunnerImagePreparedBeforeTheFirstJob(t *testing.T) {
+	te := newTestEnv(t)
+	m := te.m
+	m.tun.prepare = true
+	dk, dir := fakeDocker(t)
+	forgetImage(m)
+	ctx := context.Background()
+
+	// Never used here: lazy, no build, available.
+	if why := m.prepare(ctx, dk); why != "" {
+		t.Fatalf("a node without runner images prepares: %q", why)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "builds")); err == nil {
+		t.Fatal("a build started on a node that never ran container jobs")
+	}
+
+	// An image of another version is there (the first start after an upgrade).
+	m.img.mu.Lock()
+	m.img.usedBefore = nil
+	m.img.mu.Unlock()
+	os.WriteFile(filepath.Join(dir, "images"), []byte("kran-test-runner:0.0.1\n"), 0o600)
+	why := m.prepare(ctx, dk)
+	if !strings.HasPrefix(why, preparingPrefix) || !strings.Contains(why, "container jobs run elsewhere or wait for it") {
+		t.Fatalf("reason %q", why)
+	}
+	m.rtMu.Lock()
+	m.runtimes = []proto.Runtime{{Kind: proto.RuntimeContainer, Available: false, Reason: why, FirstUse: true}}
+	m.rtMu.Unlock()
+	m.img.mu.Lock()
+	first := m.img.building
+	m.img.mu.Unlock()
+	if again := m.prepare(ctx, dk); again != why {
+		t.Fatalf("second probe while building: %q", again)
+	}
+	m.img.mu.Lock()
+	same := m.img.building == first
+	m.img.mu.Unlock()
+	if first == nil || !same {
+		t.Fatal("a probe during the build started another one")
+	}
+	// A job offered meanwhile is refused at once, with the reason, instead
+	// of waiting in setup and failing.
+	m.rtMu.Lock()
+	m.dk = dk
+	m.rtMu.Unlock()
+	if err := m.ensureContainerReady(ctx, nil); err == nil || !strings.Contains(err.Error(), preparingPrefix) {
+		t.Fatalf("job during preparation: %v", err)
+	}
+	os.WriteFile(filepath.Join(dir, "gate"), nil, 0o600)
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if rts := m.Runtimes(ctx); rts[0].Available {
+			if rts[0].Reason != "" || rts[0].FirstUse {
+				t.Fatalf("after the build: %+v", rts[0])
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("runtime not available after the build: %+v", m.Runtimes(ctx)[0])
+		}
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "builds")); string(b) != "x\n" {
+		t.Fatalf("builds %q, want exactly one", b)
+	}
+	if why := m.prepare(ctx, dk); why != "" {
+		t.Fatalf("ready image still preparing: %q", why)
+	}
+
+	// A failed build is not retried at every probe: the reason says when.
+	dk2, dir2 := fakeDocker(t)
+	forgetImage(m)
+	used := true
+	m.img.mu.Lock()
+	m.img.usedBefore, m.img.err, m.img.failed = &used, errors.New("pull failed"), m.now()
+	m.img.mu.Unlock()
+	if why := m.prepare(ctx, dk2); !strings.Contains(why, "failed (pull failed); tried again at") {
+		t.Fatalf("after a failure: %q", why)
+	}
+	if _, err := os.Stat(filepath.Join(dir2, "builds")); err == nil {
+		t.Fatal("a failed build was retried within the backoff")
+	}
+}

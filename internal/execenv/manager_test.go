@@ -64,6 +64,7 @@ func testTunables() tunables {
 	tun.livenessEvery = 200 * time.Millisecond
 	tun.probe = false
 	tun.cacheTrimEvery = 0 // tests run the cache trim themselves
+	tun.prepare = false    // no image build at construction (TestRunnerImagePreparedBeforeTheFirstJob turns it on)
 	off := false
 	tun.scope = &off
 	return tun

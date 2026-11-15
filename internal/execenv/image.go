@@ -21,9 +21,16 @@ import (
 	"github.com/hafencity-dev/kran/internal/proto"
 )
 
-// Runner image lifecycle: built lazily by the first container job, one
-// build at a time, and kept building when that job gives up (the next job
-// finds it ready). Images of other kran versions are removed by the reaper.
+// Runner image lifecycle: one build at a time, kept building when a job
+// that waits for it gives up (the next job finds it ready). A node that
+// ran container jobs before (a runner image of another kran version is
+// there: the first start after an upgrade) builds it when the daemon
+// starts, and its container runtime is not available until the build is
+// done, so no job pays for it (devmac, 15.11.2026: the first container job
+// after the upgrade ended with infra_error "still being prepared"). A node
+// that never ran one builds it lazily on the first container job, as
+// before, so a node without container jobs pays nothing. Images of other
+// kran versions are removed by the reaper.
 
 // imageBuildTimeout bounds one build (a slow network pulling the base
 // image and mise); it is not tied to the job that started the build.
@@ -41,6 +48,75 @@ type runnerImage struct {
 	building   chan struct{} // closed when the running build ends; nil when idle
 	err        error         // result of the last build
 	lastPruned time.Time
+	started    time.Time // when the running (or last) build started
+	failed     time.Time // when the last build failed
+	// usedBefore: this namespace had a runner image when the daemon first
+	// looked (nil: not asked yet). Asked once: the reaper removes the old
+	// images later.
+	usedBefore *bool
+}
+
+// prepareBackoff spaces out the builds that start without a job after one
+// failed (a job still starts one at once).
+const prepareBackoff = 5 * time.Minute
+
+// preparingPrefix starts the container runtime's reason while it is not
+// available because its image is being built ahead of the first job.
+const preparingPrefix = "preparing the Linux runtime for this kran version"
+
+// prepare starts building the runner image without a job when this node
+// ran container jobs before and the image of this version is missing. It
+// returns why the runtime is not available yet ("" when it is, or when
+// this node builds lazily).
+func (m *manager) prepare(ctx context.Context, dk *dockerEnv) string {
+	if !m.tun.prepare || dk == nil || m.imageBuilt(ctx, dk) {
+		return ""
+	}
+	m.img.mu.Lock()
+	asked := m.img.usedBefore != nil
+	m.img.mu.Unlock()
+	if !asked {
+		used := m.runnerImagesThere(ctx, dk)
+		m.img.mu.Lock()
+		m.img.usedBefore = &used
+		m.img.mu.Unlock()
+	}
+	m.img.mu.Lock()
+	defer m.img.mu.Unlock()
+	if !*m.img.usedBefore {
+		return ""
+	}
+	if m.img.building == nil {
+		if m.img.err != nil && m.now().Sub(m.img.failed) < prepareBackoff {
+			return m.prepareFailedLocked()
+		}
+		done := make(chan struct{})
+		m.img.building, m.img.started = done, m.now()
+		m.logf("container runtime: building the runner image of this kran version before the first job")
+		go m.buildImage(dk, done)
+	}
+	return fmt.Sprintf("%s (since %s); container jobs run elsewhere or wait for it", preparingPrefix, m.img.started.Local().Format("15:04:05"))
+}
+
+func (m *manager) prepareFailedLocked() string {
+	return fmt.Sprintf("%s failed (%v); tried again at %s", preparingPrefix, m.img.err, m.img.failed.Add(prepareBackoff).Local().Format("15:04:05"))
+}
+
+// runnerImagesThere: Docker holds a runner image of this namespace (of any
+// kran version).
+func (m *manager) runnerImagesThere(ctx context.Context, dk *dockerEnv) bool {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	out, err := dk.run(ctx, nil, "image", "ls", "--filter", "label=kran.ns="+m.ns, "--format", "{{.Repository}}:{{.Tag}}")
+	if err != nil {
+		return false
+	}
+	for _, l := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(l), m.ns+"-runner:") {
+			return true
+		}
+	}
+	return false
 }
 
 // runnerInit is the job containers' entrypoint, built into the image as
@@ -142,7 +218,7 @@ func (m *manager) ensureImage(ctx context.Context, dk *dockerEnv, onPhase func(p
 	done := m.img.building
 	if done == nil {
 		done = make(chan struct{})
-		m.img.building = done
+		m.img.building, m.img.started = done, m.now()
 		go m.buildImage(dk, done)
 	}
 	m.img.mu.Unlock()
@@ -170,19 +246,34 @@ func (m *manager) buildImage(dk *dockerEnv, done chan struct{}) {
 	m.img.err = err
 	m.img.ready = err == nil
 	m.img.building = nil
+	failedWhy := ""
+	if err != nil {
+		m.img.failed = m.now()
+		failedWhy = m.prepareFailedLocked()
+	}
 	m.img.mu.Unlock()
 	close(done)
-	if err != nil {
-		m.logf("container runtime: %v", err)
-		return
-	}
 	m.rtMu.Lock()
 	for i := range m.runtimes {
-		if m.runtimes[i].Kind == proto.RuntimeContainer {
-			m.runtimes[i].FirstUse = false
+		rt := &m.runtimes[i]
+		if rt.Kind != proto.RuntimeContainer {
+			continue
+		}
+		preparing := !rt.Available && strings.HasPrefix(rt.Reason, preparingPrefix)
+		switch {
+		case err == nil:
+			rt.FirstUse = false
+			if preparing { // available now, without waiting for the next probe
+				rt.Available, rt.Reason = true, ""
+			}
+		case preparing:
+			rt.Reason = failedWhy
 		}
 	}
 	m.rtMu.Unlock()
+	if err != nil {
+		m.logf("container runtime: %v", err)
+	}
 }
 
 // buildImageLocked builds under a lock file so that two daemons (or a

@@ -147,6 +147,15 @@ func Upgrade(ctx context.Context, name string, o Options) (*UpgradeResult, error
 
 	r := &Result{}
 	src := binarySource{o: &o, r: o.runner()}
+	if rOS == "darwin" && o.Exact {
+		// --version: a Mac runs its container jobs with the linux binary of
+		// the same version. It is got (from this machine's verified cache)
+		// before anything is installed there, so a way back never leaves a
+		// Mac whose daemon cannot start a container job.
+		if _, err := src.acquire(ctx, "linux", rArch); err != nil {
+			return nil, fmt.Errorf("could not provide the linux runtime of kran %s that container jobs on %s need (%v); nothing was installed on %s", o.Version, name, err, name)
+		}
+	}
 	kranPath, info, changed, err := ensureKran(ctx, &o, c, src, rOS, rArch, home, r)
 	if err != nil {
 		return nil, err
@@ -157,6 +166,9 @@ func Upgrade(ctx context.Context, name string, o Options) (*UpgradeResult, error
 	if rOS == "darwin" {
 		ch := false
 		if note := pushLinuxBinary(ctx, c, src, info, rArch, &ch); note != "" {
+			if o.Exact {
+				return nil, fmt.Errorf("%s; the binary on %s is kran %s, its daemon was not restarted", note, name, info.Version)
+			}
 			res.Notes = append(res.Notes, note)
 		}
 		res.Installed = res.Installed || ch

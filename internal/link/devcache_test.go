@@ -253,3 +253,75 @@ func TestExactUpgradeFailsLoudly(t *testing.T) {
 		t.Fatalf("good upgrade: %+v %v", res, err)
 	}
 }
+
+// TestExactUpgradeOfAMacNeedsItsLinuxRuntime: with --version, a Mac peer is
+// changed only when the linux runtime of that version can go with it (its
+// container jobs need it); without one, nothing is installed there.
+func TestExactUpgradeOfAMacNeedsItsLinuxRuntime(t *testing.T) {
+	w := newWorld(t)
+	w.start(true)
+	ctx := context.Background()
+	if _, err := Link(ctx, w.opts); err != nil {
+		t.Fatal(err)
+	}
+	const target = "1.2.4-1-gabc1234"
+	sd := w.remoteEnv["KRAN_STATE_DIR"]
+	newBin := filepath.Join(t.TempDir(), "kran")
+	copyFile(t, w.self, newBin)
+	f, _ := os.OpenFile(newBin, os.O_APPEND|os.O_WRONLY, 0)
+	f.WriteString("\nbuild " + target)
+	f.Close()
+	oldSum, _ := fileSHA256(w.self)
+	newSum, _ := fileSHA256(newBin)
+	os.MkdirAll(sd, 0o700)
+	os.WriteFile(filepath.Join(sd, "fake-versions"), []byte(oldSum+" 1.2.3\n"+newSum+" "+target+"\n"), 0o600)
+	os.WriteFile(filepath.Join(sd, "daemon-version"), []byte("1.2.3\n"), 0o600)
+	// The peer says it is a Mac (the commands still run here).
+	fake := t.TempDir()
+	os.WriteFile(filepath.Join(fake, "uname"), []byte("#!/bin/sh\necho 'Darwin arm64'\n"), 0o755)
+	t.Setenv("PATH", fake+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// This machine's cache has the darwin binary of the version, not its linux one.
+	dbin := paths.BinaryCache(target, "darwin", "arm64")
+	os.MkdirAll(filepath.Dir(dbin), 0o755)
+	copyFile(t, newBin, dbin)
+	sums := filepath.Join(filepath.Dir(filepath.Dir(dbin)), SumsFile)
+	os.WriteFile(sums, []byte(newSum+"  darwin-arm64/kran\n"), 0o644)
+	remoteBin := filepath.Join(w.remoteHome, "bin", "kran")
+	before, _ := fileSHA256(remoteBin)
+	o := Options{Version: target, SelfPath: w.self, SelfVersion: "1.2.3", Runner: w.runner, CacheOnly: true, Exact: true}
+
+	_, err := Upgrade(ctx, "devbox", o)
+	if err == nil || !strings.Contains(err.Error(), "could not provide the linux runtime of kran "+target) || !strings.Contains(err.Error(), "nothing was installed on devbox") {
+		t.Fatalf("no linux runtime: %v", err)
+	}
+	if after, _ := fileSHA256(remoteBin); after != before {
+		t.Fatal("the Mac's binary was replaced although its linux runtime could not go with it")
+	}
+
+	// With the linux runtime too: both go, and the daemon reports the version.
+	lbin := paths.BinaryCache(target, "linux", "arm64")
+	os.MkdirAll(filepath.Dir(lbin), 0o755)
+	copyFile(t, newBin, lbin)
+	os.WriteFile(sums, []byte(newSum+"  darwin-arm64/kran\n"+newSum+"  linux-arm64/kran\n"), 0o644)
+
+	// The copy of the linux runtime fails there: a failure, not a note.
+	rdir := filepath.Join(w.remoteEnv["KRAN_CACHE_DIR"], "bin", target)
+	os.MkdirAll(rdir, 0o755)
+	os.Chmod(rdir, 0o555)
+	_, err = Upgrade(ctx, "devbox", o)
+	os.Chmod(rdir, 0o755)
+	if err == nil || !strings.Contains(err.Error(), "could not copy the linux binary") || !strings.Contains(err.Error(), "its daemon was not restarted") {
+		t.Fatalf("failed linux copy: %v", err)
+	}
+
+	res, err := Upgrade(ctx, "devbox", o)
+	if err != nil || res.Daemon != target {
+		t.Fatalf("Mac with both binaries: %+v %v", res, err)
+	}
+	if after, _ := fileSHA256(remoteBin); after != newSum {
+		t.Fatal("the Mac's binary is not the version asked for")
+	}
+	if got, _ := fileSHA256(filepath.Join(rdir, "linux-arm64", "kran")); got != newSum {
+		t.Fatal("the Mac's linux runtime is not the version asked for")
+	}
+}

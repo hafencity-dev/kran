@@ -749,7 +749,13 @@ pass, anything that holds the memory is stopped).
   (its daemon is restarted if it still runs another version); a failed fetch, verification, copy or
   restart, or another version reported, exits 1 saying what is installed
   and running there now and what was not done. "Already runs `<v>`" is
-  said only when its daemon reports exactly `<v>`.
+  said only when its daemon reports exactly `<v>`. Both binaries a Mac
+  gets (its own and the linux runtime for its container jobs) come from
+  this machine's verified cache, never from the Mac's own cache, and each
+  is checked on the Mac before it replaces anything. With `--version` the
+  linux runtime is got before anything is installed on the Mac (missing:
+  exit 1, nothing installed), and a failed copy of it is a failure, not a
+  note.
   `kran service restart` and `install` print the same line after the
   restart. Debian stable-slim with git, build-essential, pkg-config,
   ca-certificates, curl, wget, locales with common UTF-8 locales prebuilt,
@@ -764,12 +770,20 @@ pass, anything that holds the memory is stopped).
   patch, diff, bc, time, tree, xxd, openssl, sqlite3, zsh, GNU awk (as
   `awk`), GNU parallel, uuidgen, hostname, tput, cpio, busybox (as `busybox`; the
   applets are not linked over the GNU tools); git trusts every
-  directory. Built lazily by the
-  first container job (phase `setup`, "preparing the Linux runtime (first
-  use, ~30 s)"), one build at a time; until then the runtime reports
-  `first_use` but counts as available whenever Docker is reachable. A job
-  that gives up waiting falls back as any prestart failure; the build goes
-  on. The reaper removes `kran-runner` images of other kran versions.
+  directory. One build at a time. On a node that ran container jobs
+  before (a runner image of another kran version is there when the daemon
+  starts: the first start after an upgrade) the daemon builds it at once,
+  and the container runtime reports itself unavailable until the build is
+  done (`preparing the Linux runtime for this kran version (since
+  HH:MM:SS); container jobs run elsewhere or wait for it`), so container
+  jobs wait or run elsewhere instead of failing in setup; a failed build
+  is said in the reason and retried after 5 minutes (a job may start one
+  sooner). A node that never ran one builds it lazily, so a node without
+  container jobs pays nothing: the first container job builds it (phase
+  `setup`, "preparing the Linux runtime (first use, ~30 s)"); until then
+  the runtime reports `first_use` but counts as available whenever Docker
+  is reachable. A job that gives up waiting falls back as any prestart
+  failure; the build goes on. The reaper removes `kran-runner` images of other kran versions.
   **Toolchains** via mise into volume `kran-tools`, lazily: the job's mise
   global config lists the origin's native version of every tool kran knows
   (go, node, python — same minor, as distribution pythons are patch
