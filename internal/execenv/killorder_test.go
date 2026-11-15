@@ -78,7 +78,9 @@ func TestSyncHelperArgsKeepDefaultOOMScore(t *testing.T) {
 var scoreSetting = regexp.MustCompile(`OOMScoreAdjust=\s*[-+0-9]`)
 
 // TestOOMScoreOnlyAtCreateGuard holds that kran gives a kill-order score
-// only to job containers it creates, in their `docker run` arguments: the
+// only at create time: to job containers it creates, in their `docker run`
+// arguments, and to containers a job creates, in the proxy's rewrite of
+// that create request: the
 // literal --oom-score-adj lives in ctrLimitArgs alone, ctrLimitArgs is
 // called only where containerSpec builds a job's `docker run`, and no code
 // writes oom_score_adj, runs `docker update`, sets OOMScoreAdjust or
@@ -171,10 +173,13 @@ func TestOOMScoreOnlyAtCreateGuard(t *testing.T) {
 	if b, err := os.ReadFile("runner-init.sh"); err != nil || !regexp.MustCompile(`(?m)^unset .*\bKRAN_INIT_OOM_SCORE\b`).Match(b) {
 		t.Errorf("runner-init.sh does not unset KRAN_INIT_OOM_SCORE before the job starts (%v)", err)
 	}
+	// applyOOMScore sets them; checkCreateKeys only refuses other
+	// spellings of them.
 	proxy := filepath.Join("internal", "execenv", "dockerproxy.go") + ":applyOOMScore"
+	check := filepath.Join("internal", "execenv", "dockerproxy.go") + ":checkCreateKeys"
 	only := len(apiAt) > 0
 	for _, at := range apiAt {
-		only = only && at == proxy
+		only = only && (at == proxy || at == check)
 	}
 	if !only {
 		t.Errorf("Docker's OomScoreAdj/OomKillDisable are named at %q, want only in the proxy's create rewrite (%s)", apiAt, proxy)
@@ -254,7 +259,8 @@ func TestProxyOOMScoreRewriteInvariant(t *testing.T) {
 			{"(a) none asked", `{"Memory":1073741824}`, map[string]any{"Memory": float64(1 << 30), "OomScoreAdj": s}},
 			{"(a) no HostConfig", ``, map[string]any{"OomScoreAdj": s}},
 			{"(b) lower asked", `{"OomScoreAdj":100}`, map[string]any{"OomScoreAdj": s}},
-			{"(c) higher asked", `{"OomScoreAdj":` + strconv.Itoa(int(higher)) + `}`, map[string]any{"OomScoreAdj": higher}},
+			// At 1000 nothing higher exists (Docker refuses more): equal is kept.
+			{"(c) higher (or equal at 1000) asked", `{"OomScoreAdj":` + strconv.Itoa(int(higher)) + `}`, map[string]any{"OomScoreAdj": higher}},
 			{"(d) negative asked", `{"OomScoreAdj":-1000}`, map[string]any{"OomScoreAdj": s}},
 			{"(e) OomKillDisable", `{"OomKillDisable":true,"OomScoreAdj":-500}`, map[string]any{"OomKillDisable": false, "OomScoreAdj": s}},
 		} {
@@ -335,7 +341,9 @@ func TestProxyOOMScoreOnlyOnCreate(t *testing.T) {
 	}
 	io.ReadAll(resp.Body)
 	resp.Body.Close()
-	<-seen
+	if got := <-seen; got != "GET /v1.47/containers/json " {
+		t.Errorf("list changed: upstream saw %q", got)
+	}
 }
 
 // TestProxyOOMScoreRealSibling (KRAN_TEST_DOCKER=1): kran's proxy in front

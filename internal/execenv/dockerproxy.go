@@ -138,13 +138,45 @@ const maxRewriteBody = 16 << 20
 // rewriteCreateContainer rewrites HostConfig.Binds and bind Mounts, and
 // puts a container the job creates at the job's own place in the kernel's
 // kill order (score > 0, applyOOMScore).
+//
+// With a score, what reaches Docker is always the body kran read and
+// encoded again, never the job's bytes, and a body that could mean
+// something else to Docker than to kran is refused (an error here is a 400
+// from the proxy): one that is not exactly one JSON object (null, an
+// array, a string, trailing data), a HostConfig that is not an object, and
+// any spelling of HostConfig, OomScoreAdj or OomKillDisable other than
+// Docker's own, or one of them given twice. Docker's decoder matches names
+// regardless of case (Go's folding: "oomscoreadj", "OomſcoreAdj") and lets
+// a later name or a repeated object win; refusing every other spelling,
+// rather than renaming it, leaves nothing that depends on two decoders
+// folding alike. Values kran does not rewrite stay raw JSON, so large
+// integers and null are passed on as written.
 func rewriteCreateContainer(maps []dockerMap, score int, body []byte) ([]byte, bool, error) {
+	if score > 0 {
+		if err := checkCreateKeys(body); err != nil {
+			return nil, false, err
+		}
+	}
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(body, &top); err != nil {
 		return nil, false, err
 	}
+	if top == nil {
+		if score > 0 {
+			return nil, false, errors.New("the request body is not a JSON object")
+		}
+		return body, false, nil
+	}
 	var hc map[string]json.RawMessage
-	if raw, ok := top["HostConfig"]; !ok || json.Unmarshal(raw, &hc) != nil || hc == nil {
+	if raw, ok := top["HostConfig"]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		if err := json.Unmarshal(raw, &hc); err != nil {
+			if score > 0 {
+				return nil, false, errors.New("HostConfig is not a JSON object")
+			}
+			return body, false, nil
+		}
+	}
+	if hc == nil {
 		if score <= 0 {
 			return body, false, nil
 		}
@@ -179,7 +211,7 @@ func rewriteCreateContainer(maps []dockerMap, score int, body []byte) ([]byte, b
 			hc["Mounts"], _ = json.Marshal(mounts)
 		}
 	}
-	if !changed {
+	if !changed && score <= 0 {
 		return body, false, nil
 	}
 	top["HostConfig"], _ = json.Marshal(hc)
@@ -187,15 +219,79 @@ func rewriteCreateContainer(maps []dockerMap, score int, body []byte) ([]byte, b
 	return out, err == nil, err
 }
 
+// checkCreateKeys refuses a create body whose meaning to Docker could
+// differ from kran's reading (see rewriteCreateContainer): exactly one
+// JSON object, HostConfig in Docker's spelling at most once, and in it
+// OomScoreAdj and OomKillDisable in Docker's spelling at most once.
+func checkCreateKeys(body []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return errors.New("the request body is not a JSON object")
+	}
+	top, err := scanKeys(dec, "HostConfig")
+	if err != nil {
+		return err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return errors.New("the request body has more after its JSON object")
+	}
+	if hc := bytes.TrimSpace(top["HostConfig"]); len(hc) > 0 && hc[0] == '{' {
+		sub := json.NewDecoder(bytes.NewReader(hc))
+		sub.Token()
+		if _, err := scanKeys(sub, "OomScoreAdj", "OomKillDisable"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// scanKeys reads the rest of an object whose '{' dec has read and returns
+// the values of names. A key that Docker would read as one of names
+// (strings.EqualFold, as Go's decoder folds) must be spelled as that name
+// and appear once.
+func scanKeys(dec *json.Decoder, names ...string) (map[string]json.RawMessage, error) {
+	found := map[string]json.RawMessage{}
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, _ := t.(string)
+		var val json.RawMessage
+		if err := dec.Decode(&val); err != nil {
+			return nil, err
+		}
+		for _, n := range names {
+			if !strings.EqualFold(key, n) {
+				continue
+			}
+			if key != n {
+				return nil, fmt.Errorf("%q is not Docker's spelling of %s; write %s", key, n, n)
+			}
+			if _, dup := found[n]; dup {
+				return nil, fmt.Errorf("%s is given more than once", n)
+			}
+			found[n] = val
+		}
+	}
+	if _, err := dec.Token(); err != nil {
+		return nil, err
+	}
+	return found, nil
+}
+
 // applyOOMScore gives a container a job creates through the proxy (a test
 // database, a compose service) at least the job's own oom_score_adj
 // (ctrOOMScoreDefault, ctrOOMScoreExplicit): in a full VM or host the
 // kernel then takes what kran's jobs started before the machine's own
 // containers, which sit at 0. A higher score asked for is kept; a lower or
-// negative one is raised to the job's, and OomKillDisable is dropped: a
-// job must not make anything it starts outrank, or outlive, the machine's
-// own containers in a shared VM. score <= 0 (rootless Docker, or an image
-// of an older kran): nothing changes.
+// negative one is raised to the job's, and OomKillDisable is dropped, so a
+// container a job creates through the proxy does not rank below the
+// machine's own containers. This is a default against accidents, not a
+// fence: the job can reach Docker's own socket, a privileged exec can
+// re-score a container, and build steps run at dockerd's score (SPEC
+// §6.8). score <= 0 (rootless Docker, or an image of an older kran):
+// nothing changes.
 func applyOOMScore(hc map[string]json.RawMessage, score int) bool {
 	if score <= 0 {
 		return false
@@ -254,8 +350,10 @@ func rewriteCreateVolume(maps []dockerMap, body []byte) ([]byte, bool, error) {
 }
 
 // rewriteRequest replaces the body of a create request whose mounts need
-// mapping. Anything it cannot parse goes to Docker unchanged (and Docker
-// reports the error, as without kran).
+// mapping, or (with a score) of every container create. A container
+// create it cannot read is refused when the job has a score; anything else
+// it cannot parse goes to Docker unchanged (and Docker reports the error,
+// as without kran).
 func rewriteRequest(maps []dockerMap, score int, req *http.Request) error {
 	if req.Method != http.MethodPost || (len(maps) == 0 && score <= 0) {
 		return nil
@@ -277,7 +375,12 @@ func rewriteRequest(maps []dockerMap, score int, req *http.Request) error {
 	if len(body) > maxRewriteBody {
 		return errors.New("request body too large")
 	}
-	if nb, changed, err := fn(maps, body); err == nil && changed {
+	nb, changed, err := fn(maps, body)
+	if err != nil && score > 0 && createContainerRe.MatchString(req.URL.Path) {
+		// Passed on unread it could reach Docker with any score it asks.
+		return fmt.Errorf("the Docker proxy refused this container create (%v); kran gives the containers a job creates the job's place in the kernel's kill order and passes on only a create it can read", err)
+	}
+	if err == nil && changed {
 		body = nb
 	}
 	req.Body = io.NopCloser(bytes.NewReader(body))
@@ -342,6 +445,9 @@ func serveDockerProxy(ln net.Listener, upstream string, maps []dockerMap, score 
 // Upgraded connections (attach, exec) carry no further requests.
 func proxyDockerConn(c net.Conn, upstream string, maps []dockerMap, score int) {
 	defer c.Close()
+	// A request kran cannot handle must not end the job's proxy (and with
+	// it the job's Docker): it ends this connection only.
+	defer func() { recover() }()
 	br := bufio.NewReader(c)
 	req, err := http.ReadRequest(br)
 	if err != nil {
@@ -357,9 +463,11 @@ func proxyDockerConn(c net.Conn, upstream string, maps []dockerMap, score int) {
 		proxyError(c, http.StatusBadRequest, "kran: "+err.Error())
 		return
 	}
-	if req.Header.Get("Upgrade") == "" {
-		req.Close = true
-	}
+	// One request per connection, also with an Upgrade header: where
+	// Docker upgrades it hijacks the connection and the stream belongs to
+	// the upgraded protocol; anywhere else Docker answers and closes, so a
+	// second request on the connection never reaches Docker unread.
+	req.Close = true
 	if err := req.Write(up); err != nil {
 		return
 	}

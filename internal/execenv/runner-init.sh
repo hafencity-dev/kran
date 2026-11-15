@@ -153,7 +153,7 @@ if [ -S "$kr_dhost" ]; then
 			sleep 0.01
 			kr_i=$((kr_i + 1))
 		done
-		[ -S "$kr_dsock" ] || kr_warn "the Docker proxy did not start; bind mounts of the workspace will be empty"
+		[ -S "$kr_dsock" ] || kr_warn "the Docker proxy did not start; bind mounts of the workspace will be empty, and containers the job starts keep Docker's default kill-order score"
 	fi
 	[ -S "$kr_dsock" ] || kr_dsock=$kr_dhost
 	ln -sfn "$kr_dsock" /run/docker.sock 2>/dev/null || kr_warn "could not link the Docker socket"

@@ -853,30 +853,46 @@ pass, anything that holds the memory is stopped).
   with the highest badness: resident memory plus `oom_score_adj`
   thousandths of the VM's or host's memory. kran starts every job container
   (and its setup container) with `--oom-score-adj`: 1000 for a job without
-  `--mem`, 500 for one with `--mem` (`ctrLimitArgs`). Everything else on
-  the machine (the owner's own containers, a database a job started) sits
-  at Docker's 0, so kran's jobs go first, a job without `--mem` before one
-  that asked for its memory. In a 39.1 GiB VM, 1000 adds 39.1 GiB and 500
-  adds 19.6 GiB to a job's own size. kran's helpers (the sync helper, the
-  cache trim) stay at 0 and so come after every job. A container a job
-  creates through kran's Docker proxy (a test database, a compose
-  service) gets at least the job's own score in its `POST
+  `--mem`, 500 for one with `--mem` (`ctrLimitArgs`). The machine's own
+  containers sit at Docker's 0, so kran's jobs go first, a job without
+  `--mem` before one that asked for its memory. In a 39.1 GiB VM, 1000
+  adds 39.1 GiB and 500 adds 19.6 GiB to a job's own size. kran's helpers
+  (the sync helper, the cache trim) stay at 0 and so come after every job.
+  A container a job creates through kran's Docker proxy (a test database, a
+  compose service) gets at least the job's own score in its `POST
   /containers/create` (`applyOOMScore`; the proxy reads it from
   `KRAN_INIT_OOM_SCORE`, which kran-init unsets before the job starts): a
   higher score asked for is kept, a lower or negative one is raised to the
-  job's, and `OomKillDisable` is dropped, so nothing a job starts outranks
-  or outlives the machine's own containers in a shared VM. Updates, execs
-  and every other request pass unchanged; a client that bypasses the proxy
-  (§6.8, Docker from a job) gets Docker's 0. On rootless Docker
-  kran sets no score. The score is given only in the `docker run` of a job
-  container kran creates: never with `docker update`, never through
-  `/proc`, never to a container kran finds or did not start. A container
-  the OOM killer ended while its measured peak was below half its cap is
-  reported as `the kernel's out-of-memory killer ended the job on devmac:
-  devmac's Linux VM ran out of memory and took this job (its highest
-  measured use was 1 GiB of its 8 GiB cap)`, exit 137, not as a cap breach.
-  Local and native jobs on Linux keep the score they inherit (a systemd
-  scope takes no `OOMScoreAdjust`).
+  job's, and `OomKillDisable` is dropped. With a score the proxy sends its
+  own encoding of every create and refuses with 400 (`kran: the Docker
+  proxy refused this container create (…)`) one that Docker could read
+  otherwise than kran: not exactly one JSON object (`null`, an array,
+  trailing data), a `HostConfig` that is not an object, or `HostConfig`,
+  `OomScoreAdj`, `OomKillDisable` in any spelling but Docker's own (Docker
+  folds case) or more than once. It sends every request with `Connection:
+  close`, one request per connection, so nothing follows a request unread.
+  Updates, execs and every other request pass unchanged. On rootless Docker
+  kran sets no score. The score is given only at create time (the `docker
+  run` of a job container kran creates, a job's create request through the
+  proxy): never with `docker update`, never through `/proc`, never to a
+  container kran finds or did not start.
+
+  This order is a default against accidents (a runaway test, a forgotten
+  container), not a fence against a job that wants out: Docker's own
+  socket is in every job at `/run/kran/docker-host.sock` (a client using it
+  gets whatever score it asks for), a privileged `exec` or container can
+  re-score itself, `docker build` steps run at BuildKit's (dockerd's) own
+  score (-500 on Docker's systemd unit, below the machine's containers;
+  the build API has no score option), and swarm services
+  (`/services/create`) are not rewritten. A fence would need the real
+  socket kept out of jobs (§9).
+
+  A container the OOM killer ended while its measured peak was below half
+  its cap is reported as `the kernel's out-of-memory killer ended the job
+  on devmac: devmac's Linux VM ran out of memory and took this job (its
+  highest measured use was 1 GiB of its 8 GiB cap)`, exit 137, not as a cap
+  breach. Local and native jobs on Linux keep the score they inherit (a
+  systemd scope takes no `OOMScoreAdjust`).
 * Why a job ended: a job whose scope, job cgroup or container saw the
   kernel's OOM killer end a process (systemd's `Result=oom-kill` of a local
   scope, read at every ending since systemd then stops the rest of the scope
