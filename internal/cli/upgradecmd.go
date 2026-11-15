@@ -9,12 +9,14 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/hafencity-dev/kran/internal/config"
 	"github.com/hafencity-dev/kran/internal/execenv"
 	"github.com/hafencity-dev/kran/internal/link"
+	"github.com/hafencity-dev/kran/internal/proto"
 	"github.com/hafencity-dev/kran/internal/service"
 	"github.com/hafencity-dev/kran/internal/version"
 )
@@ -35,6 +37,12 @@ type upgrader struct {
 	Prepare func(ctx context.Context, force bool) (release func(), err error)
 	// Restart restarts the local service; Prepare has waited already.
 	Restart func(ctx context.Context, force bool) error
+	// DaemonVersion is the version the local daemon reports, "" when none
+	// answers. nil: not known (the messages then name this binary's).
+	DaemonVersion func(ctx context.Context) string
+	// Confirm waits until the restarted daemon reports want and returns
+	// what it reports; an error when it does not. nil: not checked.
+	Confirm func(ctx context.Context, want string) (string, error)
 	Peers   func() []string
 	// UpgradePeer brings peer name to ver; newBinary is this machine's kran
 	// binary and binVer its version (used for the peer only when it equals
@@ -134,6 +142,20 @@ func (a *App) upgraderFor(self string, f upgradeFlags, lo link.Options, goos, en
 		Prepare: func(ctx context.Context, force bool) (func(), error) {
 			return a.prepareRestart(ctx, force, a.Err)
 		},
+		DaemonVersion: a.daemonVersion,
+		Confirm: func(ctx context.Context, want string) (string, error) {
+			if a.Dial == nil {
+				return "", nil // no daemon can be asked (as in prepareRestart)
+			}
+			m, err := a.serviceManager()
+			if err != nil {
+				return "", nil
+			}
+			if st, err := m.Status(ctx); err != nil || !st.Installed {
+				return "", nil // on demand: the next command starts the new binary
+			}
+			return awaitDaemon(ctx, a.daemonVersion, want, proto.DaemonStartBound, time.Second, time.Now, sleepCtx)
+		},
 		Restart: func(ctx context.Context, force bool) error {
 			m, err := a.serviceManager()
 			if err != nil {
@@ -220,54 +242,33 @@ func (u *upgrader) run(ctx context.Context, f upgradeFlags) error {
 	if f.Node != "" {
 		return u.upgradeOne(ctx, f.Node, bin, binVer, target, f.Force)
 	}
-	if target == cur {
+	// What the daemon runs, not what this binary is: after a binary was
+	// put in place by hand the two differ until a restart.
+	running := cur
+	if u.DaemonVersion != nil {
+		if v := u.DaemonVersion(ctx); v != "" {
+			running = v
+		}
+	}
+	// Nothing to replace and nothing to restart when the daemon already
+	// runs the version asked for (a node that needs a linux runtime still
+	// goes through, to fill in a missing one).
+	upToDate := target == cur && running == target && u.DaemonVersion != nil && u.FetchLinux == nil
+	switch {
+	case upToDate:
+		fmt.Fprintf(u.Out, "kran %s is already installed here and its daemon runs it.\n", cur)
+	case target == cur:
 		fmt.Fprintf(u.Out, "kran %s is already installed here.\n", cur)
-	} else if cur == "dev" && f.Version == "" {
+	case cur == "dev" && f.Version == "":
 		return fmt.Errorf("this is a development build; upgrading would replace it with release %s. Pass --version %s to do that", target, target)
 	}
-	// Everything is fetched and verified before anything is replaced, so a
-	// failure leaves the node exactly as it was. (A node that already runs
-	// the target but lacks its linux binary gets it here too.)
-	var src, linuxPath string
-	if target != cur {
-		fmt.Fprintf(u.Out, "Getting kran %s (a build between releases only from the binary cache)...\n", target)
-		var err error
-		if src, err = u.Fetch(ctx, target); err != nil {
+	if !upToDate {
+		v, err := u.replaceHere(ctx, f, target, cur, running)
+		if err != nil {
 			return err
 		}
+		binVer = v
 	}
-	if u.FetchLinux != nil {
-		fmt.Fprintf(u.Out, "Downloading the linux runtime for container jobs (kran %s)...\n", target)
-		var err error
-		if linuxPath, err = u.FetchLinux(ctx, target); err != nil {
-			return fmt.Errorf("cannot get the linux runtime of kran %s that container jobs on this node need: %w. Nothing was changed. Retry `kran upgrade`, or set runtime.container.enabled = false in the config if this node should not run container jobs", target, err)
-		}
-	}
-	// The restart's precondition before anything is replaced: a restart
-	// that cannot happen now leaves this machine exactly as it was.
-	hold := func() {}
-	if u.Prepare != nil {
-		var err error
-		if hold, err = u.Prepare(ctx, f.Force); err != nil {
-			return fmt.Errorf("%v (kran %s was not installed; this machine still runs %s)", err, target, cur)
-		}
-	}
-	if src != "" {
-		if err := u.Install(src, u.Self); err != nil {
-			hold()
-			return fmt.Errorf("cannot replace %s: %w (is it writable? install into ~/.local/bin or rerun with the needed permissions)", u.Self, err)
-		}
-		fmt.Fprintf(u.Out, "Installed kran %s at %s.\n", target, u.Self)
-		binVer = target
-	}
-	if linuxPath != "" {
-		fmt.Fprintf(u.Out, "Linux runtime for container jobs: kran %s at %s.\n", target, linuxPath)
-	}
-	if err := u.Restart(ctx, true); err != nil {
-		hold()
-		return fmt.Errorf("the binary on disk is now kran %s, but the daemon still runs %s: its restart failed (%v). Finish it with: kran service restart", target, cur, err)
-	}
-	fmt.Fprintln(u.Out, "Local service is running the new version.")
 	if f.Local {
 		return nil
 	}
@@ -291,6 +292,70 @@ func (u *upgrader) run(ctx context.Context, f upgradeFlags) error {
 		return fmt.Errorf("could not upgrade %s; check `kran doctor <machine>` and rerun `kran upgrade`", strings.Join(failed, ", "))
 	}
 	return nil
+}
+
+// replaceHere puts target in place on this machine and restarts its
+// daemon in an order that never leaves a half-done state unreported:
+// everything is fetched and verified first, then the restart's
+// precondition is checked (a refused wait changes nothing), then the
+// binary is replaced, the daemon restarted and its version confirmed. It
+// returns the version of the binary now on disk.
+func (u *upgrader) replaceHere(ctx context.Context, f upgradeFlags, target, cur, running string) (string, error) {
+	// Everything is fetched and verified before anything is replaced, so a
+	// failure leaves the node exactly as it was. (A node that already runs
+	// the target but lacks its linux binary gets it here too.)
+	var src, linuxPath string
+	if target != cur {
+		fmt.Fprintf(u.Out, "Getting kran %s (a build between releases only from the binary cache)...\n", target)
+		var err error
+		if src, err = u.Fetch(ctx, target); err != nil {
+			return "", err
+		}
+	}
+	if u.FetchLinux != nil {
+		fmt.Fprintf(u.Out, "Downloading the linux runtime for container jobs (kran %s)...\n", target)
+		var err error
+		if linuxPath, err = u.FetchLinux(ctx, target); err != nil {
+			return "", fmt.Errorf("cannot get the linux runtime of kran %s that container jobs on this node need: %w. Nothing was changed. Retry `kran upgrade`, or set runtime.container.enabled = false in the config if this node should not run container jobs", target, err)
+		}
+	}
+	// The restart's precondition before anything is replaced: a restart
+	// that cannot happen now leaves this machine exactly as it was.
+	hold := func() {}
+	if u.Prepare != nil {
+		var err error
+		if hold, err = u.Prepare(ctx, f.Force); err != nil {
+			return "", fmt.Errorf("%v (kran %s was not installed; this machine still runs %s)", err, target, running)
+		}
+	}
+	if src != "" {
+		if err := u.Install(src, u.Self); err != nil {
+			hold()
+			return "", fmt.Errorf("cannot replace %s: %w (is it writable? install into ~/.local/bin or rerun with the needed permissions)", u.Self, err)
+		}
+		fmt.Fprintf(u.Out, "Installed kran %s at %s.\n", target, u.Self)
+	}
+	if linuxPath != "" {
+		fmt.Fprintf(u.Out, "Linux runtime for container jobs: kran %s at %s.\n", target, linuxPath)
+	}
+	if err := u.Restart(ctx, true); err != nil {
+		hold()
+		return "", fmt.Errorf("the binary on disk is now kran %s while the daemon still runs %s: its restart failed (%v). Finish it with: kran service restart", target, running, err)
+	}
+	if u.Confirm != nil {
+		got, err := u.Confirm(ctx, target)
+		if err != nil {
+			if got == "" {
+				got = running
+			}
+			return "", fmt.Errorf("the binary on disk is now kran %s while the daemon still runs %s (%v). Finish it with: kran service restart", target, got, err)
+		}
+	}
+	fmt.Fprintln(u.Out, "Local service is running the new version.")
+	if src != "" {
+		return target, nil
+	}
+	return cur, nil
 }
 
 // upgradeOne brings one linked machine to target and leaves this one alone:

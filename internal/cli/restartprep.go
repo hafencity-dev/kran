@@ -163,3 +163,46 @@ func (a *App) prepareRestart(ctx context.Context, force bool, errw io.Writer) (r
 	_ = why
 	return release, nil
 }
+
+// daemonVersion is the version the local daemon reports, "" when none
+// answers.
+func (a *App) daemonVersion(ctx context.Context) string {
+	if a.Dial == nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	cl, err := a.Dial(ctx)
+	if err != nil {
+		return ""
+	}
+	defer cl.Close()
+	v, err := cl.Version(ctx)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimPrefix(v.Version, "v")
+}
+
+// awaitDaemon reads the daemon's version until it reports want, for at
+// most bound (a restarted daemon needs a moment before it serves). It
+// returns the last version read and an error when that is not want.
+func awaitDaemon(ctx context.Context, read func(context.Context) string, want string, bound, every time.Duration,
+	now func() time.Time, sleep func(context.Context, time.Duration) error) (string, error) {
+	deadline := now().Add(bound)
+	for {
+		got := read(ctx)
+		if got == want {
+			return got, nil
+		}
+		if !now().Before(deadline) {
+			if got == "" {
+				return "", fmt.Errorf("no daemon answered within %s of the restart", bound)
+			}
+			return got, fmt.Errorf("it reports kran %s %s after the restart, not %s", got, bound, want)
+		}
+		if err := sleep(ctx, every); err != nil {
+			return got, err
+		}
+	}
+}

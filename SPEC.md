@@ -737,9 +737,13 @@ pass, anything that holds the memory is stopped).
   `kran upgrade --version <v> --local-only` changes this machine only: it
   checks that the restart can happen (the wait above) before it replaces
   the binary, so a refused wait changes nothing; a restart that fails
-  after the replacement exits 1 with `the binary on disk is now kran <v>,
-  but the daemon still runs <old>: … Finish it with: kran service
-  restart`. `kran upgrade --version <v> -n <machine>` changes that linked
+  after the replacement, or a daemon (of an installed service) that does
+  not report `<v>` within 90 s of it, exits 1 with `the binary on disk is
+  now kran <v> while the daemon still runs <old> (…). Finish it with: kran
+  service restart`; `<old>` is what the daemon reports, not this binary's
+  version. A binary put in place by hand is finished the same way (restart
+  and confirm); when the daemon already reports `<v>` nothing here is
+  touched (`kran <v> is already installed here and its daemon runs it.`). `kran upgrade --version <v> -n <machine>` changes that linked
   machine only (nothing is fetched, installed or restarted here) and
   succeeds only when that machine's daemon reports `<v>` afterwards
   (its daemon is restarted if it still runs another version); a failed fetch, verification, copy or

@@ -221,3 +221,41 @@ func TestRestartWaitIsBounded(t *testing.T) {
 		t.Fatalf("%v after %d polls", err, calls)
 	}
 }
+
+// TestAwaitDaemonIsBoundedAndExact: the restarted daemon is read until it
+// reports the version asked for, for at most the bound; another version or
+// none at the end is an error naming what was read.
+func TestAwaitDaemonIsBoundedAndExact(t *testing.T) {
+	now := time.Date(2026, 11, 15, 23, 0, 0, 0, time.UTC)
+	start := now
+	clock := func() time.Time { return now }
+	sleep := func(_ context.Context, d time.Duration) error {
+		if now.Sub(start) > time.Hour {
+			return errors.New("waited past an hour on the fake clock")
+		}
+		now = now.Add(d)
+		return nil
+	}
+	seq := []string{"", "", "0.1.12-5", "0.1.12-7"}
+	read := func(context.Context) string {
+		v := seq[0]
+		if len(seq) > 1 {
+			seq = seq[1:]
+		}
+		return v
+	}
+	if got, err := awaitDaemon(context.Background(), read, "0.1.12-7", 90*time.Second, time.Second, clock, sleep); err != nil || got != "0.1.12-7" {
+		t.Fatalf("%q %v", got, err)
+	}
+	start = now
+	stuck := func(context.Context) string { return "0.1.12-5" }
+	got, err := awaitDaemon(context.Background(), stuck, "0.1.12-7", 90*time.Second, time.Second, clock, sleep)
+	if err == nil || got != "0.1.12-5" || !strings.Contains(err.Error(), "reports kran 0.1.12-5") || now.Sub(start) > 91*time.Second {
+		t.Fatalf("%q %v after %s", got, err, now.Sub(start))
+	}
+	start = now
+	if _, err := awaitDaemon(context.Background(), func(context.Context) string { return "" }, "0.1.12-7", 90*time.Second, time.Second, clock, sleep); err == nil ||
+		!strings.Contains(err.Error(), "no daemon answered") {
+		t.Fatalf("%v", err)
+	}
+}

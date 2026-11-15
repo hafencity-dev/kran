@@ -212,7 +212,7 @@ func TestUpgradeFailedRestartIsAFailure(t *testing.T) {
 	u.Prepare = func(context.Context, bool) (func(), error) { return func() { released = true }, nil }
 	u.Restart = func(context.Context, bool) error { return errors.New("systemctl: timeout") }
 	err := u.run(context.Background(), upgradeFlags{Version: "0.1.12-6-g072ef3a", Local: true})
-	if err == nil || !strings.Contains(err.Error(), "the binary on disk is now kran 0.1.12-6-g072ef3a, but the daemon still runs 0.1.12-5-gf7c1755") ||
+	if err == nil || !strings.Contains(err.Error(), "the binary on disk is now kran 0.1.12-6-g072ef3a while the daemon still runs 0.1.12-5-gf7c1755") ||
 		!strings.Contains(err.Error(), "Finish it with: kran service restart") {
 		t.Fatalf("%v", err)
 	}
@@ -254,5 +254,57 @@ func TestUpgradeVersionCheckedFirst(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "x.y.z-N-g<hex>") || len(log) != 0 {
 			t.Errorf("%+v: %v, log %v", f, err, log)
 		}
+	}
+}
+
+// TestLocalUpgradeConfirmsTheDaemon (review F5-2): --local-only succeeds
+// only when the restarted daemon reports the version asked for; the
+// messages name what the daemon runs, not what this binary is.
+func TestLocalUpgradeConfirmsTheDaemon(t *testing.T) {
+	var log []string
+	u, out, _ := newTestUpgrader("0.1.12-6-g072ef3a", &log)
+	daemon := "0.1.12-6-g072ef3a"
+	u.DaemonVersion = func(context.Context) string { return daemon }
+	u.Confirm = func(_ context.Context, want string) (string, error) {
+		return daemon, errors.New("it reports kran " + daemon + " 1m30s after the restart, not " + want)
+	}
+	// The way back, and the daemon keeps running the newer one.
+	err := u.run(context.Background(), upgradeFlags{Version: "0.1.12-5-gf7c1755", Local: true})
+	if err == nil || !strings.Contains(err.Error(), "the binary on disk is now kran 0.1.12-5-gf7c1755 while the daemon still runs 0.1.12-6-g072ef3a") ||
+		!strings.Contains(err.Error(), "Finish it with: kran service restart") || strings.Contains(out.String(), "Local service is running the new version") {
+		t.Fatalf("%v / %q", err, out.String())
+	}
+	u.Confirm = func(_ context.Context, want string) (string, error) { return want, nil }
+	out.Reset()
+	if err := u.run(context.Background(), upgradeFlags{Version: "0.1.12-5-gf7c1755", Local: true}); err != nil ||
+		!strings.Contains(out.String(), "Local service is running the new version") {
+		t.Fatalf("%v / %q", err, out.String())
+	}
+}
+
+// TestBinaryPutInPlaceByHandIsFinished: the binary on disk is already the
+// version asked for but the daemon runs another (a hand install): the
+// upgrade restarts and confirms instead of saying it is installed and done.
+// When the daemon runs it too, nothing here is touched.
+func TestBinaryPutInPlaceByHandIsFinished(t *testing.T) {
+	var log []string
+	u, out, _ := newTestUpgrader("0.1.12-7-gc25ce13", &log)
+	daemon := "0.1.12-5-gf7c1755"
+	u.DaemonVersion = func(context.Context) string { return daemon }
+	u.Confirm = func(_ context.Context, want string) (string, error) {
+		log = append(log, "confirm:"+want)
+		return want, nil
+	}
+	if err := u.run(context.Background(), upgradeFlags{Version: "0.1.12-7-gc25ce13", Local: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(log, " "); got != "restart confirm:0.1.12-7-gc25ce13" {
+		t.Fatalf("log %q", got)
+	}
+	log, daemon = nil, "0.1.12-7-gc25ce13"
+	out.Reset()
+	if err := u.run(context.Background(), upgradeFlags{Version: "0.1.12-7-gc25ce13", Local: true}); err != nil ||
+		len(log) != 0 || !strings.Contains(out.String(), "already installed here and its daemon runs it") {
+		t.Fatalf("%v log %v out %q", err, log, out.String())
 	}
 }
