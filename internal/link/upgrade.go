@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
+
+	"github.com/hafencity-dev/kran/internal/proto"
 )
 
 // LatestRelease returns the newest release version of hafencity-dev/kran
@@ -147,24 +150,36 @@ func Upgrade(ctx context.Context, name string, o Options) (*UpgradeResult, error
 
 	r := &Result{}
 	src := binarySource{o: &o, r: o.runner()}
-	if rOS == "darwin" && o.Exact {
-		// --version: a Mac runs its container jobs with the linux binary of
-		// the same version. It is got (from this machine's verified cache)
-		// before anything is installed there, so a way back never leaves a
-		// Mac whose daemon cannot start a container job.
-		if _, err := src.acquire(ctx, "linux", rArch); err != nil {
-			return nil, fmt.Errorf("could not provide the linux runtime of kran %s that container jobs on %s need (%v); nothing was installed on %s", o.Version, name, err, name)
+	var before func(*Info) error
+	runtimeCh := false
+	if rOS == "darwin" {
+		// A Mac runs its container jobs with the linux binary of the same
+		// version. It is copied (and checked there) before the Mac's own
+		// binary, in either direction: a failure up to the binary's rename
+		// leaves the Mac running what it ran, with at most the new
+		// version's runtime added to its cache, where nothing uses it yet.
+		before = func(cur *Info) error {
+			if cur == nil || cur.CacheDir == "" {
+				return nil // a kran that does not say where its cache is: after, as before
+			}
+			if note := pushLinuxRuntime(ctx, c, src, cur.CacheDir, o.Version, rArch, &runtimeCh); note != "" {
+				return errors.New(note)
+			}
+			return nil
 		}
 	}
-	kranPath, info, changed, err := ensureKran(ctx, &o, c, src, rOS, rArch, home, r)
+	kranPath, info, changed, err := ensureKran(ctx, &o, c, src, rOS, rArch, home, r, before)
 	if err != nil {
 		return nil, err
 	}
+	changed = changed || runtimeCh
 	res.From = r.RemoteVersion
 	res.Installed = changed
 	res.Notes = append(res.Notes, r.Notes...)
 	if rOS == "darwin" {
 		ch := false
+		// Normally already there (copied before the binary); this fills in
+		// one that is missing when the binary needed no change.
 		if note := pushLinuxBinary(ctx, c, src, info, rArch, &ch); note != "" {
 			if o.Exact {
 				return nil, fmt.Errorf("%s; the binary on %s is kran %s, its daemon was not restarted", note, name, info.Version)
@@ -210,6 +225,9 @@ func (res *UpgradeResult) finish(ctx context.Context, c *sshClient, o *Options, 
 		// --version: done only when the daemon there runs exactly it.
 		want := strings.TrimPrefix(o.Version, "v")
 		dv := c.daemonVersion(ctx, kranPath)
+		if dv != want && res.Restarted {
+			dv = c.awaitDaemon(ctx, kranPath, want) // a slow machine is still starting it
+		}
 		if dv != want && !res.Restarted {
 			// The binary is right but the daemon still runs another one.
 			args := []string{"service", "restart"}
@@ -220,11 +238,11 @@ func (res *UpgradeResult) finish(ctx context.Context, c *sshClient, o *Options, 
 				return res, fmt.Errorf("the binary on %s is kran %s, but its daemon runs %s and restarting it failed: %w (run `kran service restart` there)", res.Name, now.Version, orNone(dv), err)
 			}
 			res.Restarted = true
-			dv = c.daemonVersion(ctx, kranPath)
+			dv = c.awaitDaemon(ctx, kranPath, want)
 		}
 		res.Daemon = dv
 		if dv != want {
-			return res, fmt.Errorf("the binary on %s is kran %s, but its daemon reports %s after the restart, not %s", res.Name, now.Version, orNone(dv), want)
+			return res, fmt.Errorf("the binary on %s is kran %s, but its daemon reports %s %s after the restart, not %s", res.Name, now.Version, orNone(dv), daemonWait, want)
 		}
 	}
 	if cmp, ok := compareVersions(now.Version, o.Version); ok && cmp < 0 {
@@ -242,6 +260,40 @@ func orNone(v string) string {
 
 // daemonVersion asks the peer's kran which version its daemon runs ("" when
 // none answers): the "daemon: <version> (…)" line of `kran version`.
+// A restarted peer daemon may take up to proto.DaemonStartBound to serve
+// (a slow Mac under load), as locally: its version is read until it reports
+// the one asked for, for at most that long. Tests drive the clock.
+var (
+	daemonWait  = proto.DaemonStartBound
+	daemonEvery = 2 * time.Second
+	daemonClock = time.Now
+	daemonSleep = func(ctx context.Context, d time.Duration) error {
+		t := time.NewTimer(d)
+		defer t.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+			return nil
+		}
+	}
+)
+
+// awaitDaemon reads the peer daemon's version until it is want or
+// daemonWait has passed, and returns the last one read.
+func (c *sshClient) awaitDaemon(ctx context.Context, kranPath, want string) string {
+	deadline := daemonClock().Add(daemonWait)
+	for {
+		dv := c.daemonVersion(ctx, kranPath)
+		if dv == want || !daemonClock().Before(deadline) {
+			return dv
+		}
+		if daemonSleep(ctx, daemonEvery) != nil {
+			return dv
+		}
+	}
+}
+
 func (c *sshClient) daemonVersion(ctx context.Context, kranPath string) string {
 	out, err := c.kran(ctx, kranPath, nil, "version")
 	if err != nil {

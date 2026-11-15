@@ -14,9 +14,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 
@@ -39,6 +41,29 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// The wait for a restarted peer daemon runs on a clock the tests drive:
+// a sleep moves it on, nothing waits for real. A test that waits calls
+// fakeClockReset first: past ten minutes from there the sleep fails, so a
+// wait without a bound ends and its test says so.
+var fakeClockReset func()
+
+func init() {
+	var mu sync.Mutex
+	now := time.Date(2026, 11, 15, 23, 0, 0, 0, time.UTC)
+	start := now
+	fakeClockReset = func() { mu.Lock(); start = now; mu.Unlock() }
+	daemonClock = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	daemonSleep = func(_ context.Context, d time.Duration) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if now.Sub(start) > 10*time.Minute {
+			return errors.New("waited ten minutes on the fake clock")
+		}
+		now = now.Add(d)
+		return nil
+	}
+}
+
 func fakeKran(args []string) int {
 	if len(args) == 0 {
 		return 2
@@ -57,6 +82,18 @@ func fakeKran(args []string) int {
 	}
 	switch args[0] {
 	case "version":
+		// A slow daemon (fake-daemon-pending: "<reads left> <version>")
+		// answers with the old version that many more times.
+		if b, err := os.ReadFile(filepath.Join(sd, "fake-daemon-pending")); err == nil {
+			if f := strings.Fields(string(b)); len(f) == 2 {
+				if n, _ := strconv.Atoi(f[0]); n > 0 {
+					os.WriteFile(filepath.Join(sd, "fake-daemon-pending"), []byte(strconv.Itoa(n-1)+" "+f[1]+"\n"), 0o600)
+				} else {
+					os.WriteFile(filepath.Join(sd, "daemon-version"), []byte(f[1]+"\n"), 0o600)
+					os.Remove(filepath.Join(sd, "fake-daemon-pending"))
+				}
+			}
+		}
 		os.Stdout.WriteString("kran " + version.Version + "\n")
 		if b, err := os.ReadFile(filepath.Join(sd, "daemon-version")); err == nil {
 			os.Stdout.WriteString("daemon: " + strings.TrimSpace(string(b)) + " (running)\n")
@@ -81,6 +118,11 @@ func fakeKran(args []string) int {
 			dv := version.Version
 			if b, err := os.ReadFile(filepath.Join(sd, "fake-daemon-stuck")); err == nil {
 				dv = strings.TrimSpace(string(b))
+			}
+			if b, err := os.ReadFile(filepath.Join(sd, "fake-daemon-slow")); err == nil {
+				// Comes up with dv only after that many reads.
+				os.WriteFile(filepath.Join(sd, "fake-daemon-pending"), []byte(strings.TrimSpace(string(b))+" "+dv+"\n"), 0o600)
+				return 0
 			}
 			os.WriteFile(filepath.Join(sd, "daemon-version"), []byte(dv+"\n"), 0o600)
 		}

@@ -260,7 +260,7 @@ func Link(ctx context.Context, o Options) (*Result, error) {
 		return nil, err
 	}
 	src := binarySource{o: &o, r: o.runner()}
-	kranPath, info, ch, err := ensureKran(ctx, &o, c, src, rOS, rArch, home, res)
+	kranPath, info, ch, err := ensureKran(ctx, &o, c, src, rOS, rArch, home, res, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -426,7 +426,10 @@ func Link(ctx context.Context, o Options) (*Result, error) {
 // ensureKran installs (or updates) kran on the remote when it is missing or
 // older than ours, and returns its path and link-info. Content hashes decide
 // for development builds; an unchanged binary is never re-sent.
-func ensureKran(ctx context.Context, o *Options, c *sshClient, src binarySource, rOS, rArch, home string, res *Result) (kranPath string, info *Info, changed bool, err error) {
+// before, when set, runs after the new binary was got and before it is
+// copied there (with the installed kran's info, nil when there is none); an
+// error from it stops the install with nothing replaced.
+func ensureKran(ctx context.Context, o *Options, c *sshClient, src binarySource, rOS, rArch, home string, res *Result, before func(*Info) error) (kranPath string, info *Info, changed bool, err error) {
 	binDir := o.RemoteBinDir
 	if binDir == "" {
 		binDir = "~/.local/bin"
@@ -468,8 +471,17 @@ func ensureKran(ctx context.Context, o *Options, c *sshClient, src binarySource,
 			if info != nil && info.SHA256 == sum {
 				break
 			}
+			was := "not installed"
+			if info != nil {
+				was = "still " + info.Version
+			}
+			if before != nil {
+				if err := before(info); err != nil {
+					return "", nil, false, fmt.Errorf("%v; nothing was installed on %s, its binary is %s", err, o.Host, was)
+				}
+			}
 			if err := c.pushBinary(ctx, bin, binDirAbs); err != nil {
-				return "", nil, false, fmt.Errorf("install kran on %s: %w", o.Host, err)
+				return "", nil, false, fmt.Errorf("install kran on %s: %w; its binary is %s", o.Host, err, was)
 			}
 			res.Installed, changed = true, true
 			kranPath = binDirAbs + "/kran"
@@ -555,7 +567,15 @@ func pushLinuxBinary(ctx context.Context, c *sshClient, src binarySource, info *
 	if ver == "" {
 		ver = c.o.Version
 	}
-	dir := fmt.Sprintf("%s/bin/%s/linux-%s", info.CacheDir, ver, arch)
+	return pushLinuxRuntime(ctx, c, src, info.CacheDir, ver, arch, changed)
+}
+
+// pushLinuxRuntime places the linux binary of ver into the remote cache
+// dir, where that version's daemon looks for its container runtime. The
+// copy is checked there before it is renamed into place.
+func pushLinuxRuntime(ctx context.Context, c *sshClient, src binarySource, cacheDir, ver, arch string, changed *bool) string {
+	ver = strings.TrimPrefix(ver, "v")
+	dir := fmt.Sprintf("%s/bin/%s/linux-%s", cacheDir, ver, arch)
 	s := *src.o
 	s.Version = ver
 	bin, err := binarySource{o: &s, r: src.r}.acquire(ctx, "linux", arch)

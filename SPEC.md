@@ -745,17 +745,20 @@ pass, anything that holds the memory is stopped).
   and confirm); when the daemon already reports `<v>` nothing here is
   touched (`kran <v> is already installed here and its daemon runs it.`). `kran upgrade --version <v> -n <machine>` changes that linked
   machine only (nothing is fetched, installed or restarted here) and
-  succeeds only when that machine's daemon reports `<v>` afterwards
+  succeeds only when that machine's daemon reports `<v>` within 90 s of
+  the restart (read every 2 s: a slow Mac is waited for)
   (its daemon is restarted if it still runs another version); a failed fetch, verification, copy or
   restart, or another version reported, exits 1 saying what is installed
   and running there now and what was not done. "Already runs `<v>`" is
   said only when its daemon reports exactly `<v>`. Both binaries a Mac
   gets (its own and the linux runtime for its container jobs) come from
   this machine's verified cache, never from the Mac's own cache, and each
-  is checked on the Mac before it replaces anything. With `--version` the
-  linux runtime is got before anything is installed on the Mac (missing:
-  exit 1, nothing installed), and a failed copy of it is a failure, not a
-  note.
+  is checked on the Mac before it replaces anything. The linux runtime
+  is copied first and the Mac's own binary second, in every upgrade
+  (forward or back): a failure of either copy, or a runtime that cannot
+  be provided, leaves the Mac running what it ran (exit 1, `nothing was
+  installed on <machine>, its binary is still <old>` or `its binary is
+  still <old>`; the new version's runtime may stay in its cache, unused).
   `kran service restart` and `install` print the same line after the
   restart. Debian stable-slim with git, build-essential, pkg-config,
   ca-certificates, curl, wget, locales with common UTF-8 locales prebuilt,

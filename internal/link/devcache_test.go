@@ -207,6 +207,7 @@ func TestPushBinaryChecksTheCopyOnThePeer(t *testing.T) {
 // ends up with exactly that version, binary and daemon, or the upgrade
 // fails and says what runs there: never "already runs" with a note.
 func TestExactUpgradeFailsLoudly(t *testing.T) {
+	fakeClockReset()
 	w := newWorld(t)
 	w.start(true)
 	ctx := context.Background()
@@ -241,9 +242,14 @@ func TestExactUpgradeFailsLoudly(t *testing.T) {
 	copyFile(t, newBin, bin)
 	os.WriteFile(filepath.Join(filepath.Dir(filepath.Dir(bin)), SumsFile), []byte(newSum+"  "+goos+"-"+goarch+"/kran\n"), 0o644)
 	os.WriteFile(filepath.Join(sd, "fake-daemon-stuck"), []byte("1.2.3"), 0o600)
+	t0 := daemonClock()
 	res, err := Upgrade(ctx, "devbox", o)
-	if err == nil || !strings.Contains(err.Error(), "daemon reports 1.2.3 after the restart, not "+target) {
+	if err == nil || !strings.Contains(err.Error(), "daemon reports 1.2.3 1m30s after the restart, not "+target) {
 		t.Fatalf("stuck daemon: %+v %v", res, err)
+	}
+	// It waited the bound (on the test's clock), and not longer.
+	if waited := daemonClock().Sub(t0); waited < daemonWait || waited > daemonWait+daemonEvery {
+		t.Fatalf("waited %s for the stuck daemon, want %s", waited, daemonWait)
 	}
 
 	// 3. The daemon follows: success, and the result says what runs there.
@@ -254,10 +260,13 @@ func TestExactUpgradeFailsLoudly(t *testing.T) {
 	}
 }
 
-// TestExactUpgradeOfAMacNeedsItsLinuxRuntime: with --version, a Mac peer is
-// changed only when the linux runtime of that version can go with it (its
-// container jobs need it); without one, nothing is installed there.
+// TestExactUpgradeOfAMacNeedsItsLinuxRuntime: a Mac peer is changed only
+// when the linux runtime of that version can go with it (its container jobs
+// need it). The runtime is copied and checked first, the binary second, so
+// a failure of either copy leaves the Mac running what it ran (review F6-1).
+// A slow daemon is waited for (F6-2).
 func TestExactUpgradeOfAMacNeedsItsLinuxRuntime(t *testing.T) {
+	fakeClockReset()
 	w := newWorld(t)
 	w.start(true)
 	ctx := context.Background()
@@ -290,13 +299,25 @@ func TestExactUpgradeOfAMacNeedsItsLinuxRuntime(t *testing.T) {
 	before, _ := fileSHA256(remoteBin)
 	o := Options{Version: target, SelfPath: w.self, SelfVersion: "1.2.3", Runner: w.runner, CacheOnly: true, Exact: true}
 
+	daemonWas := func() string {
+		b, _ := os.ReadFile(filepath.Join(sd, "daemon-version"))
+		return strings.TrimSpace(string(b))
+	}
+	unchanged := func(step string) {
+		t.Helper()
+		if after, _ := fileSHA256(remoteBin); after != before {
+			t.Fatalf("%s: the Mac's binary was replaced", step)
+		}
+		if d := daemonWas(); d != "1.2.3" {
+			t.Fatalf("%s: the Mac's daemon runs %q", step, d)
+		}
+	}
+
 	_, err := Upgrade(ctx, "devbox", o)
-	if err == nil || !strings.Contains(err.Error(), "could not provide the linux runtime of kran "+target) || !strings.Contains(err.Error(), "nothing was installed on devbox") {
+	if err == nil || !strings.Contains(err.Error(), "could not provide the linux binary for containers") || !strings.Contains(err.Error(), "nothing was installed on devbox, its binary is still 1.2.3") {
 		t.Fatalf("no linux runtime: %v", err)
 	}
-	if after, _ := fileSHA256(remoteBin); after != before {
-		t.Fatal("the Mac's binary was replaced although its linux runtime could not go with it")
-	}
+	unchanged("no linux runtime")
 
 	// With the linux runtime too: both go, and the daemon reports the version.
 	lbin := paths.BinaryCache(target, "linux", "arm64")
@@ -304,19 +325,40 @@ func TestExactUpgradeOfAMacNeedsItsLinuxRuntime(t *testing.T) {
 	copyFile(t, newBin, lbin)
 	os.WriteFile(sums, []byte(newSum+"  darwin-arm64/kran\n"+newSum+"  linux-arm64/kran\n"), 0o644)
 
-	// The copy of the linux runtime fails there: a failure, not a note.
+	// The copy of the linux runtime fails there: a failure, nothing replaced.
 	rdir := filepath.Join(w.remoteEnv["KRAN_CACHE_DIR"], "bin", target)
 	os.MkdirAll(rdir, 0o755)
 	os.Chmod(rdir, 0o555)
 	_, err = Upgrade(ctx, "devbox", o)
 	os.Chmod(rdir, 0o755)
-	if err == nil || !strings.Contains(err.Error(), "could not copy the linux binary") || !strings.Contains(err.Error(), "its daemon was not restarted") {
+	if err == nil || !strings.Contains(err.Error(), "could not copy the linux binary") || !strings.Contains(err.Error(), "nothing was installed on devbox, its binary is still 1.2.3") {
 		t.Fatalf("failed linux copy: %v", err)
 	}
+	unchanged("failed linux copy")
 
+	// The runtime goes, the second copy (the Mac's own binary) fails: the
+	// Mac still runs what it ran; the new runtime waits unused in its cache.
+	bdir := filepath.Dir(remoteBin)
+	os.Chmod(bdir, 0o555)
+	_, err = Upgrade(ctx, "devbox", o)
+	os.Chmod(bdir, 0o755)
+	if err == nil || !strings.Contains(err.Error(), "install kran on devbox") || !strings.Contains(err.Error(), "its binary is still 1.2.3") {
+		t.Fatalf("failed second copy: %v", err)
+	}
+	unchanged("failed second copy")
+	if got, _ := fileSHA256(filepath.Join(rdir, "linux-arm64", "kran")); got != newSum {
+		t.Fatal("the runtime was not copied first")
+	}
+
+	// A slow Mac: its daemon reports the old version for a while after the
+	// restart; the upgrade waits for it (on the test's clock) and succeeds.
+	os.WriteFile(filepath.Join(sd, "fake-daemon-slow"), []byte("3"), 0o600)
 	res, err := Upgrade(ctx, "devbox", o)
 	if err != nil || res.Daemon != target {
 		t.Fatalf("Mac with both binaries: %+v %v", res, err)
+	}
+	if _, err := os.Stat(filepath.Join(sd, "fake-daemon-pending")); err == nil {
+		t.Fatal("the slow daemon was not waited for")
 	}
 	if after, _ := fileSHA256(remoteBin); after != newSum {
 		t.Fatal("the Mac's binary is not the version asked for")
