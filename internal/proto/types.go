@@ -398,6 +398,11 @@ type JobSpec struct {
 	SyncExclude []string  `json:"sync_exclude,omitempty"`
 	SubmittedAt time.Time `json:"submitted_at"`
 	ClientPID   int       `json:"client_pid"`
+	// ClientReconnect is how long (seconds) this job's kran run redials a lost
+	// daemon (proto.ClientReconnect; 0 = a kran run older than that, which
+	// gives up after 20 s). A restart need not wait for a queued job whose
+	// kran run outlasts it.
+	ClientReconnect int `json:"client_reconnect_s,omitempty"`
 	// OriginEnv describes the origin's user and tools so a container job
 	// can match them (SPEC §6.8). Filled by the origin daemon.
 	OriginEnv *OriginEnv `json:"origin_env,omitempty"`
@@ -464,6 +469,10 @@ type Job struct {
 	// failed (infra error, memory cap, canceled) or else why it ran where
 	// it ran (PlaceReason).
 	Reason string `json:"reason,omitempty"`
+	// Held: submitted while a restart of kran waits for the queue to drain;
+	// it joins the queue after the restart (or when the wait ends) and does
+	// not count as queued for that wait.
+	Held bool `json:"held,omitempty"`
 	// PlaceReason is the scheduler's rationale for the placement ("devmac:
 	// 12 CPUs free, est. 1m vs 3m here"); set once placed, kept for good.
 	PlaceReason string     `json:"place_reason,omitempty"`

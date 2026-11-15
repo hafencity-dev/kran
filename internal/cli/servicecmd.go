@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -55,34 +54,6 @@ func (a *App) idleCheck(ctx context.Context) (bool, string, error) {
 	return idleReason(st)
 }
 
-// idleReason: a restart waits while a job is starting (syncing, setup) or
-// queued. Both carry over to the new daemon when their kran run comes back
-// to it (proto.ClientReconnect), but a kran run of an older kran gives up
-// sooner, and a queued job whose client gave up would run outside the
-// books; so the restart waits for the queue too (the same bound, --force).
-func idleReason(st *proto.State) (bool, string, error) {
-	starting, queued := 0, 0
-	for _, j := range st.Jobs {
-		switch {
-		case j.State.Starting():
-			starting++
-		case j.State == proto.JobQueued:
-			queued++
-		}
-	}
-	var parts []string
-	if starting > 0 {
-		parts = append(parts, fmt.Sprintf("%d jobs are starting", starting))
-	}
-	if queued > 0 {
-		parts = append(parts, fmt.Sprintf("%d jobs are queued", queued))
-	}
-	if len(parts) == 0 {
-		return true, "", nil
-	}
-	return false, strings.Join(parts, ", "), nil
-}
-
 func (a *App) serviceCommand() *cobra.Command {
 	svc := &cobra.Command{
 		Use:   "service",
@@ -128,12 +99,20 @@ func (a *App) serviceCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			release, err := a.handOver(cmd.Context(), m, force)
+			// Hold new jobs and wait until nothing would be lost (or, with
+			// --force, say what is), then restart without a second wait.
+			hold, err := a.prepareRestart(cmd.Context(), force, a.Err)
 			if err != nil {
 				return &ExitError{Code: 1, Msg: err.Error()}
 			}
+			release, err := a.handOver(cmd.Context(), m, true)
+			if err != nil {
+				hold()
+				return &ExitError{Code: 1, Msg: err.Error()}
+			}
 			defer release()
-			if err := m.Restart(cmd.Context(), service.RestartOptions{Force: force, Idle: a.idleCheck}); err != nil {
+			if err := m.Restart(cmd.Context(), service.RestartOptions{Force: true}); err != nil {
+				hold()
 				return &ExitError{Code: 1, Msg: err.Error()}
 			}
 			a.waitDaemon(cmd.Context(), 15*time.Second)
@@ -142,7 +121,7 @@ func (a *App) serviceCommand() *cobra.Command {
 			return nil
 		},
 	}
-	restart.Flags().BoolVar(&force, "force", false, "restart now even if jobs are starting")
+	restart.Flags().BoolVar(&force, "force", false, "restart now without waiting (says first which jobs that puts at risk)")
 	svc.AddCommand(restart)
 
 	var asJSON bool

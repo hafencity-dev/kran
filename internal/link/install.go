@@ -49,14 +49,22 @@ type binarySource struct {
 func (b binarySource) acquire(ctx context.Context, goos, goarch string) (string, error) {
 	o := b.o
 	ver := o.Version
+	if o.CacheOnly {
+		if err := ValidVersion(ver); err != nil {
+			return "", err
+		}
+		if isDevVersion(ver) {
+			// kran upgrade: a build between releases only from the
+			// cache, verified, also for this machine's own platform and
+			// version (the running file is not checked against anything).
+			return cachedVerified(strings.TrimPrefix(ver, "v"), goos, goarch)
+		}
+	}
 	// This process's own binary only when it is the version asked for: an
 	// upgrade to (or back to) another version must not push the running one.
 	if goos == runtime.GOOS && goarch == runtime.GOARCH && o.SelfPath != "" &&
 		(o.SelfVersion == "" || strings.TrimPrefix(o.SelfVersion, "v") == strings.TrimPrefix(ver, "v")) {
 		return o.SelfPath, nil
-	}
-	if o.CacheOnly && isDevVersion(ver) {
-		return cachedVerified(strings.TrimPrefix(ver, "v"), goos, goarch)
 	}
 	cache := paths.BinaryCache(strings.TrimPrefix(ver, "v"), goos, goarch)
 	type step struct {
@@ -98,8 +106,8 @@ func (b binarySource) download(ctx context.Context, goos, goarch, dest string) (
 // checksums.txt.
 func (b binarySource) fetch(ctx context.Context, version, goos, goarch string) (string, error) {
 	ver := strings.TrimPrefix(version, "v")
-	if !buildVersion.MatchString(ver) || strings.HasSuffix(ver, "-dirty") { // it becomes a cache path and a gh argument
-		return "", fmt.Errorf("%q is not a release version (like 1.4.0) nor a build between releases (like 0.1.12-5-gf7c1755, from the binary cache)", version)
+	if err := ValidVersion(version); err != nil { // it becomes a cache path and a gh argument
+		return "", fmt.Errorf("%q is not a release version (like 1.4.0) nor a build between releases (like 0.1.12-5-gf7c1755, from the binary cache): %w", version, err)
 	}
 	if describeVersion.MatchString(ver) {
 		// A build between releases: the binary cache is its only source.
@@ -428,14 +436,29 @@ func findSourceRoot(self string) string {
 
 // pushBinary installs src as <dirWord>/kran on the remote atomically,
 // streaming over ssh stdin (no scp dependency).
+// pushDigest is the digest a pushed binary must have on the remote (tests
+// replace it to stand for a copy that arrives damaged).
+var pushDigest = fileSHA256
+
+// pushBinary copies src to <dir>/kran on the remote. The copy is checked
+// there, with the remote's own sha256sum or shasum, against src's digest
+// before it replaces the old binary: a stream cut short never becomes the
+// remote's kran.
 func (c *sshClient) pushBinary(ctx context.Context, src, dir string) error {
+	sum, err := pushDigest(src)
+	if err != nil {
+		return err
+	}
 	f, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 	d := remoteWord(dir)
-	script := `set -e; d=` + d + `; mkdir -p "$d"; t="$d/.kran.tmp.$$"; trap 'rm -f "$t"' EXIT; cat > "$t"; chmod 755 "$t"; mv -f "$t" "$d/kran"; trap - EXIT`
+	script := `set -e; d=` + d + `; mkdir -p "$d"; t="$d/.kran.tmp.$$"; trap 'rm -f "$t"' EXIT; cat > "$t"; chmod 755 "$t"; ` +
+		`got=$( (sha256sum "$t" 2>/dev/null || shasum -a 256 "$t") | cut -d' ' -f1); ` +
+		`if [ "$got" != ` + sum + ` ]; then echo "the copy has sha256 $got, not ` + sum + `; the old binary was kept" >&2; exit 3; fi; ` +
+		`mv -f "$t" "$d/kran"; trap - EXIT`
 	_, err = c.run(ctx, script, f)
 	return err
 }

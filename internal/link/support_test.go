@@ -21,6 +21,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/hafencity-dev/kran/internal/config"
+	"github.com/hafencity-dev/kran/internal/version"
 )
 
 // TestMain lets the test binary double as a fake `kran`: when it is invoked
@@ -42,11 +43,30 @@ func fakeKran(args []string) int {
 	if len(args) == 0 {
 		return 2
 	}
+	sd := os.Getenv("KRAN_STATE_DIR")
+	// A test may name versions by binary content (sha256, version per line in
+	// $KRAN_STATE_DIR/fake-versions): this copy then is that version.
+	if b, err := os.ReadFile(filepath.Join(sd, "fake-versions")); err == nil {
+		if sum, err := fileSHA256(os.Args[0]); err == nil {
+			for _, l := range strings.Split(string(b), "\n") {
+				if f := strings.Fields(l); len(f) == 2 && f[0] == sum {
+					version.Version = f[1]
+				}
+			}
+		}
+	}
 	switch args[0] {
+	case "version":
+		os.Stdout.WriteString("kran " + version.Version + "\n")
+		if b, err := os.ReadFile(filepath.Join(sd, "daemon-version")); err == nil {
+			os.Stdout.WriteString("daemon: " + strings.TrimSpace(string(b)) + " (running)\n")
+		} else {
+			os.Stdout.WriteString("daemon: not running (start it: kran service start)\n")
+		}
+		return 0
 	case "internal":
 		return InternalMain(args[1:], os.Stdin, os.Stdout, os.Stderr)
 	case "service":
-		sd := os.Getenv("KRAN_STATE_DIR")
 		if _, err := os.Stat(filepath.Join(sd, "no-service")); err == nil {
 			os.Stderr.WriteString("kran: the service is not installed\n")
 			return 1
@@ -55,6 +75,15 @@ func fakeKran(args []string) int {
 		f, _ := os.OpenFile(filepath.Join(sd, "service.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		f.WriteString(strings.Join(args[1:], " ") + "\n")
 		f.Close()
+		if len(args) > 1 && args[1] == "restart" {
+			// The restarted daemon runs this binary, unless the test
+			// says it stays on another version.
+			dv := version.Version
+			if b, err := os.ReadFile(filepath.Join(sd, "fake-daemon-stuck")); err == nil {
+				dv = strings.TrimSpace(string(b))
+			}
+			os.WriteFile(filepath.Join(sd, "daemon-version"), []byte(dv+"\n"), 0o600)
+		}
 		return 0
 	case "setup":
 		fs := flag.NewFlagSet("setup", flag.ContinueOnError)

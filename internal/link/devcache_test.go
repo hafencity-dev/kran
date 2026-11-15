@@ -104,12 +104,50 @@ func TestUpgradeTakesTheVersionAskedNotTheRunningOne(t *testing.T) {
 	if p, err := src.acquire(context.Background(), runtime.GOOS, runtime.GOARCH); err != nil || p != bin {
 		t.Fatalf("got %q %v, want the cached %s", p, err, bin)
 	}
-	o.SelfVersion = want // the running binary is the one asked for: it may go
-	if p, err := src.acquire(context.Background(), runtime.GOOS, runtime.GOARCH); err != nil || p != self {
-		t.Fatalf("same version: %q %v", p, err)
+	// Also when this machine runs the version asked for: the running file
+	// is checked against nothing, the cache copy against its SHA256SUMS.
+	o.SelfVersion = want
+	if p, err := src.acquire(context.Background(), runtime.GOOS, runtime.GOARCH); err != nil || p != bin {
+		t.Fatalf("same version: %q %v, want the verified cache copy", p, err)
+	}
+	// A cache copy that does not match its SHA256SUMS is refused on the
+	// peer path too (review R5-2).
+	os.WriteFile(bin, []byte("TAMPERED"), 0o755)
+	if p, err := src.acquire(context.Background(), runtime.GOOS, runtime.GOARCH); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("tampered cache copy pushed: %q %v", p, err)
 	}
 	if len(*hits) != 0 || len(*cmds) != 0 {
 		t.Fatalf("requests %v, commands %v", *hits, *cmds)
+	}
+}
+
+// TestVersionGrammarInvariant: the version string is checked before any
+// file is touched with it, on every path (here, a peer, the cache), and
+// independent of any digest.
+func TestVersionGrammarInvariant(t *testing.T) {
+	for _, v := range []string{"1.4.0", "v1.4.0", "1.4.0-rc1", "1.4.0-rc.1", "0.1.12-5-gf7c1755", "1.4.0-rc1-3-gabc123"} {
+		if err := ValidVersion(v); err != nil {
+			t.Errorf("%q refused: %v", v, err)
+		}
+	}
+	for _, v := range []string{"", "0.1.12-dirty", "0.1.12-5-gf7c1755-dirty", "0.1.12-DIRTY", "../outside", "0.1.12-5-gf7c1755/../../x",
+		"0.1.12/x", "0.1.12\\x", "0.1.12 x", "0.1.12\tx", "-0.1.12", "--version", "0.1.12-..", "0.1", "0.1.12-5-gXYZ", "0.1.12-5-g", "1.4.0-a-b-c"} {
+		err := ValidVersion(v)
+		if err == nil {
+			t.Errorf("%q accepted", v)
+		} else if !strings.Contains(err.Error(), "x.y.z-N-g<hex>") {
+			t.Errorf("%q: the message does not give the grammar: %v", v, err)
+		}
+	}
+	// The peer path refuses them before it builds a path (no cache file
+	// planted beside them could make them pass).
+	o, _, _ := devCacheEnv(t)
+	for _, v := range []string{"../outside", "0.1.12-6-g072ef3a-dirty", "0.1.12-dirty"} {
+		putCached(t, "x", "linux", "arm64", "X", "")
+		o.Version, o.CacheOnly = v, true
+		if _, err := (binarySource{o: &o, r: o.Runner}).acquire(context.Background(), "linux", "arm64"); err == nil || !strings.Contains(err.Error(), "not a kran version") {
+			t.Errorf("peer path %q: %v", v, err)
+		}
 	}
 }
 
@@ -130,5 +168,88 @@ func TestExactVersionInstallsAnOlderOne(t *testing.T) {
 		if got := needsInstall(c.remote, c.want, c.exact); got != c.need {
 			t.Errorf("%s -> %s exact %v: install %v, want %v", c.remote, c.want, c.exact, got, c.need)
 		}
+	}
+}
+
+// TestPushBinaryChecksTheCopyOnThePeer: a copy whose digest on the peer is
+// not the one sent never replaces the peer's binary.
+func TestPushBinaryChecksTheCopyOnThePeer(t *testing.T) {
+	w := newWorld(t)
+	c := newSSH(&w.opts)
+	defer c.exitMaster()
+	dir := filepath.Join(w.remoteHome, "pushdir")
+	os.MkdirAll(dir, 0o755)
+	os.WriteFile(filepath.Join(dir, "kran"), []byte("OLD"), 0o755)
+	src := filepath.Join(t.TempDir(), "kran")
+	os.WriteFile(src, []byte("NEW"), 0o755)
+	old := pushDigest
+	t.Cleanup(func() { pushDigest = old })
+	pushDigest = func(string) (string, error) { return sha256hex([]byte("NEW, as it should have arrived")), nil }
+	if err := c.pushBinary(context.Background(), src, dir); err == nil {
+		t.Fatal("a copy that does not match was installed")
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "kran")); string(b) != "OLD" {
+		t.Fatalf("the old binary was replaced: %q", b)
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 1 {
+		t.Fatalf("left behind: %v", ents)
+	}
+	pushDigest = old
+	if err := c.pushBinary(context.Background(), src, dir); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "kran")); string(b) != "NEW" {
+		t.Fatalf("the good copy was not installed: %q", b)
+	}
+}
+
+// TestExactUpgradeFailsLoudly (review F5-1): with --version a peer either
+// ends up with exactly that version, binary and daemon, or the upgrade
+// fails and says what runs there: never "already runs" with a note.
+func TestExactUpgradeFailsLoudly(t *testing.T) {
+	w := newWorld(t)
+	w.start(true)
+	ctx := context.Background()
+	if _, err := Link(ctx, w.opts); err != nil {
+		t.Fatal(err)
+	}
+	const target = "1.2.4-1-gabc1234"
+	sd := w.remoteEnv["KRAN_STATE_DIR"]
+	// The new build is the test binary with a byte more (runs the same).
+	newBin := filepath.Join(t.TempDir(), "kran")
+	copyFile(t, w.self, newBin)
+	f, _ := os.OpenFile(newBin, os.O_APPEND|os.O_WRONLY, 0)
+	f.WriteString("\nbuild " + target)
+	f.Close()
+	oldSum, _ := fileSHA256(w.self)
+	newSum, _ := fileSHA256(newBin)
+	os.MkdirAll(sd, 0o700)
+	os.WriteFile(filepath.Join(sd, "fake-versions"), []byte(oldSum+" 1.2.3\n"+newSum+" "+target+"\n"), 0o600)
+	os.WriteFile(filepath.Join(sd, "daemon-version"), []byte("1.2.3\n"), 0o600)
+	o := Options{Version: target, SelfPath: w.self, SelfVersion: "1.2.3", Runner: w.runner, CacheOnly: true, Exact: true}
+
+	// 1. No verified copy here: a failure, nothing installed there.
+	_, err := Upgrade(ctx, "devbox", o)
+	if err == nil || !strings.Contains(err.Error(), "nothing was installed on") || !strings.Contains(err.Error(), "still 1.2.3") {
+		t.Fatalf("no verified copy: %v", err)
+	}
+
+	// 2. A verified copy, but the daemon there stays on the old version.
+	goos, goarch := runtime.GOOS, runtime.GOARCH
+	bin := paths.BinaryCache(target, goos, goarch)
+	os.MkdirAll(filepath.Dir(bin), 0o755)
+	copyFile(t, newBin, bin)
+	os.WriteFile(filepath.Join(filepath.Dir(filepath.Dir(bin)), SumsFile), []byte(newSum+"  "+goos+"-"+goarch+"/kran\n"), 0o644)
+	os.WriteFile(filepath.Join(sd, "fake-daemon-stuck"), []byte("1.2.3"), 0o600)
+	res, err := Upgrade(ctx, "devbox", o)
+	if err == nil || !strings.Contains(err.Error(), "daemon reports 1.2.3 after the restart, not "+target) {
+		t.Fatalf("stuck daemon: %+v %v", res, err)
+	}
+
+	// 3. The daemon follows: success, and the result says what runs there.
+	os.Remove(filepath.Join(sd, "fake-daemon-stuck"))
+	res, err = Upgrade(ctx, "devbox", o)
+	if err != nil || res.Daemon != target || res.To != target {
+		t.Fatalf("good upgrade: %+v %v", res, err)
 	}
 }

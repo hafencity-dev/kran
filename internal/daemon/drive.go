@@ -166,6 +166,12 @@ func (d *Daemon) drive(ctx context.Context, e *jobEntry, mode driveMode) {
 		}
 	}
 
+	if mode == driveResubmit {
+		e.update(func(j *proto.Job) { j.Held = false })
+	}
+	if mode == driveFresh && !d.waitHold(ctx, e) {
+		return
+	}
 	j := e.snapshot()
 	ticket := d.deps.Sched.Submit(&j)
 	d.publishQueue()

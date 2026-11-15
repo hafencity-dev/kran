@@ -79,7 +79,10 @@ type UpgradeResult struct {
 	From, To  string
 	Installed bool
 	Restarted bool
-	Notes     []string
+	// Daemon is the version the peer's daemon reports afterwards (set with
+	// Options.Exact; "" when it was not asked).
+	Daemon string
+	Notes  []string
 }
 
 // Upgrade brings an already linked peer to the version of o.SelfPath/o.Version:
@@ -191,8 +194,55 @@ func (res *UpgradeResult) finish(ctx context.Context, c *sshClient, o *Options, 
 		return res, fmt.Errorf("could not verify kran on %s: %w", res.Name, err)
 	}
 	res.To = now.Version
+	if o.Exact {
+		// --version: done only when the daemon there runs exactly it.
+		want := strings.TrimPrefix(o.Version, "v")
+		dv := c.daemonVersion(ctx, kranPath)
+		if dv != want && !res.Restarted {
+			// The binary is right but the daemon still runs another one.
+			args := []string{"service", "restart"}
+			if o.Force {
+				args = append(args, "--force")
+			}
+			if _, err := c.kran(ctx, kranPath, nil, args...); err != nil {
+				return res, fmt.Errorf("the binary on %s is kran %s, but its daemon runs %s and restarting it failed: %w (run `kran service restart` there)", res.Name, now.Version, orNone(dv), err)
+			}
+			res.Restarted = true
+			dv = c.daemonVersion(ctx, kranPath)
+		}
+		res.Daemon = dv
+		if dv != want {
+			return res, fmt.Errorf("the binary on %s is kran %s, but its daemon reports %s after the restart, not %s", res.Name, now.Version, orNone(dv), want)
+		}
+	}
 	if cmp, ok := compareVersions(now.Version, o.Version); ok && cmp < 0 {
 		res.Notes = append(res.Notes, fmt.Sprintf("%s still reports kran %s", res.Name, now.Version))
 	}
 	return res, nil
+}
+
+func orNone(v string) string {
+	if v == "" {
+		return "nothing (not running)"
+	}
+	return v
+}
+
+// daemonVersion asks the peer's kran which version its daemon runs ("" when
+// none answers): the "daemon: <version> (…)" line of `kran version`.
+func (c *sshClient) daemonVersion(ctx context.Context, kranPath string) string {
+	out, err := c.kran(ctx, kranPath, nil, "version")
+	if err != nil {
+		return ""
+	}
+	for _, l := range strings.Split(string(out), "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(l), "daemon: "); ok {
+			v, _, _ := strings.Cut(rest, " ")
+			if v == "not" {
+				return ""
+			}
+			return strings.TrimPrefix(v, "v")
+		}
+	}
+	return ""
 }

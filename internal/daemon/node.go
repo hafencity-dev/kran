@@ -157,6 +157,7 @@ type Daemon struct {
 	token     string
 
 	draining atomic.Bool
+	hold     holdState // new jobs kept out of the queue while a restart waits (hold.go)
 
 	startedAt time.Time
 	stopOnce  sync.Once

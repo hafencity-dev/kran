@@ -11,10 +11,28 @@ import (
 	"github.com/hafencity-dev/kran/internal/paths"
 )
 
-// buildVersion is a version kran upgrade accepts: a release (1.4.0, 1.4.0-rc1)
-// or a build between releases as `git describe` names it (0.1.12-5-gf7c1755).
+// buildVersion is a version kran upgrade accepts: a release (1.4.0), a
+// release with one tag (1.4.0-rc1), or a build between releases as
+// `git describe` names it (0.1.12-5-gf7c1755, also on a tag: 1.4.0-rc1-3-gabc).
 // It becomes a cache path, so nothing else (no "/", no "..") gets through.
-var buildVersion = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)*$`)
+var buildVersion = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?(-[0-9]+-g[0-9a-f]+)?$`)
+
+// VersionGrammar names the accepted forms, for messages.
+const VersionGrammar = "x.y.z, x.y.z-tag or x.y.z-N-g<hex> (like 1.4.0, 1.4.0-rc1, 0.1.12-5-gf7c1755)"
+
+// ValidVersion checks a version string before any file is touched with it:
+// the grammar above, never "dirty" (an uncommitted tree is no version), never
+// a path separator, "..", white space or a leading dash. A leading "v" is
+// allowed.
+func ValidVersion(v string) error {
+	s := strings.TrimPrefix(v, "v")
+	bad := s == "" || strings.ContainsAny(s, "/\\ \t\r\n") || strings.Contains(s, "..") || strings.HasPrefix(s, "-") ||
+		strings.Contains(strings.ToLower(s), "dirty") || !buildVersion.MatchString(s)
+	if bad {
+		return fmt.Errorf("%q is not a kran version; give %s", v, VersionGrammar)
+	}
+	return nil
+}
 
 // describeVersion is a build between releases (git describe:
 // <tag>-<commits>-g<hash>): it exists only where it was built.

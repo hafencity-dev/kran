@@ -251,6 +251,17 @@ func (c *httpClient) DaemonInfo(ctx context.Context) (proto.DaemonInfo, error) {
 	return v, err
 }
 
+// HoldNew asks the daemon to keep new jobs out of the queue for d while a
+// restart waits for it to drain; ReleaseHold ends that (not part of the
+// Client interface; an older daemon answers 404).
+func (c *httpClient) HoldNew(ctx context.Context, d time.Duration, reason string) error {
+	return c.do(ctx, http.MethodPost, "/api/v1/daemon/hold", map[string]any{"seconds": int(d.Seconds()), "reason": reason}, nil)
+}
+
+func (c *httpClient) ReleaseHold(ctx context.Context) error {
+	return c.do(ctx, http.MethodDelete, "/api/v1/daemon/hold", nil, nil)
+}
+
 // StopDaemon asks the daemon to stop "now" or once "idle" (handover to the
 // service manager; not part of the Client interface).
 func (c *httpClient) StopDaemon(ctx context.Context, when string) error {

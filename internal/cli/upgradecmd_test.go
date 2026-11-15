@@ -182,3 +182,77 @@ func TestUpgradeFlagCombinations(t *testing.T) {
 		}
 	}
 }
+
+// TestUpgradeRefusedRestartChangesNothing (review F5-2): when the restart
+// cannot happen (the wait ran out), nothing was replaced, and the command
+// fails saying so.
+func TestUpgradeRefusedRestartChangesNothing(t *testing.T) {
+	var log []string
+	u, _, _ := newTestUpgrader("0.1.12-5-gf7c1755", &log)
+	u.Prepare = func(context.Context, bool) (func(), error) {
+		log = append(log, "prepare")
+		return func() {}, errors.New("the daemon is still busy after 10m0s (1 jobs are starting); nothing was changed")
+	}
+	err := u.run(context.Background(), upgradeFlags{Version: "0.1.12-6-g072ef3a", Local: true})
+	if err == nil || !strings.Contains(err.Error(), "nothing was changed") || !strings.Contains(err.Error(), "still runs 0.1.12-5-gf7c1755") {
+		t.Fatalf("%v", err)
+	}
+	if got := strings.Join(log, " "); got != "fetch:0.1.12-6-g072ef3a prepare" {
+		t.Fatalf("log %q (nothing may be installed or restarted)", got)
+	}
+}
+
+// TestUpgradeFailedRestartIsAFailure (review F5-2): a restart that fails
+// after the binary was replaced ends the command non-zero, saying what is
+// on disk, what runs, and the one command that finishes it.
+func TestUpgradeFailedRestartIsAFailure(t *testing.T) {
+	var log []string
+	u, out, _ := newTestUpgrader("0.1.12-5-gf7c1755", &log)
+	released := false
+	u.Prepare = func(context.Context, bool) (func(), error) { return func() { released = true }, nil }
+	u.Restart = func(context.Context, bool) error { return errors.New("systemctl: timeout") }
+	err := u.run(context.Background(), upgradeFlags{Version: "0.1.12-6-g072ef3a", Local: true})
+	if err == nil || !strings.Contains(err.Error(), "the binary on disk is now kran 0.1.12-6-g072ef3a, but the daemon still runs 0.1.12-5-gf7c1755") ||
+		!strings.Contains(err.Error(), "Finish it with: kran service restart") {
+		t.Fatalf("%v", err)
+	}
+	if strings.Contains(out.String(), "Local service is running the new version") || !released {
+		t.Fatalf("out %q released %v", out.String(), released)
+	}
+}
+
+// TestPeerFailureIsAFailure (review F5-1): with -n, a peer the upgrade could
+// not bring to the version ends the command non-zero with the peer's own
+// account; "already runs" is said only with the daemon's report.
+func TestPeerFailureIsAFailure(t *testing.T) {
+	var log []string
+	u, out, _ := newTestUpgrader("0.1.12-6-g072ef3a", &log)
+	u.UpgradePeer = func(_ context.Context, name, bin, binVer, ver string, force bool) (*link.UpgradeResult, error) {
+		return nil, errors.New("could not provide kran 0.1.10-6-gc9403ef for darwin/arm64 (no SHA256SUMS); nothing was installed on devmac, its binary is still 0.1.12-6-g072ef3a")
+	}
+	err := u.run(context.Background(), upgradeFlags{Version: "0.1.10-6-gc9403ef", Node: "devmac"})
+	if err == nil || !strings.Contains(err.Error(), "nothing was installed on devmac") || strings.Contains(out.String(), "already runs") {
+		t.Fatalf("%v / %q", err, out.String())
+	}
+	u.UpgradePeer = func(_ context.Context, name, bin, binVer, ver string, force bool) (*link.UpgradeResult, error) {
+		return &link.UpgradeResult{Name: name, From: ver, To: ver, Daemon: ver}, nil
+	}
+	out.Reset()
+	if err := u.run(context.Background(), upgradeFlags{Version: "0.1.10-6-gc9403ef", Node: "devmac"}); err != nil ||
+		!strings.Contains(out.String(), "devmac already runs 0.1.10-6-gc9403ef (its daemon reports 0.1.10-6-gc9403ef)") {
+		t.Fatalf("%v / %q", err, out.String())
+	}
+}
+
+// TestUpgradeVersionCheckedFirst (review F5-3): a version outside the
+// grammar is refused before anything is fetched, here or for a peer.
+func TestUpgradeVersionCheckedFirst(t *testing.T) {
+	for _, f := range []upgradeFlags{{Version: "../x", Local: true}, {Version: "0.1.12-dirty", Node: "devmac"}, {Version: "0.1.12-5-gf7c1755/..", Local: true}} {
+		var log []string
+		u, _, _ := newTestUpgrader("0.1.12-5-gf7c1755", &log)
+		err := u.run(context.Background(), f)
+		if err == nil || !strings.Contains(err.Error(), "x.y.z-N-g<hex>") || len(log) != 0 {
+			t.Errorf("%+v: %v, log %v", f, err, log)
+		}
+	}
+}

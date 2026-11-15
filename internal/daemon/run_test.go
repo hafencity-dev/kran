@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"runtime"
 	"strings"
@@ -402,5 +403,58 @@ func TestJobIsNamedBeforeAnything(t *testing.T) {
 	}
 	if first != proto.FrameNotice || firstNotice.Kind != "queued" || firstNotice.JobID == "" || firstNotice.JobID != res.jobID || firstNotice.Message != "" {
 		t.Fatalf("first frame %v %+v (job %s)", first, firstNotice, res.jobID)
+	}
+}
+
+// TestHoldKeepsNewJobsOutOfTheQueue: while a restart waits (kran service
+// restart, kran upgrade), a new job is accepted and named, told why it
+// waits, kept out of the scheduler and marked Held (the restart does not
+// wait for it); when the hold ends it runs as usual.
+func TestHoldKeepsNewJobsOutOfTheQueue(t *testing.T) {
+	c := newCluster(t, "a")
+	a := c.nodes["a"]
+	a.start()
+	ws := workspaceDir(t, map[string]string{"f.txt": "hi"})
+	ctx, cancel := testContext(20 * time.Second)
+	defer cancel()
+	cl, err := client.DialSocket(ctx, a.sock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cl.Close()
+	h, ok := cl.(interface {
+		HoldNew(context.Context, time.Duration, string) error
+		ReleaseHold(context.Context) error
+	})
+	if !ok {
+		t.Fatal("the client cannot hold")
+	}
+	if err := h.HoldNew(ctx, time.Minute, "a restart of kran is pending"); err != nil {
+		t.Fatal(err)
+	}
+	sawHeld := false
+	res, err := runCLI(ctx, a.sock(), shSpec(ws, "true"), cliOpts{
+		hook: func(rs client.RunSession, ft proto.FrameType, p []byte, r *cliResult) error {
+			var n proto.Notice
+			if ft != proto.FrameNotice || json.Unmarshal(p, &n) != nil || !strings.Contains(n.Message, "a restart of kran is pending") {
+				return nil
+			}
+			if q := a.scheduler().Snapshot().Queue; len(q) != 0 {
+				t.Errorf("a held job reached the scheduler: %v", q)
+			}
+			if j, ok := a.daemon().jobs.find(n.JobID); !ok || !j.Held || j.State != proto.JobQueued {
+				t.Errorf("held job %+v", j)
+			}
+			sawHeld = true
+			return h.ReleaseHold(ctx)
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sawHeld || res.exit == nil || res.exit.Code != 0 {
+		t.Fatalf("held %v exit %+v", sawHeld, res.exit)
+	}
+	if j, _ := a.daemon().jobs.find(res.jobID); j.Held {
+		t.Errorf("the job is still marked held after it ran: %+v", j)
 	}
 }

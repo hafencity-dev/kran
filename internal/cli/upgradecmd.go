@@ -29,8 +29,13 @@ type upgrader struct {
 	// does not need one (a Linux node, or container jobs switched off).
 	FetchLinux func(ctx context.Context, ver string) (path string, err error)
 	Install    func(src, dst string) error
-	Restart    func(ctx context.Context, force bool) error
-	Peers      func() []string
+	// Prepare readies the local restart before anything is replaced: it
+	// holds new jobs and waits until no job would be lost (or, with force,
+	// says what would be). An error means nothing was changed. nil: none.
+	Prepare func(ctx context.Context, force bool) (release func(), err error)
+	// Restart restarts the local service; Prepare has waited already.
+	Restart func(ctx context.Context, force bool) error
+	Peers   func() []string
 	// UpgradePeer brings peer name to ver; newBinary is this machine's kran
 	// binary and binVer its version (used for the peer only when it equals
 	// ver: an upgrade back to another version takes the cache).
@@ -126,6 +131,9 @@ func (a *App) upgraderFor(self string, f upgradeFlags, lo link.Options, goos, en
 			return link.FetchRelease(ctx, lo, ver, goos, runtime.GOARCH)
 		},
 		Install: installBinary,
+		Prepare: func(ctx context.Context, force bool) (func(), error) {
+			return a.prepareRestart(ctx, force, a.Err)
+		},
 		Restart: func(ctx context.Context, force bool) error {
 			m, err := a.serviceManager()
 			if err != nil {
@@ -184,6 +192,13 @@ func (a *App) upgraderFor(self string, f upgradeFlags, lo link.Options, goos, en
 }
 
 func (u *upgrader) run(ctx context.Context, f upgradeFlags) error {
+	if f.Version != "" {
+		// The version becomes a cache path here and on a peer: checked
+		// before any file is touched with it.
+		if err := link.ValidVersion(f.Version); err != nil {
+			return err
+		}
+	}
 	target := strings.TrimPrefix(f.Version, "v")
 	if target == "" {
 		v, err := u.Latest(ctx)
@@ -228,8 +243,18 @@ func (u *upgrader) run(ctx context.Context, f upgradeFlags) error {
 			return fmt.Errorf("cannot get the linux runtime of kran %s that container jobs on this node need: %w. Nothing was changed. Retry `kran upgrade`, or set runtime.container.enabled = false in the config if this node should not run container jobs", target, err)
 		}
 	}
+	// The restart's precondition before anything is replaced: a restart
+	// that cannot happen now leaves this machine exactly as it was.
+	hold := func() {}
+	if u.Prepare != nil {
+		var err error
+		if hold, err = u.Prepare(ctx, f.Force); err != nil {
+			return fmt.Errorf("%v (kran %s was not installed; this machine still runs %s)", err, target, cur)
+		}
+	}
 	if src != "" {
 		if err := u.Install(src, u.Self); err != nil {
+			hold()
 			return fmt.Errorf("cannot replace %s: %w (is it writable? install into ~/.local/bin or rerun with the needed permissions)", u.Self, err)
 		}
 		fmt.Fprintf(u.Out, "Installed kran %s at %s.\n", target, u.Self)
@@ -238,12 +263,11 @@ func (u *upgrader) run(ctx context.Context, f upgradeFlags) error {
 	if linuxPath != "" {
 		fmt.Fprintf(u.Out, "Linux runtime for container jobs: kran %s at %s.\n", target, linuxPath)
 	}
-	if err := u.Restart(ctx, f.Force); err != nil {
-		fmt.Fprintf(u.Err, "kran: could not restart the local service: %v\n", err)
-		fmt.Fprintln(u.Err, "kran: restart it yourself with `kran service restart --force` when you are ready.")
-	} else {
-		fmt.Fprintln(u.Out, "Local service is running the new version.")
+	if err := u.Restart(ctx, true); err != nil {
+		hold()
+		return fmt.Errorf("the binary on disk is now kran %s, but the daemon still runs %s: its restart failed (%v). Finish it with: kran service restart", target, cur, err)
 	}
+	fmt.Fprintln(u.Out, "Local service is running the new version.")
 	if f.Local {
 		return nil
 	}
@@ -254,10 +278,8 @@ func (u *upgrader) run(ctx context.Context, f upgradeFlags) error {
 		case err != nil:
 			fmt.Fprintf(u.Err, "kran: %s: %v\n", name, err)
 			failed = append(failed, name)
-		case !res.Installed && !res.Restarted:
-			fmt.Fprintf(u.Out, "%s already runs %s.\n", name, res.To)
 		default:
-			fmt.Fprintf(u.Out, "%s upgraded %s -> %s.\n", name, orUnknown(res.From), res.To)
+			fmt.Fprintln(u.Out, peerOutcome(name, res))
 		}
 		if res != nil {
 			for _, n := range res.Notes {
@@ -285,15 +307,26 @@ func (u *upgrader) upgradeOne(ctx context.Context, name, bin, binVer, target str
 	if err != nil {
 		return fmt.Errorf("could not upgrade %s: %w; check `kran doctor %s`", name, err, name)
 	}
-	if !res.Installed && !res.Restarted {
-		fmt.Fprintf(u.Out, "%s already runs %s.\n", name, res.To)
-	} else {
-		fmt.Fprintf(u.Out, "%s upgraded %s -> %s.\n", name, orUnknown(res.From), res.To)
-	}
+	fmt.Fprintln(u.Out, peerOutcome(name, res))
 	for _, n := range res.Notes {
 		fmt.Fprintln(u.Out, n)
 	}
 	return nil
+}
+
+// peerOutcome says what a peer runs after an upgrade. "already runs" only
+// when nothing was done there; with --version the daemon's own report is
+// named (the upgrade fails when it is not the version asked for).
+func peerOutcome(name string, res *link.UpgradeResult) string {
+	switch {
+	case res.Daemon != "" && !res.Installed && !res.Restarted:
+		return fmt.Sprintf("%s already runs %s (its daemon reports %s).", name, res.To, res.Daemon)
+	case res.Daemon != "":
+		return fmt.Sprintf("%s upgraded %s -> %s (its daemon reports %s).", name, orUnknown(res.From), res.To, res.Daemon)
+	case !res.Installed && !res.Restarted:
+		return fmt.Sprintf("%s already runs %s.", name, res.To)
+	}
+	return fmt.Sprintf("%s upgraded %s -> %s.", name, orUnknown(res.From), res.To)
 }
 
 func orUnknown(s string) string {

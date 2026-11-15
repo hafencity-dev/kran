@@ -57,9 +57,12 @@ func BuildSpec(ctx context.Context, in SpecInput) (proto.JobSpec, error) {
 		Owner:       in.Owner,
 		SubmittedAt: in.Now.UTC(),
 		ClientPID:   in.PID,
-		NoFallback:  f.NoFallback || f.Remote,
-		Stdin:       f.Stdin,
-		TTY:         in.TTY,
+		// How long this kran run redials a restarting daemon (a restart
+		// need not wait for its queued job).
+		ClientReconnect: int(proto.ClientReconnect / time.Second),
+		NoFallback:      f.NoFallback || f.Remote,
+		Stdin:           f.Stdin,
+		TTY:             in.TTY,
 	}
 	if f.Sh != "" {
 		spec.Shell = f.Sh

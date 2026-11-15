@@ -47,6 +47,8 @@ func (d *Daemon) routes(unix bool) http.Handler {
 	mux.HandleFunc("GET /api/v1/daemon", d.handleDaemonInfo)
 	if unix {
 		mux.HandleFunc("POST /api/v1/daemon/stop", d.handleDaemonStop)
+		mux.HandleFunc("POST /api/v1/daemon/hold", d.handleHold)
+		mux.HandleFunc("DELETE /api/v1/daemon/hold", d.handleHold)
 		mux.HandleFunc("POST /api/v1/run", d.handleRun)
 	} else {
 		mux.HandleFunc("POST /api/v1/run", func(w http.ResponseWriter, r *http.Request) {

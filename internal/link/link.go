@@ -454,6 +454,10 @@ func ensureKran(ctx context.Context, o *Options, c *sshClient, src binarySource,
 		switch {
 		case aerr != nil && info == nil:
 			return "", nil, false, aerr
+		case aerr != nil && o.Exact:
+			// --version: the version asked for or nothing, said as a failure.
+			return "", nil, false, fmt.Errorf("could not provide kran %s for %s/%s (%v); nothing was installed on %s, its binary is still %s",
+				o.Version, rOS, rArch, aerr, o.Host, info.Version)
 		case aerr != nil:
 			res.Notes = append(res.Notes, fmt.Sprintf("kept kran %s on %s: %v", info.Version, o.Host, aerr))
 		default:
@@ -471,6 +475,9 @@ func ensureKran(ctx context.Context, o *Options, c *sshClient, src binarySource,
 			kranPath = binDirAbs + "/kran"
 			if info, err = c.remoteInfo(ctx, kranPath); err != nil {
 				return "", nil, false, fmt.Errorf("the installed kran on %s does not start: %w", o.Host, err)
+			}
+			if o.Exact && strings.TrimPrefix(info.Version, "v") != strings.TrimPrefix(o.Version, "v") {
+				return "", nil, false, fmt.Errorf("the binary installed on %s reports kran %s, not %s; its daemon was not restarted", o.Host, info.Version, o.Version)
 			}
 		}
 	}

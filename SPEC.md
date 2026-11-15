@@ -341,8 +341,20 @@ Flags: `-l/--local`, `-r/--remote`, `-n/--node NAME`, `--gpu`, `--cpus N`,
   connection for `ClientReconnect` (110 s: a restart plus the time a
   restarted daemon waits for it) and resumes via `reattach`; otherwise it
   exits 125 (§6.1 step 8). `kran service restart` (and so `kran upgrade`)
-  waits, up to 10 minutes or until `--force`, while any job of this node is
-  syncing, in setup or queued.
+  first asks the daemon to hold new jobs (`POST /api/v1/daemon/hold`, at
+  most 15 minutes; released on any failure, and by the restart itself): a
+  job submitted meanwhile is not queued but waits with `kran: waiting: a
+  restart of kran is pending; this job joins the queue after it (at the
+  latest at HH:MM:SS)` and is submitted by the new daemon after its
+  `kran run` reattached. The restart then waits, up to 10 minutes, while
+  any job of this node is syncing or in setup, or queued by a `kran run`
+  older than 0.1.12-6 (its spec carries no `client_reconnect_s`, so it
+  would give up during the restart); a job queued by a newer `kran run`
+  carries over and does not hold the restart. In ordinary use the wait
+  therefore ends without `--force`. A wait that runs out changes nothing
+  and exits 1 naming what it waited for. `--force` first prints what it
+  puts at risk (`kran: --force restarts now without waiting: …` or `no
+  job is at risk`), then restarts at once.
 * Probes that fork a helper (`nvidia-smi`, the docker CLI) back off
   exponentially after a failure and run at most every 30 s while the node
   is overloaded (the last reading stands in). The container runtime counts
@@ -711,13 +723,29 @@ pass, anything that holds the memory is stopped).
   source build: `make cache` builds the four platforms of a clean commit
   (build date = commit time, so the same commit and Go give the same
   bytes) into `<cache>/bin/<version>/` with a `SHA256SUMS`, and every use
-  checks the cached binary against it (here and for a peer). `--version`
-  installs exactly that version, also an older one (the way back), and a
-  binary for the peer's platform is this machine's own only when this
-  machine runs that version. `kran upgrade --version <v> --local-only`
-  changes this machine only; `kran upgrade --version <v> -n <machine>`
-  changes that linked machine only (nothing is fetched, installed or
-  restarted here).
+  checks the cached binary against it (here and for a peer), also when
+  this machine runs that version (the running file is never pushed for a
+  build between releases). The `SHA256SUMS` guards against mix-ups (a
+  wrong or half-written file, another build under the same name), not
+  against the user, who can write the cache. A version is checked before
+  any file operation against one grammar: `x.y.z`, `x.y.z-tag` or
+  `x.y.z-N-g<hex>`; separators, `..`, whitespace, a leading dash and
+  `-dirty` are refused with the grammar in the message. A copy pushed to a
+  peer is checked there against the digest before it replaces the peer's
+  binary; a mismatch keeps the old binary. `--version` installs exactly
+  that version, also an older one (the way back).
+  `kran upgrade --version <v> --local-only` changes this machine only: it
+  checks that the restart can happen (the wait above) before it replaces
+  the binary, so a refused wait changes nothing; a restart that fails
+  after the replacement exits 1 with `the binary on disk is now kran <v>,
+  but the daemon still runs <old>: … Finish it with: kran service
+  restart`. `kran upgrade --version <v> -n <machine>` changes that linked
+  machine only (nothing is fetched, installed or restarted here) and
+  succeeds only when that machine's daemon reports `<v>` afterwards
+  (its daemon is restarted if it still runs another version); a failed fetch, verification, copy or
+  restart, or another version reported, exits 1 saying what is installed
+  and running there now and what was not done. "Already runs `<v>`" is
+  said only when its daemon reports exactly `<v>`.
   `kran service restart` and `install` print the same line after the
   restart. Debian stable-slim with git, build-essential, pkg-config,
   ca-certificates, curl, wget, locales with common UTF-8 locales prebuilt,
@@ -976,6 +1004,7 @@ lowercase base32 (job IDs: 10 chars, sortable by time).
 | POST | `/api/v1/jobs/{id}/priority` | `{priority}` |
 | POST | `/api/v1/nodes/{name}/drain` / `resume` | drain control |
 | POST | `/api/v1/run` | upgrade to run session (unix socket only) |
+| POST / DELETE | `/api/v1/daemon/hold` | `{seconds, reason}`: hold new jobs before a restart (at most 15 min) / release (unix socket only) |
 | GET | `/api/v1/version` | `proto.VersionInfo` |
 | GET | `/` | UI assets |
 

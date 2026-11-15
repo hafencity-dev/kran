@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -136,25 +138,86 @@ func TestQueuedJobOutlastsASlowRestart(t *testing.T) {
 }
 
 // TestRestartWaitsForQueuedJobs: kran service restart and kran upgrade wait
-// while a job is queued, as they wait while one is starting.
+// while a job is starting, or queued by a kran run that would give up during
+// the restart (older than 0.1.12-6); a queued job whose kran run outlasts a
+// restart, and a job held for the restart, do not hold it up.
 func TestRestartWaitsForQueuedJobs(t *testing.T) {
+	newRun := int(proto.ClientReconnect / time.Second)
+	job := func(s proto.JobState, reconnect int, held bool) proto.Job {
+		j := proto.Job{State: s, Held: held}
+		j.Spec.ClientReconnect = reconnect
+		return j
+	}
 	for _, c := range []struct {
-		states []proto.JobState
-		idle   bool
-		why    string
+		name string
+		jobs []proto.Job
+		idle bool
+		why  string
 	}{
-		{nil, true, ""},
-		{[]proto.JobState{proto.JobRunning, proto.JobSucceeded}, true, ""},
-		{[]proto.JobState{proto.JobQueued}, false, "1 jobs are queued"},
-		{[]proto.JobState{proto.JobSyncing, proto.JobQueued, proto.JobQueued}, false, "1 jobs are starting, 2 jobs are queued"},
+		{"nothing", nil, true, ""},
+		{"running and done", []proto.Job{job(proto.JobRunning, 0, false), job(proto.JobSucceeded, 0, false)}, true, ""},
+		{"queued, new kran run", []proto.Job{job(proto.JobQueued, newRun, false)}, true, ""},
+		{"held for the restart", []proto.Job{job(proto.JobQueued, 0, true)}, true, ""},
+		{"queued, old kran run", []proto.Job{job(proto.JobQueued, 0, false)}, false, "1 jobs are queued by a kran run older than 0.1.12-6"},
+		{"starting and old queued", []proto.Job{job(proto.JobSyncing, newRun, false), job(proto.JobQueued, 0, false), job(proto.JobQueued, 20, false)}, false,
+			"1 jobs are starting, 2 jobs are queued by a kran run older than 0.1.12-6"},
 	} {
-		st := &proto.State{}
-		for _, s := range c.states {
-			st.Jobs = append(st.Jobs, proto.Job{State: s})
-		}
-		idle, why, _ := idleReason(st)
+		idle, why, _ := idleReason(&proto.State{Jobs: c.jobs})
 		if idle != c.idle || why != c.why {
-			t.Errorf("%v: idle %v %q, want %v %q", c.states, idle, why, c.idle, c.why)
+			t.Errorf("%s: idle %v %q, want %v %q", c.name, idle, why, c.idle, c.why)
 		}
+	}
+}
+
+// TestForceSaysWhatItRisks: --force names, before it restarts, the jobs it
+// does not wait for and what happens to them.
+func TestForceSaysWhatItRisks(t *testing.T) {
+	st := &proto.State{Jobs: []proto.Job{
+		{Spec: proto.JobSpec{ID: "qold"}, State: proto.JobQueued},
+		{Spec: proto.JobSpec{ID: "qnew", ClientReconnect: int(proto.ClientReconnect / time.Second)}, State: proto.JobQueued},
+		{Spec: proto.JobSpec{ID: "sync1"}, State: proto.JobSyncing},
+	}}
+	got := forceLoss(st)
+	for _, want := range []string{"qold", "older than 0.1.12-6", "outside the queue", "sync1 (syncing)", "canceled"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in %q", want, got)
+		}
+	}
+	if strings.Contains(got, "qnew") {
+		t.Errorf("a job that carries over is named: %q", got)
+	}
+	if got := forceLoss(&proto.State{}); !strings.Contains(got, "no job is at risk") {
+		t.Errorf("empty: %q", got)
+	}
+}
+
+// TestRestartWaitIsBounded: the wait gives up after its bound with the
+// reason (stepped clock, no real waits), and ends at once when idle.
+func TestRestartWaitIsBounded(t *testing.T) {
+	now := time.Date(2026, 11, 15, 22, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	start := now
+	// A wait that ignores its bound keeps sleeping; the fake clock stops it
+	// at an hour so the test fails by itself instead of by go test's timeout.
+	sleep := func(_ context.Context, d time.Duration) error {
+		if now.Sub(start) > time.Hour {
+			return errors.New("waited past an hour on the fake clock")
+		}
+		now = now.Add(d)
+		return nil
+	}
+	busy := func(context.Context) (bool, string, error) { return false, "1 jobs are starting", nil }
+	var said []string
+	why, err := waitIdle(context.Background(), busy, clock, sleep, 2*time.Second, restartWait, func(s string) { said = append(said, s) })
+	if err == nil || why != "1 jobs are starting" || !strings.Contains(err.Error(), "still busy after 10m0s") || len(said) != 1 {
+		t.Fatalf("%q %v %v", why, err, said)
+	}
+	calls := 0
+	drains := func(context.Context) (bool, string, error) {
+		calls++
+		return calls > 3, "1 jobs are starting", nil
+	}
+	if _, err := waitIdle(context.Background(), drains, clock, sleep, 2*time.Second, restartWait, func(string) {}); err != nil || calls != 4 {
+		t.Fatalf("%v after %d polls", err, calls)
 	}
 }
