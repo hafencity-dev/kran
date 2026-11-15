@@ -82,7 +82,7 @@ func DefaultTiming() Timing {
 		UnreachableLog:   10 * time.Minute,
 		MetricsEvery:     2 * time.Second,
 		SliceEvery:       20 * time.Second,
-		CLIReattachWait:  20 * time.Second,
+		CLIReattachWait:  proto.ReattachWait,
 		CLIDropGrace:     12 * time.Second,
 		StdinWindow:      8 << 20,
 		StdinQueue:       64 << 20,

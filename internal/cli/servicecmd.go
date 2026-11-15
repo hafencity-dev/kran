@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -51,16 +52,35 @@ func (a *App) idleCheck(ctx context.Context) (bool, string, error) {
 	if err != nil {
 		return true, "", nil
 	}
-	n := 0
+	return idleReason(st)
+}
+
+// idleReason: a restart waits while a job is starting (syncing, setup) or
+// queued. Both carry over to the new daemon when their kran run comes back
+// to it (proto.ClientReconnect), but a kran run of an older kran gives up
+// sooner, and a queued job whose client gave up would run outside the
+// books; so the restart waits for the queue too (the same bound, --force).
+func idleReason(st *proto.State) (bool, string, error) {
+	starting, queued := 0, 0
 	for _, j := range st.Jobs {
-		if j.State.Starting() {
-			n++
+		switch {
+		case j.State.Starting():
+			starting++
+		case j.State == proto.JobQueued:
+			queued++
 		}
 	}
-	if n == 0 {
+	var parts []string
+	if starting > 0 {
+		parts = append(parts, fmt.Sprintf("%d jobs are starting", starting))
+	}
+	if queued > 0 {
+		parts = append(parts, fmt.Sprintf("%d jobs are queued", queued))
+	}
+	if len(parts) == 0 {
 		return true, "", nil
 	}
-	return false, fmt.Sprintf("%d jobs are starting", n), nil
+	return false, strings.Join(parts, ", "), nil
 }
 
 func (a *App) serviceCommand() *cobra.Command {

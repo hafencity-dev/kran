@@ -30,7 +30,7 @@ func newTestUpgrader(cur string, log *[]string) (*upgrader, *bytes.Buffer, *byte
 			return nil
 		},
 		Peers: func() []string { return []string{"devmac", "box"} },
-		UpgradePeer: func(_ context.Context, name, bin, ver string, force bool) (*link.UpgradeResult, error) {
+		UpgradePeer: func(_ context.Context, name, bin, binVer, ver string, force bool) (*link.UpgradeResult, error) {
 			*log = append(*log, "peer:"+name+":"+ver)
 			if name == "box" {
 				return nil, errors.New("ssh timeout")
@@ -65,7 +65,7 @@ func TestUpgradeCheckAndSameVersion(t *testing.T) {
 	}
 	log = nil
 	out.Reset()
-	u.UpgradePeer = func(_ context.Context, name, bin, ver string, force bool) (*link.UpgradeResult, error) {
+	u.UpgradePeer = func(_ context.Context, name, bin, binVer, ver string, force bool) (*link.UpgradeResult, error) {
 		return &link.UpgradeResult{Name: name, To: ver}, nil
 	}
 	if err := u.run(context.Background(), upgradeFlags{}); err != nil {
@@ -123,5 +123,62 @@ func TestInstallBinaryAtomicAndSymlink(t *testing.T) {
 	ents, _ := os.ReadDir(dir)
 	if len(ents) != 3 {
 		t.Fatalf("leftovers: %v", ents)
+	}
+}
+
+// TestUpgradeOnePeerLeavesThisMachineAlone: -n upgrades (or takes back) one
+// linked machine; nothing is fetched, installed or restarted here, and the
+// peer is told this machine's binary is the running version (so it takes
+// the version asked for from the cache when they differ).
+func TestUpgradeOnePeerLeavesThisMachineAlone(t *testing.T) {
+	var log []string
+	u, out, _ := newTestUpgrader("0.1.12-5-gf7c1755", &log)
+	u.UpgradePeer = func(_ context.Context, name, bin, binVer, ver string, force bool) (*link.UpgradeResult, error) {
+		log = append(log, "peer:"+name+":"+binVer+"->"+ver)
+		return &link.UpgradeResult{Name: name, From: "0.1.12-5-gf7c1755", To: ver, Installed: true, Restarted: true}, nil
+	}
+	if err := u.run(context.Background(), upgradeFlags{Version: "0.1.10-6-gc9403ef", Node: "devmac"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(log, " "); got != "peer:devmac:0.1.12-5-gf7c1755->0.1.10-6-gc9403ef" {
+		t.Fatalf("log %q", got)
+	}
+	if !strings.Contains(out.String(), "devmac upgraded 0.1.12-5-gf7c1755 -> 0.1.10-6-gc9403ef") {
+		t.Fatalf("%q", out.String())
+	}
+	log = nil
+	if err := u.run(context.Background(), upgradeFlags{Version: "0.1.10-6-gc9403ef", Node: "nope"}); err == nil || len(log) != 0 {
+		t.Fatalf("unknown machine: %v %v", err, log)
+	}
+}
+
+// TestUpgradeTellsPeersTheInstalledVersion: after this machine installed the
+// target, its binary is the target, and the peers are told so.
+func TestUpgradeTellsPeersTheInstalledVersion(t *testing.T) {
+	var log []string
+	u, _, _ := newTestUpgrader("0.1.12-2-gd3852cf", &log)
+	u.Peers = func() []string { return []string{"devmac"} }
+	u.UpgradePeer = func(_ context.Context, name, bin, binVer, ver string, force bool) (*link.UpgradeResult, error) {
+		log = append(log, "peer:"+binVer+"->"+ver)
+		return &link.UpgradeResult{Name: name, To: ver}, nil
+	}
+	if err := u.run(context.Background(), upgradeFlags{Version: "0.1.12-5-gf7c1755"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(log, " "); got != "fetch:0.1.12-5-gf7c1755 install:/cache/kran->/bin/kran restart peer:0.1.12-5-gf7c1755->0.1.12-5-gf7c1755" {
+		t.Fatalf("log %q", got)
+	}
+}
+
+func TestUpgradeFlagCombinations(t *testing.T) {
+	a, _, errb := testApp(nil)
+	for args, want := range map[string]string{
+		"upgrade -n devmac --local-only --version 0.1.10-6-gc9403ef": "cannot be combined",
+		"upgrade -n devmac": "-n needs --version",
+	} {
+		errb.Reset()
+		if code := a.Execute(context.Background(), strings.Fields(args)); code != 2 || !strings.Contains(errb.String(), want) {
+			t.Errorf("%s: %d %q", args, code, errb.String())
+		}
 	}
 }

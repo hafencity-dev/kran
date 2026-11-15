@@ -292,10 +292,20 @@ Flags: `-l/--local`, `-r/--remote`, `-n/--node NAME`, `--gpu`, `--cpus N`,
      graceful stop), and runs a remote job itself only on the daemon's
      word: a `local` decision or a `FrameError` with `run_locally`. If the
      daemon does not come back it exits 125 (the job may still start there).
-     A queued job's `kran run` knows the job ID from its first `queued`
-     notice and reattaches too (the restarted daemon keeps the job queued
-     for it); only a daemon that does not come back, or a job queued too
-     briefly for a notice, has it run the command itself, once.
+     A queued job's `kran run` reattaches too (the restarted daemon keeps
+     the job queued for it): the daemon's first frame after a submit is a
+     `queued` notice with the job's ID and no message, before any wait
+     reason or decision. Both sides wait for each other with one set of
+     bounds (`internal/proto/restart.go`): the new daemon keeps a restored
+     job for its `kran run` `ReattachWait` (20 s) after restoring it, and
+     `kran run` redials a lost daemon for `ClientReconnect` =
+     `DaemonStartBound` (90 s, the longest a restart may take until the
+     new daemon serves: graceful stop 5 s, the service manager's respawn,
+     the new start on a loaded machine) + `ReattachWait`, so it is still
+     dialing for the whole time the daemon waits for it. Only a daemon not
+     back after that is gone: then a queued job's `kran run` runs the
+     command itself, once (with `--remote`/`--no-fallback` it exits 125),
+     and so does one that lost the daemon before its submit was answered.
    * A restarted origin sends no heartbeat to a job still in setup until
      its `kran run` reattached (the supervisor starts the command only
      after a heartbeat newer than the setup); without one it cancels the
@@ -328,8 +338,11 @@ Flags: `-l/--local`, `-r/--remote`, `-n/--node NAME`, `--gpu`, `--cpus N`,
   again (`Scheduler.Restore`, unconditional: they run whether or not they
   still fit), so neither node is overbooked until they end.
   The CLI, if its daemon connection drops after the decision, retries the
-  connection for 20 s (as long as a restarted daemon waits for it) and
-  resumes via `reattach`; otherwise it exits 125 (§6.1 step 8).
+  connection for `ClientReconnect` (110 s: a restart plus the time a
+  restarted daemon waits for it) and resumes via `reattach`; otherwise it
+  exits 125 (§6.1 step 8). `kran service restart` (and so `kran upgrade`)
+  waits, up to 10 minutes or until `--force`, while any job of this node is
+  syncing, in setup or queued.
 * Probes that fork a helper (`nvidia-smi`, the docker CLI) back off
   exponentially after a failure and run at most every 30 s while the node
   is overloaded (the last reading stands in). The container runtime counts
@@ -692,6 +705,19 @@ pass, anything that holds the memory is stopped).
   `runtime.container.enabled = false` skips it, a Linux node never fetches
   it. Run on a node that already has the target version it fills in a
   missing linux binary. The cache of older versions is not pruned.
+  **Builds between releases** (`git describe` versions such as
+  `0.1.12-5-gf7c1755`) are accepted by `kran upgrade --version` and come
+  only from the binary cache, never from a download and never from a
+  source build: `make cache` builds the four platforms of a clean commit
+  (build date = commit time, so the same commit and Go give the same
+  bytes) into `<cache>/bin/<version>/` with a `SHA256SUMS`, and every use
+  checks the cached binary against it (here and for a peer). `--version`
+  installs exactly that version, also an older one (the way back), and a
+  binary for the peer's platform is this machine's own only when this
+  machine runs that version. `kran upgrade --version <v> --local-only`
+  changes this machine only; `kran upgrade --version <v> -n <machine>`
+  changes that linked machine only (nothing is fetched, installed or
+  restarted here).
   `kran service restart` and `install` print the same line after the
   restart. Debian stable-slim with git, build-essential, pkg-config,
   ca-certificates, curl, wget, locales with common UTF-8 locales prebuilt,
@@ -1058,7 +1084,7 @@ kran drain <node> / kran resume <node>
 kran doctor [--fix] [node]
 kran agents install|uninstall|status
 kran service install|uninstall|start|stop|restart|status
-kran upgrade               self-update all linked nodes
+kran upgrade [--version V] [--local-only | -n machine]   self-update this and linked nodes
 kran version
 ```
 

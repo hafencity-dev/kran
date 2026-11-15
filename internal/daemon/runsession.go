@@ -96,6 +96,10 @@ func (d *Daemon) serveRun(conn net.Conn, br *bufio.Reader, clientPID int) {
 			return
 		}
 		e.attach()
+		// The job's ID at once, before any wait reason: a kran run that
+		// loses this daemon (a restart) reattaches by it instead of running
+		// the command itself next to the queue (SPEC §6.1 step 8).
+		e.notice("queued", "")
 		d.startDriver(e, driveFresh)
 	case proto.FrameReattach:
 		var ra proto.Reattach

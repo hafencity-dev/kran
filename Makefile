@@ -23,7 +23,7 @@ endif
 PREFIX ?= $(HOME)/.local/bin
 PLATFORMS := linux/arm64 linux/amd64 darwin/arm64 darwin/amd64
 
-.PHONY: help build test fmt-check lint ui release-snapshot install e2e smoke chaos clean
+.PHONY: help build test fmt-check lint ui release-snapshot install cache e2e smoke chaos clean
 
 help: ## list targets
 	@grep -E "^[a-z-]+:.*## " $(MAKEFILE_LIST) | sed "s/:.*## /\t/" | sort
@@ -61,6 +61,28 @@ ui: ## build the web dashboard into internal/ui/dist
 
 release-snapshot: ## local goreleaser dry run into dist/
 	goreleaser release --snapshot --clean
+
+# The binary cache entry of this commit: all four platforms and the
+# SHA256SUMS that `kran upgrade --version <this version>` checks (a build
+# between releases comes from the cache only). The build date is the
+# commit's (UTC), so the same commit and Go give the same bytes. Refuses a
+# dirty tree: a cached version is one commit.
+COMMIT_DATE = $(shell TZ=UTC git log -1 --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
+CACHE_LDFLAGS = -s -w -X $(MODULE)/internal/version.Version=$(VERSION) \
+	-X $(MODULE)/internal/version.Commit=$(COMMIT) -X $(MODULE)/internal/version.BuildDate=$(COMMIT_DATE)
+SHA256 = $(shell command -v sha256sum >/dev/null 2>&1 && echo sha256sum || echo "shasum -a 256")
+
+cache: ## fill the binary cache for linux/darwin x arm64/amd64 with SHA256SUMS (no install)
+	@case "$(VERSION)" in *dirty*) echo "the tree has uncommitted changes; commit first (a cached version is one commit)"; exit 1;; esac
+	@set -e; dir="$(CACHE)/bin/$(VERSION)"; mkdir -p "$$dir"; : > "$$dir/SHA256SUMS.tmp"; \
+	for p in $(PLATFORMS); do \
+		os=$${p%/*}; arch=$${p#*/}; mkdir -p "$$dir/$$os-$$arch"; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags "$(CACHE_LDFLAGS)" -o "$$dir/$$os-$$arch/kran.tmp" ./cmd/kran; \
+		mv "$$dir/$$os-$$arch/kran.tmp" "$$dir/$$os-$$arch/kran"; \
+		(cd "$$dir" && $(SHA256) "$$os-$$arch/kran") >> "$$dir/SHA256SUMS.tmp"; \
+		echo "cached $$dir/$$os-$$arch/kran"; \
+	done; \
+	mv "$$dir/SHA256SUMS.tmp" "$$dir/SHA256SUMS"; cat "$$dir/SHA256SUMS"
 
 install: ## install to $(PREFIX) and fill the binary cache for all four platforms
 	@mkdir -p "$(PREFIX)" bin

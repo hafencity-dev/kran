@@ -27,11 +27,14 @@ type upgrader struct {
 	// FetchLinux downloads and verifies the linux runtime binary of release
 	// ver into this node's cache and returns its path. nil when this node
 	// does not need one (a Linux node, or container jobs switched off).
-	FetchLinux  func(ctx context.Context, ver string) (path string, err error)
-	Install     func(src, dst string) error
-	Restart     func(ctx context.Context, force bool) error
-	Peers       func() []string
-	UpgradePeer func(ctx context.Context, name, newBinary, ver string, force bool) (*link.UpgradeResult, error)
+	FetchLinux func(ctx context.Context, ver string) (path string, err error)
+	Install    func(src, dst string) error
+	Restart    func(ctx context.Context, force bool) error
+	Peers      func() []string
+	// UpgradePeer brings peer name to ver; newBinary is this machine's kran
+	// binary and binVer its version (used for the peer only when it equals
+	// ver: an upgrade back to another version takes the cache).
+	UpgradePeer func(ctx context.Context, name, newBinary, binVer, ver string, force bool) (*link.UpgradeResult, error)
 	Self        string
 	Current     string
 	Out         io.Writer
@@ -43,6 +46,7 @@ type upgradeFlags struct {
 	Check   bool
 	Force   bool
 	Local   bool
+	Node    string // only this linked machine; this one is not touched
 }
 
 func (a *App) upgradeCommand() *cobra.Command {
@@ -52,10 +56,23 @@ func (a *App) upgradeCommand() *cobra.Command {
 		Short: "Update kran here and on all linked machines",
 		Long: `Download the newest kran release from GitHub (no login needed; gh or
 GITHUB_TOKEN are used only as a fallback, e.g. when rate limited), replace this binary, restart the local service once
-running jobs have finished, then do the same on every linked machine.`,
-		Example: "  kran upgrade\n  kran upgrade --check\n  kran upgrade --version 0.4.1 --force",
-		Args:    cobra.NoArgs,
+running jobs have finished, then do the same on every linked machine.
+
+A build between releases (--version 0.1.12-5-gf7c1755) comes only from the
+binary cache, checked against the SHA256SUMS that ` + "`make cache`" + ` wrote
+beside it; it is never downloaded or built. --version installs exactly that
+version, also an older one (the way back). --local-only touches this machine
+only, -n <machine> that linked machine only.`,
+		Example: "  kran upgrade\n  kran upgrade --check\n  kran upgrade --version 0.4.1 --force\n" +
+			"  kran upgrade --version 0.1.12-5-gf7c1755 --local-only\n  kran upgrade --version 0.1.12-5-gf7c1755 -n devmac",
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if f.Node != "" && f.Local {
+				return &ExitError{Code: 2, Msg: "--local-only and -n cannot be combined: -n already leaves this machine alone"}
+			}
+			if f.Node != "" && f.Version == "" {
+				return &ExitError{Code: 2, Msg: "-n needs --version: name the version that machine should run"}
+			}
 			self, err := a.Self()
 			if err != nil {
 				return &ExitError{Code: 1, Msg: "cannot find the kran binary: " + err.Error()}
@@ -71,6 +88,7 @@ running jobs have finished, then do the same on every linked machine.`,
 	cmd.Flags().BoolVar(&f.Check, "check", false, "only report whether a newer release exists")
 	cmd.Flags().BoolVar(&f.Force, "force", false, "restart services now even if jobs are running")
 	cmd.Flags().BoolVar(&f.Local, "local-only", false, "do not touch linked machines")
+	cmd.Flags().StringVarP(&f.Node, "node", "n", "", "upgrade only this linked machine (needs --version); this machine is not touched")
 	return cmd
 }
 
@@ -140,9 +158,11 @@ func (a *App) upgraderFor(self string, f upgradeFlags, lo link.Options, goos, en
 			}
 			return out
 		},
-		UpgradePeer: func(ctx context.Context, name, bin, ver string, force bool) (*link.UpgradeResult, error) {
+		UpgradePeer: func(ctx context.Context, name, bin, binVer, ver string, force bool) (*link.UpgradeResult, error) {
 			o := lo
-			o.SelfPath, o.Version, o.Force = bin, ver, force
+			o.SelfPath, o.SelfVersion, o.Version, o.Force = bin, binVer, ver, force
+			o.CacheOnly = true
+			o.Exact = f.Version != ""
 			return link.Upgrade(ctx, name, o)
 		},
 	}
@@ -181,7 +201,10 @@ func (u *upgrader) run(ctx context.Context, f upgradeFlags) error {
 		}
 		return nil
 	}
-	bin := u.Self
+	bin, binVer := u.Self, cur
+	if f.Node != "" {
+		return u.upgradeOne(ctx, f.Node, bin, binVer, target, f.Force)
+	}
 	if target == cur {
 		fmt.Fprintf(u.Out, "kran %s is already installed here.\n", cur)
 	} else if cur == "dev" && f.Version == "" {
@@ -192,7 +215,7 @@ func (u *upgrader) run(ctx context.Context, f upgradeFlags) error {
 	// the target but lacks its linux binary gets it here too.)
 	var src, linuxPath string
 	if target != cur {
-		fmt.Fprintf(u.Out, "Downloading kran %s...\n", target)
+		fmt.Fprintf(u.Out, "Getting kran %s (a build between releases only from the binary cache)...\n", target)
 		var err error
 		if src, err = u.Fetch(ctx, target); err != nil {
 			return err
@@ -210,6 +233,7 @@ func (u *upgrader) run(ctx context.Context, f upgradeFlags) error {
 			return fmt.Errorf("cannot replace %s: %w (is it writable? install into ~/.local/bin or rerun with the needed permissions)", u.Self, err)
 		}
 		fmt.Fprintf(u.Out, "Installed kran %s at %s.\n", target, u.Self)
+		binVer = target
 	}
 	if linuxPath != "" {
 		fmt.Fprintf(u.Out, "Linux runtime for container jobs: kran %s at %s.\n", target, linuxPath)
@@ -225,7 +249,7 @@ func (u *upgrader) run(ctx context.Context, f upgradeFlags) error {
 	}
 	var failed []string
 	for _, name := range u.Peers() {
-		res, err := u.UpgradePeer(ctx, name, bin, target, f.Force)
+		res, err := u.UpgradePeer(ctx, name, bin, binVer, target, f.Force)
 		switch {
 		case err != nil:
 			fmt.Fprintf(u.Err, "kran: %s: %v\n", name, err)
@@ -243,6 +267,31 @@ func (u *upgrader) run(ctx context.Context, f upgradeFlags) error {
 	}
 	if len(failed) > 0 {
 		return fmt.Errorf("could not upgrade %s; check `kran doctor <machine>` and rerun `kran upgrade`", strings.Join(failed, ", "))
+	}
+	return nil
+}
+
+// upgradeOne brings one linked machine to target and leaves this one alone:
+// nothing fetched here, nothing installed or restarted here.
+func (u *upgrader) upgradeOne(ctx context.Context, name, bin, binVer, target string, force bool) error {
+	known := false
+	for _, p := range u.Peers() {
+		known = known || p == name
+	}
+	if !known {
+		return fmt.Errorf("%s is not a linked machine this one can reach; `kran status` lists them", name)
+	}
+	res, err := u.UpgradePeer(ctx, name, bin, binVer, target, force)
+	if err != nil {
+		return fmt.Errorf("could not upgrade %s: %w; check `kran doctor %s`", name, err, name)
+	}
+	if !res.Installed && !res.Restarted {
+		fmt.Fprintf(u.Out, "%s already runs %s.\n", name, res.To)
+	} else {
+		fmt.Fprintf(u.Out, "%s upgraded %s -> %s.\n", name, orUnknown(res.From), res.To)
+	}
+	for _, n := range res.Notes {
+		fmt.Fprintln(u.Out, n)
 	}
 	return nil
 }

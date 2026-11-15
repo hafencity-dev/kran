@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -691,7 +692,8 @@ func TestQueueNoticesThenPlacement(t *testing.T) {
 	defer cancel()
 	res, err := runCLI(ctx, a.sock(), shSpec(ws, "echo ok"), cliOpts{
 		hook: func(rs client.RunSession, ft proto.FrameType, p []byte, r *cliResult) error {
-			if ft == proto.FrameNotice {
+			var n proto.Notice
+			if ft == proto.FrameNotice && json.Unmarshal(p, &n) == nil && n.Message != "" {
 				mu.Lock()
 				open = true
 				mu.Unlock()
@@ -701,7 +703,7 @@ func TestQueueNoticesThenPlacement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.exit.Code != 0 || len(res.notices) == 0 || !strings.Contains(res.notices[0].Message, "needs 6 GiB") {
+	if w := res.waitNotices(); res.exit.Code != 0 || len(w) == 0 || !strings.Contains(w[0].Message, "needs 6 GiB") {
 		t.Fatalf("exit %+v notices %+v", res.exit, res.notices)
 	}
 }

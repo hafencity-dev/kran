@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"runtime"
 	"strings"
 	"testing"
@@ -190,7 +191,8 @@ func TestCtrlCWhileQueued(t *testing.T) {
 	defer cancel()
 	res, err := runCLI(ctx, a.sock(), shSpec(ws, "true"), cliOpts{
 		hook: func(rs client.RunSession, ft proto.FrameType, p []byte, r *cliResult) error {
-			if ft == proto.FrameNotice {
+			var n proto.Notice
+			if ft == proto.FrameNotice && json.Unmarshal(p, &n) == nil && n.Message != "" {
 				return rs.SendJSON(proto.FrameSignal, proto.Signal{Name: "INT"})
 			}
 			return nil
@@ -201,7 +203,7 @@ func TestCtrlCWhileQueued(t *testing.T) {
 	if res.exit == nil || res.exit.Code != 130 || res.exit.State != proto.JobCanceled {
 		t.Fatalf("exit %+v", res.exit)
 	}
-	if k := res.noticeKinds(); len(k) == 0 || k[0] != "queued" || !strings.Contains(res.notices[0].Message, "not online") {
+	if w := res.waitNotices(); len(w) == 0 || w[0].Kind != "queued" || !strings.Contains(w[0].Message, "not online") {
 		t.Fatalf("notices %+v", res.notices)
 	}
 	if n := len(a.scheduler().Snapshot().Queue); n != 0 {
@@ -371,5 +373,34 @@ func TestLocalEnvelopeNoCapUnderKranSlice(t *testing.T) {
 		if env.Slice != "kran.slice" || (mem == 0) != (env.MemMax == 0) {
 			t.Errorf("--mem %d: envelope %+v", mem, env)
 		}
+	}
+}
+
+// TestJobIsNamedBeforeAnything: the first frame a kran run gets is a notice
+// with the job's ID, before any wait reason or decision, so a kran run that
+// loses this daemon at any moment after its submit reattaches to the job
+// instead of running it itself next to the queue (SPEC §6.1 step 8).
+func TestJobIsNamedBeforeAnything(t *testing.T) {
+	c := newCluster(t, "a")
+	a := c.nodes["a"]
+	a.start()
+	ws := workspaceDir(t, map[string]string{"f.txt": "hi"})
+	ctx, cancel := testContext(20 * time.Second)
+	defer cancel()
+	var first proto.FrameType
+	var firstNotice proto.Notice
+	res, err := runCLI(ctx, a.sock(), shSpec(ws, "true"), cliOpts{
+		hook: func(rs client.RunSession, ft proto.FrameType, p []byte, r *cliResult) error {
+			if first == 0 {
+				first = ft
+				json.Unmarshal(p, &firstNotice)
+			}
+			return nil
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != proto.FrameNotice || firstNotice.Kind != "queued" || firstNotice.JobID == "" || firstNotice.JobID != res.jobID || firstNotice.Message != "" {
+		t.Fatalf("first frame %v %+v (job %s)", first, firstNotice, res.jobID)
 	}
 }

@@ -23,7 +23,7 @@ type timing struct {
 	NoticeDelay time.Duration // a wait must exceed this before kran says anything
 	Heartbeat   time.Duration // we send a heartbeat this often
 	DeadAfter   time.Duration // no frame for this long = connection lost
-	Reconnect   time.Duration // how long to retry the daemon after a drop (a restarted daemon waits as long, CLIReattachWait)
+	Reconnect   time.Duration // how long to retry the daemon after a drop (proto.ClientReconnect: a restart plus the daemon's wait for us)
 	DoubleInt   time.Duration // second Ctrl-C within this escalates to KILL
 	RetryEvery  time.Duration
 	ExitConfirm time.Duration // how long a local job's exit waits for the daemon to record it
@@ -31,12 +31,18 @@ type timing struct {
 
 func defaultTiming() timing {
 	return timing{NoticeDelay: 2 * time.Second, Heartbeat: 2 * time.Second, DeadAfter: 10 * time.Second,
-		Reconnect: 20 * time.Second, DoubleInt: 2 * time.Second, RetryEvery: 300 * time.Millisecond,
+		Reconnect: proto.ClientReconnect, DoubleInt: 2 * time.Second, RetryEvery: 300 * time.Millisecond,
 		ExitConfirm: 3 * time.Second}
 }
 
 // runner drives one `kran run` (SPEC §6.1).
 type runner struct {
+	// reconnectClock times the redials after a lost daemon (nil: the real
+	// clock); tests drive a daemon that restarts slowly with it.
+	reconnectClock interface {
+		Now() time.Time
+		After(time.Duration) <-chan time.Time
+	}
 	spec    proto.JobSpec
 	flags   RunFlags
 	env     []string          // full local environment, for local execution
@@ -725,13 +731,17 @@ func (r *runner) onDisconnect(ctx context.Context, cause error) (int, bool) {
 }
 
 func (r *runner) reconnect() {
-	deadline := time.Now().Add(r.tm.Reconnect)
+	now, after := time.Now, time.After
+	if c := r.reconnectClock; c != nil {
+		now, after = c.Now, c.After
+	}
+	deadline := now().Add(r.tm.Reconnect)
 	var last error
-	for time.Now().Before(deadline) {
+	for now().Before(deadline) {
 		select {
 		case <-r.quit:
 			return
-		case <-time.After(r.tm.RetryEvery):
+		case <-after(r.tm.RetryEvery):
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		cl, err := r.dial(ctx)

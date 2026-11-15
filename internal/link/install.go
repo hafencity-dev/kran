@@ -48,10 +48,16 @@ type binarySource struct {
 // releases cannot contain the code being developed.
 func (b binarySource) acquire(ctx context.Context, goos, goarch string) (string, error) {
 	o := b.o
-	if goos == runtime.GOOS && goarch == runtime.GOARCH && o.SelfPath != "" {
+	ver := o.Version
+	// This process's own binary only when it is the version asked for: an
+	// upgrade to (or back to) another version must not push the running one.
+	if goos == runtime.GOOS && goarch == runtime.GOARCH && o.SelfPath != "" &&
+		(o.SelfVersion == "" || strings.TrimPrefix(o.SelfVersion, "v") == strings.TrimPrefix(ver, "v")) {
 		return o.SelfPath, nil
 	}
-	ver := o.Version
+	if o.CacheOnly && isDevVersion(ver) {
+		return cachedVerified(strings.TrimPrefix(ver, "v"), goos, goarch)
+	}
 	cache := paths.BinaryCache(strings.TrimPrefix(ver, "v"), goos, goarch)
 	type step struct {
 		name string
@@ -92,7 +98,14 @@ func (b binarySource) download(ctx context.Context, goos, goarch, dest string) (
 // checksums.txt.
 func (b binarySource) fetch(ctx context.Context, version, goos, goarch string) (string, error) {
 	ver := strings.TrimPrefix(version, "v")
-	if !releaseVersion.MatchString(ver) { // it becomes a cache path and a gh argument
+	if !buildVersion.MatchString(ver) || strings.HasSuffix(ver, "-dirty") { // it becomes a cache path and a gh argument
+		return "", fmt.Errorf("%q is not a release version (like 1.4.0) nor a build between releases (like 0.1.12-5-gf7c1755, from the binary cache)", version)
+	}
+	if describeVersion.MatchString(ver) {
+		// A build between releases: the binary cache is its only source.
+		return cachedVerified(ver, goos, goarch)
+	}
+	if !releaseVersion.MatchString(ver) {
 		return "", fmt.Errorf("%q is not a release version (like 1.4.0)", version)
 	}
 	dest := paths.BinaryCache(ver, goos, goarch)

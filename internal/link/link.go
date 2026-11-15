@@ -41,6 +41,17 @@ type Options struct {
 	SelfAddresses []string
 	// Force makes Upgrade restart the remote service without waiting for idle.
 	Force bool
+	// SelfVersion is the version of SelfPath ("" = the same as Version). A
+	// binary for this platform is taken from SelfPath only when it is the
+	// version asked for (kran upgrade --version <other>).
+	SelfVersion string
+	// CacheOnly takes a development version only from the binary cache,
+	// verified against its SHA256SUMS: never downloaded, never built from
+	// a source checkout (kran upgrade).
+	CacheOnly bool
+	// Exact installs Version on the remote whenever it runs another one,
+	// also an older one (kran upgrade --version: the way back).
+	Exact bool
 	// SourceDir is a kran source checkout for cross-compiling (default: found from SelfPath/cwd).
 	SourceDir    string
 	GitHubToken  string       // default $GITHUB_TOKEN / $GH_TOKEN
@@ -435,11 +446,7 @@ func ensureKran(ctx context.Context, o *Options, c *sshClient, src binarySource,
 	needInstall := info == nil
 	if info != nil {
 		res.RemoteVersion = info.Version // before any update
-		if cmp, ok := compareVersions(info.Version, o.Version); ok {
-			needInstall = cmp < 0
-		} else {
-			needInstall = true // unknown or dev: decided by content hash below
-		}
+		needInstall = needsInstall(info.Version, o.Version, o.Exact)
 	}
 	if needInstall {
 		o.progress("install", fmt.Sprintf("Installing kran %s (%s/%s)", o.Version, rOS, rArch))
@@ -595,4 +602,18 @@ func readLinkState(name string) (linkState, bool) {
 		return s, false
 	}
 	return s, true
+}
+
+// needsInstall decides whether a remote running remoteVer gets want: an
+// older release yes, an equal or newer one no; with exact (kran upgrade
+// --version, also the way back) any other version yes; an unknown or
+// development version yes, and the content hash then decides.
+func needsInstall(remoteVer, want string, exact bool) bool {
+	if exact {
+		return strings.TrimPrefix(remoteVer, "v") != strings.TrimPrefix(want, "v")
+	}
+	if cmp, ok := compareVersions(remoteVer, want); ok {
+		return cmp < 0
+	}
+	return true
 }

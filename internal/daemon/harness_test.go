@@ -441,6 +441,20 @@ func (r *cliResult) errOut() string {
 	return r.stderr.String()
 }
 
+// waitNotices are the notices that say why the job waits (the first notice
+// of every job only names it).
+func (r *cliResult) waitNotices() []proto.Notice {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []proto.Notice
+	for _, n := range r.notices {
+		if n.Message != "" {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 func (r *cliResult) noticeKinds() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
