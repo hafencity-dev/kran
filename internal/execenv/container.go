@@ -639,6 +639,10 @@ func (m *manager) containerSpec(ctx context.Context, spec *superSpec, req *Start
 	}
 	if !req.Spec.Req.NoDocker {
 		fixed["KRAN_INIT_DOCKER_MAP"] = encodeDockerMaps(m.dockerMaps(ctx, dk, s, root, home, homeMount))
+		// The proxy gives what the job creates the job's own score.
+		if score, ok := ctrOOMScore(spec, dk.info.rootless()); ok {
+			fixed["KRAN_INIT_OOM_SCORE"] = strconv.Itoa(score)
+		}
 	}
 	if req.Spec.TTY != nil && req.Spec.Env["TERM"] == "" {
 		fixed["TERM"] = "xterm-256color"
@@ -863,14 +867,21 @@ func ctrLimitArgs(spec *superSpec, rootless bool) []string {
 	if spec.Nice > 0 {
 		a = append(a, "--cpu-shares", "256") // niced relative to the owner's own containers (1024)
 	}
-	if !rootless {
-		score := ctrOOMScoreDefault
-		if spec.MemMax > 0 && !spec.MemDefault {
-			score = ctrOOMScoreExplicit
-		}
+	if score, ok := ctrOOMScore(spec, rootless); ok {
 		a = append(a, "--oom-score-adj", strconv.Itoa(score))
 	}
 	return a
+}
+
+// ctrOOMScore is a job container's oom_score_adj (none on rootless Docker).
+func ctrOOMScore(spec *superSpec, rootless bool) (int, bool) {
+	if rootless {
+		return 0, false
+	}
+	if spec.MemMax > 0 && !spec.MemDefault {
+		return ctrOOMScoreExplicit, true
+	}
+	return ctrOOMScoreDefault, true
 }
 
 // syncHelperArgs starts the long-lived sync helper (macOS volume layout).

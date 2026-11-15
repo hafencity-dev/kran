@@ -60,7 +60,7 @@ func TestDockerRewriteCreate(t *testing.T) {
 		"Binds":["/home/alice/src/app:/w","vol:/v"],
 		"Mounts":[{"Type":"bind","Source":"/home/alice/src/app/conf","Target":"/c","ReadOnly":true},{"Type":"volume","Source":"/home/alice/src/app","Target":"/x"}]},
 		"Unknown":{"keep":[1,2]}}`
-	out, changed, err := rewriteCreateContainer(testMaps, []byte(body))
+	out, changed, err := rewriteCreateContainer(testMaps, 0, []byte(body))
 	if err != nil || !changed {
 		t.Fatalf("changed=%v err=%v", changed, err)
 	}
@@ -94,7 +94,7 @@ func TestDockerRewriteCreate(t *testing.T) {
 	}
 	// Nothing to map: the body goes through byte for byte.
 	plain := `{"Image":"alpine","HostConfig":{"Binds":["/etc:/e"]}}`
-	if out, changed, _ := rewriteCreateContainer(testMaps, []byte(plain)); changed || string(out) != plain {
+	if out, changed, _ := rewriteCreateContainer(testMaps, 0, []byte(plain)); changed || string(out) != plain {
 		t.Errorf("unrelated body rewritten: %s", out)
 	}
 	vol := `{"Name":"data","Driver":"local","DriverOpts":{"type":"none","o":"bind","device":"/home/alice/src/app/data"}}`
@@ -166,7 +166,7 @@ func TestDockerProxyServes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	go serveDockerProxy(ln, upSock, testMaps)
+	go serveDockerProxy(ln, upSock, testMaps, 0)
 	t.Cleanup(func() { ln.Close() })
 
 	// A client like the docker CLI: keep-alive, several requests.

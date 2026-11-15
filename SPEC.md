@@ -858,7 +858,16 @@ pass, anything that holds the memory is stopped).
   at Docker's 0, so kran's jobs go first, a job without `--mem` before one
   that asked for its memory. In a 39.1 GiB VM, 1000 adds 39.1 GiB and 500
   adds 19.6 GiB to a job's own size. kran's helpers (the sync helper, the
-  cache trim) stay at 0 and so come after every job. On rootless Docker
+  cache trim) stay at 0 and so come after every job. A container a job
+  creates through kran's Docker proxy (a test database, a compose
+  service) gets at least the job's own score in its `POST
+  /containers/create` (`applyOOMScore`; the proxy reads it from
+  `KRAN_INIT_OOM_SCORE`, which kran-init unsets before the job starts): a
+  higher score asked for is kept, a lower or negative one is raised to the
+  job's, and `OomKillDisable` is dropped, so nothing a job starts outranks
+  or outlives the machine's own containers in a shared VM. Updates, execs
+  and every other request pass unchanged; a client that bypasses the proxy
+  (§6.8, Docker from a job) gets Docker's 0. On rootless Docker
   kran sets no score. The score is given only in the `docker run` of a job
   container kran creates: never with `docker update`, never through
   `/proc`, never to a container kran finds or did not start. A container

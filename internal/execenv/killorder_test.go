@@ -2,9 +2,13 @@ package execenv
 
 import (
 	"context"
+	"encoding/json"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -83,7 +87,7 @@ var scoreSetting = regexp.MustCompile(`OOMScoreAdjust=\s*[-+0-9]`)
 func TestOOMScoreOnlyAtCreateGuard(t *testing.T) {
 	root := filepath.Join("..", "..")
 	fset := token.NewFileSet()
-	var flagAt, callers []string
+	var flagAt, callers, apiAt, envAt []string
 	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -122,6 +126,18 @@ func TestOOMScoreOnlyAtCreateGuard(t *testing.T) {
 					case strings.Contains(v, "oom_score_adj"), strings.Contains(v, "oom-kill-disable"),
 						scoreSetting.MatchString(v):
 						t.Errorf("%s: %s sets a kill-order score outside a job's docker run: %q", fset.Position(x.Pos()), fn, v)
+					case strings.Contains(v, "OomScoreAdj"), strings.Contains(v, "OomKillDisable"):
+						// Docker API fields: only the proxy's rewrite of a
+						// create request a job sends may name them.
+						apiAt = append(apiAt, rel+":"+fn)
+					case v == "KRAN_INIT_OOM_SCORE":
+						envAt = append(envAt, rel+":"+fn)
+					case strings.Contains(v, "/update"):
+						t.Errorf("%s: %s calls Docker's update API: %q", fset.Position(x.Pos()), fn, v)
+					}
+				case *ast.Ident:
+					if x.Name == "OomScoreAdj" || x.Name == "OomKillDisable" {
+						t.Errorf("%s: %s names %s in Go (a struct field would reach Docker's API)", fset.Position(x.Pos()), fn, x.Name)
 					}
 				case *ast.CallExpr:
 					if id, ok := x.Fun.(*ast.Ident); ok && id.Name == "ctrLimitArgs" {
@@ -145,6 +161,23 @@ func TestOOMScoreOnlyAtCreateGuard(t *testing.T) {
 	}
 	if want := []string{filepath.Join("internal", "execenv", "container.go") + ":ctrLimitArgs"}; !reflect.DeepEqual(flagAt, want) {
 		t.Errorf("--oom-score-adj appears at %q, want only %q", flagAt, want)
+	}
+	// The job's score reaches its proxy: set by containerSpec next to the
+	// container's own score, read by the proxy, unset before the job runs.
+	if want := []string{filepath.Join("internal", "execenv", "container.go") + ":containerSpec",
+		filepath.Join("internal", "execenv", "dockerproxy.go") + ":DockerProxy"}; !reflect.DeepEqual(envAt, want) {
+		t.Errorf("KRAN_INIT_OOM_SCORE is used at %q, want %q", envAt, want)
+	}
+	if b, err := os.ReadFile("runner-init.sh"); err != nil || !regexp.MustCompile(`(?m)^unset .*\bKRAN_INIT_OOM_SCORE\b`).Match(b) {
+		t.Errorf("runner-init.sh does not unset KRAN_INIT_OOM_SCORE before the job starts (%v)", err)
+	}
+	proxy := filepath.Join("internal", "execenv", "dockerproxy.go") + ":applyOOMScore"
+	only := len(apiAt) > 0
+	for _, at := range apiAt {
+		only = only && at == proxy
+	}
+	if !only {
+		t.Errorf("Docker's OomScoreAdj/OomKillDisable are named at %q, want only in the proxy's create rewrite (%s)", apiAt, proxy)
 	}
 	if want := []string{filepath.Join("internal", "execenv", "container.go") + ":containerSpec"}; !reflect.DeepEqual(callers, want) {
 		t.Errorf("ctrLimitArgs is called from %q, want only containerSpec's job docker run", callers)
@@ -198,5 +231,147 @@ func TestCtrOOMScoreInRealContainer(t *testing.T) {
 		if got := strings.TrimSpace(string(out)); got != c.want {
 			t.Errorf("oom_score_adj in the container %q, want %s", got, c.want)
 		}
+	}
+}
+
+// TestProxyOOMScoreRewriteInvariant: what a job creates through kran's
+// Docker proxy (a test database, a compose service) gets at least the
+// job's own score, exactly: (a) none asked → the job's, (b) lower → the
+// job's, (c) higher → kept, (d) negative → the job's, (e) OomKillDisable →
+// dropped. Score 0 (rootless Docker, or no score) changes nothing.
+func TestProxyOOMScoreRewriteInvariant(t *testing.T) {
+	type tc struct {
+		name, hc string
+		want     map[string]any
+	}
+	for _, score := range []int{ctrOOMScoreDefault, ctrOOMScoreExplicit} {
+		s := float64(score)
+		higher := float64(score)
+		if score < 1000 {
+			higher = 700
+		}
+		for _, c := range []tc{
+			{"(a) none asked", `{"Memory":1073741824}`, map[string]any{"Memory": float64(1 << 30), "OomScoreAdj": s}},
+			{"(a) no HostConfig", ``, map[string]any{"OomScoreAdj": s}},
+			{"(b) lower asked", `{"OomScoreAdj":100}`, map[string]any{"OomScoreAdj": s}},
+			{"(c) higher asked", `{"OomScoreAdj":` + strconv.Itoa(int(higher)) + `}`, map[string]any{"OomScoreAdj": higher}},
+			{"(d) negative asked", `{"OomScoreAdj":-1000}`, map[string]any{"OomScoreAdj": s}},
+			{"(e) OomKillDisable", `{"OomKillDisable":true,"OomScoreAdj":-500}`, map[string]any{"OomKillDisable": false, "OomScoreAdj": s}},
+		} {
+			body := `{"Image":"postgres:17"}`
+			if c.hc != "" {
+				body = `{"Image":"postgres:17","HostConfig":` + c.hc + `}`
+			}
+			out, _, err := rewriteCreateContainer(nil, score, []byte(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got struct {
+				Image      string
+				HostConfig map[string]any
+			}
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Image != "postgres:17" || !reflect.DeepEqual(got.HostConfig, c.want) {
+				t.Errorf("score %d %s: HostConfig %v, want %v", score, c.name, got.HostConfig, c.want)
+			}
+		}
+	}
+	for _, body := range []string{`{"Image":"postgres:17"}`, `{"Image":"x","HostConfig":{"OomScoreAdj":-1000,"OomKillDisable":true}}`} {
+		if out, changed, _ := rewriteCreateContainer(nil, 0, []byte(body)); changed || string(out) != body {
+			t.Errorf("no score: %s became %s", body, out)
+		}
+	}
+	for v, want := range map[string]int{"1000": 1000, "500": 500, "": 0, "0": 0, "-500": 0, "1001": 0, "x": 0} {
+		if got := proxyOOMScore(v); got != want {
+			t.Errorf("KRAN_INIT_OOM_SCORE=%q: %d, want %d", v, got, want)
+		}
+	}
+}
+
+// TestProxyOOMScoreOnlyOnCreate: through the running proxy, a create gets
+// the score; an update, an exec and a list of containers pass unchanged.
+func TestProxyOOMScoreOnlyOnCreate(t *testing.T) {
+	dir, err := os.MkdirTemp("", "kdo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	upSock, proxySock := filepath.Join(dir, "up.sock"), filepath.Join(dir, "p.sock")
+	seen := fakeDockerUpstream(t, upSock)
+	ln, err := net.Listen("unix", proxySock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go serveDockerProxy(ln, upSock, testMaps, ctrOOMScoreExplicit)
+	t.Cleanup(func() { ln.Close() })
+	cl := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", proxySock)
+	}}}
+	post := func(p, body string) string {
+		resp, err := cl.Post("http://docker"+p, "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return <-seen
+	}
+	if got := post("/v1.47/containers/create?name=pg", `{"Image":"postgres:17","HostConfig":{"OomScoreAdj":-900}}`); !strings.Contains(got, `"OomScoreAdj":500`) || strings.Contains(got, "-900") {
+		t.Errorf("create: upstream saw %s", got)
+	}
+	for _, c := range []struct{ path, body string }{
+		{"/v1.47/containers/pg/update", `{"OomKillDisable":true}`},
+		{"/v1.47/containers/pg/exec", `{"Cmd":["true"]}`},
+	} {
+		if got := post(c.path, c.body); got != "POST "+c.path+" "+c.body {
+			t.Errorf("%s changed: upstream saw %s", c.path, got)
+		}
+	}
+	resp, err := cl.Get("http://docker/v1.47/containers/json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+	<-seen
+}
+
+// TestProxyOOMScoreRealSibling (KRAN_TEST_DOCKER=1): kran's proxy in front
+// of this machine's real Docker, as a job's /var/run/docker.sock; a sibling
+// the "job" creates asking a negative score reads the job's score inside.
+func TestProxyOOMScoreRealSibling(t *testing.T) {
+	dockerTests(t)
+	const image = "alpine:3.24.3"
+	cli := dockerCLIForTests()
+	if exec.Command(cli, "image", "inspect", image).Run() != nil {
+		t.Skipf("image %s not present (no pull in tests)", image)
+	}
+	up := "/var/run/docker.sock"
+	if _, err := os.Stat(up); err != nil {
+		t.Skip("no Docker socket at /var/run/docker.sock")
+	}
+	dir, err := os.MkdirTemp("", "kdr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "p.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go serveDockerProxy(ln, up, nil, ctrOOMScoreDefault)
+	t.Cleanup(func() { ln.Close() })
+	cmd := exec.Command(cli, "--host", "unix://"+sock, "run", "--rm", "--pull", "never", "--label", "kran.ns=kran-test",
+		"--oom-score-adj", "-500", image, "cat", "/proc/self/oom_score_adj")
+	cmd.Env = append(os.Environ(), "DOCKER_CONTEXT=")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sibling through the proxy: %v: %s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "1000" {
+		t.Errorf("sibling's oom_score_adj %q, want the job's 1000", got)
 	}
 }

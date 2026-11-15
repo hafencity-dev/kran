@@ -135,17 +135,22 @@ var (
 // maxRewriteBody bounds the request bodies the proxy parses.
 const maxRewriteBody = 16 << 20
 
-// rewriteCreateContainer rewrites HostConfig.Binds and bind Mounts.
-func rewriteCreateContainer(maps []dockerMap, body []byte) ([]byte, bool, error) {
+// rewriteCreateContainer rewrites HostConfig.Binds and bind Mounts, and
+// puts a container the job creates at the job's own place in the kernel's
+// kill order (score > 0, applyOOMScore).
+func rewriteCreateContainer(maps []dockerMap, score int, body []byte) ([]byte, bool, error) {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(body, &top); err != nil {
 		return nil, false, err
 	}
 	var hc map[string]json.RawMessage
 	if raw, ok := top["HostConfig"]; !ok || json.Unmarshal(raw, &hc) != nil || hc == nil {
-		return body, false, nil
+		if score <= 0 {
+			return body, false, nil
+		}
+		hc = map[string]json.RawMessage{}
 	}
-	changed := false
+	changed := applyOOMScore(hc, score)
 	if raw, ok := hc["Binds"]; ok {
 		var binds []string
 		if json.Unmarshal(raw, &binds) == nil {
@@ -182,6 +187,47 @@ func rewriteCreateContainer(maps []dockerMap, body []byte) ([]byte, bool, error)
 	return out, err == nil, err
 }
 
+// applyOOMScore gives a container a job creates through the proxy (a test
+// database, a compose service) at least the job's own oom_score_adj
+// (ctrOOMScoreDefault, ctrOOMScoreExplicit): in a full VM or host the
+// kernel then takes what kran's jobs started before the machine's own
+// containers, which sit at 0. A higher score asked for is kept; a lower or
+// negative one is raised to the job's, and OomKillDisable is dropped: a
+// job must not make anything it starts outrank, or outlive, the machine's
+// own containers in a shared VM. score <= 0 (rootless Docker, or an image
+// of an older kran): nothing changes.
+func applyOOMScore(hc map[string]json.RawMessage, score int) bool {
+	if score <= 0 {
+		return false
+	}
+	changed := false
+	asked := 0
+	if raw, ok := hc["OomScoreAdj"]; ok {
+		json.Unmarshal(raw, &asked)
+	}
+	if asked < score {
+		hc["OomScoreAdj"], _ = json.Marshal(score)
+		changed = true
+	}
+	var disable bool
+	if raw, ok := hc["OomKillDisable"]; ok && json.Unmarshal(raw, &disable) == nil && disable {
+		hc["OomKillDisable"], _ = json.Marshal(false)
+		changed = true
+	}
+	return changed
+}
+
+// proxyOOMScore reads the job's score for applyOOMScore from
+// KRAN_INIT_OOM_SCORE (set by kran only next to its own --oom-score-adj);
+// anything but 1..1000 means none.
+func proxyOOMScore(v string) int {
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 || n > 1000 {
+		return 0
+	}
+	return n
+}
+
 // rewriteCreateVolume rewrites the device of a local volume bound to a
 // directory (compose: driver_opts {type: none, o: bind, device: ./data}).
 func rewriteCreateVolume(maps []dockerMap, body []byte) ([]byte, bool, error) {
@@ -210,14 +256,14 @@ func rewriteCreateVolume(maps []dockerMap, body []byte) ([]byte, bool, error) {
 // rewriteRequest replaces the body of a create request whose mounts need
 // mapping. Anything it cannot parse goes to Docker unchanged (and Docker
 // reports the error, as without kran).
-func rewriteRequest(maps []dockerMap, req *http.Request) error {
-	if req.Method != http.MethodPost || len(maps) == 0 {
+func rewriteRequest(maps []dockerMap, score int, req *http.Request) error {
+	if req.Method != http.MethodPost || (len(maps) == 0 && score <= 0) {
 		return nil
 	}
 	var fn func([]dockerMap, []byte) ([]byte, bool, error)
 	switch p := req.URL.Path; {
 	case createContainerRe.MatchString(p):
-		fn = rewriteCreateContainer
+		fn = func(m []dockerMap, b []byte) ([]byte, bool, error) { return rewriteCreateContainer(m, score, b) }
 	case createVolumeRe.MatchString(p):
 		fn = rewriteCreateVolume
 	default:
@@ -253,6 +299,7 @@ func DockerProxy(args []string) int {
 		return 2
 	}
 	maps := parseDockerMaps(os.Getenv("KRAN_INIT_DOCKER_MAP"))
+	score := proxyOOMScore(os.Getenv("KRAN_INIT_OOM_SCORE"))
 	// The job's /tmp is a volume of its own container, created with it:
 	// only Docker knows where it lives.
 	if name := os.Getenv("KRAN_INIT_CONTAINER"); name != "" {
@@ -267,12 +314,12 @@ func DockerProxy(args []string) int {
 		return 1
 	}
 	os.Chmod(*listen, 0o660)
-	serveDockerProxy(ln, *upstream, maps)
+	serveDockerProxy(ln, *upstream, maps, score)
 	return 1
 }
 
 // serveDockerProxy accepts until ln fails.
-func serveDockerProxy(ln net.Listener, upstream string, maps []dockerMap) {
+func serveDockerProxy(ln net.Listener, upstream string, maps []dockerMap, score int) {
 	for {
 		c, err := ln.Accept()
 		if err != nil {
@@ -283,7 +330,7 @@ func serveDockerProxy(ln net.Listener, upstream string, maps []dockerMap) {
 			}
 			return
 		}
-		go proxyDockerConn(c, upstream, maps)
+		go proxyDockerConn(c, upstream, maps, score)
 	}
 }
 
@@ -293,7 +340,7 @@ func serveDockerProxy(ln net.Listener, upstream string, maps []dockerMap) {
 // connection is sent with "Connection: close", so a client that has more
 // to ask opens a new connection, whose first request is parsed again.
 // Upgraded connections (attach, exec) carry no further requests.
-func proxyDockerConn(c net.Conn, upstream string, maps []dockerMap) {
+func proxyDockerConn(c net.Conn, upstream string, maps []dockerMap, score int) {
 	defer c.Close()
 	br := bufio.NewReader(c)
 	req, err := http.ReadRequest(br)
@@ -306,7 +353,7 @@ func proxyDockerConn(c net.Conn, upstream string, maps []dockerMap) {
 		return
 	}
 	defer up.Close()
-	if err := rewriteRequest(maps, req); err != nil {
+	if err := rewriteRequest(maps, score, req); err != nil {
 		proxyError(c, http.StatusBadRequest, "kran: "+err.Error())
 		return
 	}
