@@ -352,10 +352,16 @@ func (v *nodeView) freeCPUFor(rt rtView) float64 {
 const shortCPUOvercommit = 2.0
 
 // fitsShort is the admission check for short local jobs: memory must fit,
-// CPU only within shortCPUOvercommit × capacity.
-func (v *nodeView) fitsShort(rt rtView, cpu float64, mem int64) bool {
+// CPU only within shortCPUOvercommit × capacity. ignoreHolds leaves room
+// held for a starving job out (backfill.go decides whether that is fine).
+func (v *nodeView) fitsShort(rt rtView, cpu float64, mem int64, ignoreHolds bool) bool {
 	for _, p := range v.pools(rt) {
-		if mem > p.freeMem() || p.allocCPU+p.holdCPU+cpu > shortCPUOvercommit*p.capCPU+1e-9 {
+		freeMem, holdCPU := p.freeMem(), p.holdCPU
+		if ignoreHolds {
+			freeMem += p.holdMem
+			holdCPU = 0
+		}
+		if mem > freeMem || p.allocCPU+holdCPU+cpu > shortCPUOvercommit*p.capCPU+1e-9 {
 			return false
 		}
 	}

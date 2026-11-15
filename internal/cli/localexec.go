@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -33,8 +34,14 @@ type localJob struct {
 	Envelope *proto.LocalEnvelope
 	Stdio    localStdio
 	// ScopeProbe reports whether a transient systemd scope with this memory cap
-	// can be created. nil uses the real probe.
+	// (0 = none) can be created. nil uses the real probe.
 	ScopeProbe func(memMax int64) bool
+	// AskedMem is the explicit --mem (or .kran.toml rule) behind a memory
+	// cap, for the message when the job hits it (0 = none asked).
+	AskedMem int64
+	// Interactive: the job reads a terminal, so INT, QUIT or HUP that end
+	// it came from its user and need no word from kran.
+	Interactive bool
 	// Tee receives a copy of the output for the job history; nil lets the
 	// child inherit the descriptors directly.
 	Tee func(proto.FrameType, []byte)
@@ -50,9 +57,13 @@ type localProc struct {
 	Started  proto.Started
 	start    time.Time
 	scope    string
-	memMax   int64    // the scope's MemoryMax
-	node     string   // for the memory cap message
-	fgTTY    *os.File // terminal we handed to the child; reclaimed after Wait
+	memMax   int64  // the scope's MemoryMax (0 = none)
+	asked    int64  // the --mem behind memMax (0 = none asked)
+	node     string // for the memory cap message
+	interact bool   // the job reads a terminal (localJob.Interactive)
+	sigMu    sync.Mutex
+	sent     map[string]bool // signals kran run passed on to the job
+	fgTTY    *os.File        // terminal we handed to the child; reclaimed after Wait
 	capture  *outputCapture
 	life     *lifeline
 	resultCh chan proto.Exit
@@ -127,8 +138,13 @@ func lookPath(name string, env []string, dir string) (string, *localError) {
 	return "", &localError{127, name + ": command not found"}
 }
 
-// startLocal launches the job in its own process group (inside a transient
-// systemd scope on Linux when the envelope asks for a memory cap).
+// startLocal launches the job in its own process group, inside a transient
+// systemd scope on Linux when the daemon names a slice (or the envelope asks
+// for a memory cap): the scope holds everything the job starts, so the
+// daemon measures it whole and kills it whole, and systemd says when the
+// kernel's OOM killer ended part of it. MemoryMax is set only for a cap
+// (SPEC §6.8: an explicit --mem, or kran's guard when there is no daemon);
+// an estimate never caps a job.
 func startLocal(j localJob) (*localProc, *localError) {
 	if len(j.Argv) == 0 {
 		return nil, &localError{126, "empty command"}
@@ -148,7 +164,7 @@ func startLocal(j localJob) (*localProc, *localError) {
 	}
 	argv := append([]string{prog}, j.Argv[1:]...)
 	scope := ""
-	if j.Envelope != nil && j.Envelope.MemMax > 0 {
+	if j.Envelope != nil && (j.Envelope.MemMax > 0 || j.Envelope.Slice != "") {
 		probe := j.ScopeProbe
 		if probe == nil {
 			probe = scopeUsable
@@ -167,14 +183,18 @@ func startLocal(j localJob) (*localProc, *localError) {
 			// loaded (failed, Result=oom-kill) until wait has read why.
 			// The command line as given: no "$VAR" expansion by systemd-run.
 			pre := append([]string{"systemd-run", "--user", "--scope", "--quiet"}, sysd.NoExpand()...)
-			pre = append(pre, "--slice="+slice, "--unit=kran-local-"+id,
-				// No swap beyond the cap: a job over it is killed and told so
-				// (SPEC §6.8, as on remote targets), instead of swapping the
-				// machine to a crawl.
-				"-p", "MemoryMax="+strconv.FormatInt(j.Envelope.MemMax, 10), "-p", "MemorySwapMax=0",
-				// A runaway fork loop stops at the cap instead of taking
-				// the machine with it.
-				"-p", "TasksMax="+strconv.Itoa(proto.JobTasksMax), "--")
+			pre = append(pre, "--slice="+slice, "--unit=kran-local-"+id)
+			if j.Envelope.MemMax > 0 {
+				// No swap beyond the cap: a job over it is killed and told
+				// so (SPEC §6.8, as on remote targets), instead of swapping
+				// the machine to a crawl. Never MemoryHigh: a throttled
+				// unit raises memory pressure for the whole user slice,
+				// which systemd-oomd answers by killing its largest cgroup.
+				pre = append(pre, "-p", "MemoryMax="+strconv.FormatInt(j.Envelope.MemMax, 10), "-p", "MemorySwapMax=0")
+			}
+			// A runaway fork loop stops at the cap instead of taking the
+			// machine with it.
+			pre = append(pre, "-p", "TasksMax="+strconv.Itoa(proto.JobTasksMax), "--")
 			argv = append(pre, argv...)
 			if p, e := exec.LookPath("systemd-run"); e == nil {
 				argv[0] = p
@@ -229,11 +249,12 @@ func startLocal(j localJob) (*localProc, *localError) {
 	}
 	p := &localProc{
 		cmd: cmd, start: start, scope: scope, fgTTY: fg, node: j.Node, capture: capture, life: startLifeline(cmd.Process.Pid, j.Watcher),
+		interact: j.Interactive,
 		Started:  proto.Started{JobID: j.JobID, PID: cmd.Process.Pid, PGID: cmd.Process.Pid, Scope: scope},
 		resultCh: make(chan proto.Exit, 1),
 	}
 	if scope != "" {
-		p.memMax = j.Envelope.MemMax
+		p.memMax, p.asked = j.Envelope.MemMax, j.AskedMem
 	}
 	go p.wait()
 	return p, nil
@@ -270,17 +291,60 @@ func (p *localProc) wait() {
 		p.capture.finish(captureGrace)
 	}
 	p.life.release()
-	if p.scope != "" && ex.Signal == "KILL" && scopeOOMKilled(p.scope) {
-		where := "here"
-		if p.node != "" {
-			where = "on " + p.node
-		}
-		ex.Reason = fmt.Sprintf("job hit its %s memory cap %s — rerun with --mem %dG", humanBytes(p.memMax), where, max(2, (2*p.memMax+(1<<30)-1)>>30))
+	result := ""
+	if p.scope != "" {
+		// Asked for every scope, not only after a KILL: when the kernel's
+		// OOM killer ends one process (a compiler), systemd stops the rest
+		// with TERM, and the job's own exit says nothing of why.
+		result = scopeResult(p.scope)
 	}
+	ex.Reason = p.endReason(ex, result)
 	if p.fgTTY != nil {
 		reclaimTerminal(p.fgTTY)
 	}
 	p.resultCh <- ex
+}
+
+// endReason says why the job ended when its own output may not: the
+// kernel's OOM killer (at the job's own memory cap, or with none because
+// the machine ran out), or a signal kran run did not pass on (SPEC §6.8).
+// result is the scope's systemd Result ("" without a scope).
+func (p *localProc) endReason(ex proto.Exit, result string) string {
+	if ex.Reason != "" {
+		return ex.Reason
+	}
+	where := "here"
+	if p.node != "" {
+		where = "on " + p.node
+	}
+	journal := ""
+	if p.scope != "" {
+		journal = "; journalctl --user -u " + p.scope + " shows more"
+	}
+	if result == "oom-kill" {
+		if p.memMax > 0 {
+			from := ""
+			if p.asked > 0 {
+				from = " (from --mem " + humanBytes(p.asked) + ")"
+			}
+			return fmt.Sprintf("job hit its %s memory cap %s%s — rerun with --mem %dG", humanBytes(p.memMax), where, from, max(2, (2*p.memMax+(1<<30)-1)>>30))
+		}
+		return fmt.Sprintf("the kernel's out-of-memory killer ended a process of the job %s: the machine ran out of memory (the job has no memory cap of its own)%s", where, journal)
+	}
+	if ex.Signal == "" || ex.Signal == "PIPE" || p.passedOn(ex.Signal) {
+		return ""
+	}
+	if p.interact && (ex.Signal == "INT" || ex.Signal == "QUIT" || ex.Signal == "HUP") {
+		return "" // its user pressed Ctrl-C or closed the terminal
+	}
+	return fmt.Sprintf("job ended by signal %s %s%s", ex.Signal, where, journal)
+}
+
+// passedOn reports whether kran run itself passed sig on to the job.
+func (p *localProc) passedOn(sig string) bool {
+	p.sigMu.Lock()
+	defer p.sigMu.Unlock()
+	return p.sent[sig]
 }
 
 // resize passes a terminal size change to the job's pty, if it has one.
@@ -304,6 +368,12 @@ func (p *localProc) Signal(name string) error {
 	if !ok {
 		return fmt.Errorf("unknown signal %q", name)
 	}
+	p.sigMu.Lock()
+	if p.sent == nil {
+		p.sent = map[string]bool{}
+	}
+	p.sent[name] = true
+	p.sigMu.Unlock()
 	if err := syscall.Kill(-p.Started.PGID, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return err
 	}
@@ -329,6 +399,9 @@ func signalName(s syscall.Signal) string {
 		if v == s {
 			return n
 		}
+	}
+	if n := unix.SignalName(s); n != "" {
+		return strings.TrimPrefix(n, "SIG") // SEGV, ABRT, …
 	}
 	return strings.TrimPrefix(strings.ToUpper(s.String()), "SIG")
 }

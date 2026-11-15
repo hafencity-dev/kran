@@ -55,9 +55,9 @@ func maxRSSBytes(kb int64) int64 { return kb * 1024 }
 
 func ignoreTTOU() { signal.Ignore(syscall.SIGTTOU) }
 
-// scopeUsable checks that systemd --user can create a scope with a memory cap.
-// A real probe is the only reliable test: the memory controller may not be
-// delegated to the user manager.
+// scopeUsable checks that systemd --user can create a scope (with this
+// memory cap; 0 = none). A real probe is the only reliable test: the
+// memory controller may not be delegated to the user manager.
 func scopeUsable(memMax int64) bool {
 	if _, err := exec.LookPath("systemd-run"); err != nil {
 		return false
@@ -71,9 +71,11 @@ func scopeUsable(memMax int64) bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "systemd-run", "--user", "--scope", "--quiet", "--collect",
-		"--slice=kran.slice", "-p", "MemoryMax="+strconv.FormatInt(memMax, 10), "--", "true")
-	return cmd.Run() == nil
+	args := []string{"--user", "--scope", "--quiet", "--collect", "--slice=kran.slice"}
+	if memMax > 0 {
+		args = append(args, "-p", "MemoryMax="+strconv.FormatInt(memMax, 10))
+	}
+	return exec.CommandContext(ctx, "systemd-run", append(args, "--", "true")...).Run() == nil
 }
 
 // totalMemory returns physical memory in bytes (0 when unknown).
@@ -96,15 +98,20 @@ func totalMemory() int64 {
 	return 0
 }
 
-// scopeOOMKilled reports whether systemd stopped the scope because the
-// kernel OOM-killed it (the scope then stays failed; reset it so no
-// failed unit is left behind).
-func scopeOOMKilled(scope string) bool {
-	out, err := exec.Command("systemctl", "--user", "show", "-p", "Result", "--value", scope).Output()
+// scopeResult reads how systemd saw the scope end ("oom-kill" when the
+// kernel's OOM killer ended a process in it: systemd then stops the rest)
+// and resets a failed scope so no failed unit is left behind. "" when
+// unknown.
+func scopeResult(scope string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "systemctl", "--user", "show", "-p", "Result", "--value", scope).Output()
 	res := strings.TrimSpace(string(out))
-	if err != nil || res == "" || res == "success" {
-		return false
+	if err != nil || res == "" {
+		return ""
 	}
-	_ = exec.Command("systemctl", "--user", "reset-failed", scope).Run()
-	return res == "oom-kill"
+	if res != "success" {
+		_ = exec.CommandContext(ctx, "systemctl", "--user", "reset-failed", scope).Run()
+	}
+	return res
 }

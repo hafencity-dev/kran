@@ -23,6 +23,11 @@ type cand struct {
 	press      pressure
 	overhead   float64 // sync + setup seconds
 	wait       float64 // seconds until it fits (0 when it fits)
+	// passes is the held job this candidate may go ahead of (backfill.go),
+	// passFirst whether it ends before that one can start, passNote why
+	// it cannot delay it.
+	passes, passNote string
+	passFirst        bool
 }
 
 func (c *cand) total() float64 { return c.run + c.overhead }
@@ -52,7 +57,9 @@ func (s *sched) dispatch(now time.Time) {
 	memo := map[string]string{}
 	for _, j := range queue {
 		key := ""
-		if len(j.excluded) == 0 && now.Sub(j.queuedAt) < s.opts.StarvationAfter {
+		// While a node is held, whether a job may pass the held one depends
+		// on its duration and sync cost too, which the shape leaves out.
+		if len(j.excluded) == 0 && now.Sub(j.queuedAt) < s.opts.StarvationAfter && len(holds) == 0 {
 			if j.shape == "" {
 				j.shape = j.shapeKey()
 			}
@@ -304,6 +311,13 @@ func (s *sched) tryPlace(j *sjob, views map[string]*nodeView, names []string, no
 	var fits []*cand
 	var selfCand *cand
 	for _, c := range cands {
+		if !c.fits && c.fitsNoHold {
+			// Held for another job: it may still go ahead when that cannot
+			// delay the held job (backfill.go).
+			if s.mayPass(j, c, holds, now, true) {
+				c.fits = true
+			}
+		}
 		if c.fits {
 			fits = append(fits, c)
 		}
@@ -317,7 +331,11 @@ func (s *sched) tryPlace(j *sjob, views map[string]*nodeView, names []string, no
 	// They need only memory to start: run locally without kran they would
 	// share the CPUs too, for a few seconds.
 	if selfCand != nil && j.est.Duration < shortJobSeconds && j.req.Node == "" && !selfCand.oversize {
-		if selfCand.fits || selfCand.v.fitsShort(selfCand.rt, selfCand.cpu, selfCand.mem) {
+		ok := selfCand.fits || selfCand.v.fitsShort(selfCand.rt, selfCand.cpu, selfCand.mem, false)
+		if !ok {
+			ok = s.mayPass(j, selfCand, holds, now, selfCand.v.fitsShort(selfCand.rt, selfCand.cpu, selfCand.mem, true))
+		}
+		if ok {
 			s.place(j, selfCand, now, fmt.Sprintf("here: est. %s, too short to send elsewhere", fmtDur(j.est.Duration)))
 			return placedJob
 		}
@@ -500,7 +518,7 @@ func (s *sched) place(j *sjob, c *cand, now time.Time, reason string) {
 	a := &allocation{
 		job: j.id, node: c.v.name, rt: c.rt.rt.Kind, vm: c.rt.vm, vmKnown: true, res: res, at: now,
 		end:  now.Add(time.Duration((c.overhead + c.run) * float64(time.Second))),
-		repo: j.repo, pl: pl,
+		repo: j.repo, pl: pl, passed: c.passes, passedFirst: c.passFirst,
 	}
 	c.v.e.allocs[j.id] = a
 	c.v.allocs = append(c.v.allocs, a)
@@ -515,6 +533,11 @@ func (s *sched) place(j *sjob, c *cand, now time.Time, reason string) {
 	if w := now.Sub(j.queuedAt); w >= loggedWait && j.reason != "" {
 		// Why it waited is otherwise lost with the queue entry.
 		waited = fmt.Sprintf(" (after waiting %s: %s)", fmtDur(w.Seconds()), strings.TrimPrefix(j.reason, "waiting: "))
+	}
+	if c.passes != "" {
+		// The placement reason stays the job's own; the log says it went
+		// ahead of a held job and why that cannot delay it.
+		waited += fmt.Sprintf(" (ahead of %s, which waits for room on %s: %s)", c.passes, c.v.name, c.passNote)
 	}
 	j.reason = ""
 	s.dequeueOwner(j)

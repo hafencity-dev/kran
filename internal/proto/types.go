@@ -21,20 +21,18 @@ func DiskFloor(total int64) int64 {
 	return max(10<<30, min(total/20, 20<<30))
 }
 
-// MemCap is a job's memory cap (SPEC §6.8): twice its admitted memory, at
-// most what is free when it starts. An estimated allocation gets at least
-// 8 GiB of room: the cap only kills, it reserves nothing, and a first
-// compile or link of a large package easily needs more than the estimate
-// of its smaller siblings. An explicit --mem gets at least 2 GiB.
+// MemCap is a job's memory cap (SPEC §6.8). Only memory the user asked
+// for explicitly (--mem, or a .kran.toml rule's mem) caps a job: twice
+// that, at least 2 GiB, at most what is free when it starts. A learned or
+// default estimate never does (0 = no cap): it places and books the job,
+// but a command whose needs grew past it (more tests than last time) must
+// not be killed for it; memory the machine really lacks is the kernel's
+// and the node's guards' business, and kran says so when it happens.
 func MemCap(alloc, avail int64, explicit bool) int64 {
-	if alloc <= 0 {
+	if alloc <= 0 || !explicit {
 		return 0
 	}
-	floor := int64(8 << 30)
-	if explicit {
-		floor = 2 << 30
-	}
-	c := max(2*alloc, floor)
+	c := max(2*alloc, 2<<30)
 	if avail > 0 && c > avail {
 		c = max(avail, alloc)
 	}
@@ -126,7 +124,22 @@ type Runtime struct {
 	// runtime unavailable and that an operator fixes by hand. Reason carries
 	// the same thing as one sentence.
 	Problem *RuntimeProblem `json:"problem,omitempty"`
+	// PipeUserPagesSoft is fs.pipe-user-pages-soft of the Linux kernel this
+	// runtime's jobs run under (the host's, or on macOS the Docker VM's as
+	// last read through the sync helper); 0 = unknown or not Linux. kran
+	// only reports it (kran doctor), it never changes it.
+	PipeUserPagesSoft int64 `json:"pipe_user_pages_soft,omitempty"`
 }
+
+// PipeUserPagesDefault is the kernel's default fs.pipe-user-pages-soft:
+// once one user's pipes hold that many pages, every new pipe of the user
+// gets a single page, and a writer that puts more than 4 KiB into a pipe
+// nobody reads yet blocks. All jobs of a node run as one user.
+// PipeUserPagesWanted is what kran doctor asks for.
+const (
+	PipeUserPagesDefault = 16384
+	PipeUserPagesWanted  = 262144
+)
 
 // RuntimeProblem codes.
 const (

@@ -116,6 +116,10 @@ type Deps struct {
 	// KillLocal kills a local job's process tree (default: scope or process
 	// group kill with KillGrace).
 	KillLocal func(pid, pgid int, scope string)
+	// ScopeCgroup finds the cgroup v2 directory of a local job's systemd
+	// scope from its main process ("" when it is not in that scope; nil:
+	// /proc/<pid>/cgroup on Linux, nothing elsewhere).
+	ScopeCgroup func(pid int, scope string) string
 	// ClientAlive reports whether the process of a CLI that dropped its run
 	// session still exists (nil: signal 0 to its pid).
 	ClientAlive func(pid int) bool
@@ -217,6 +221,9 @@ func New(deps Deps) (*Daemon, error) {
 	}
 	if d.deps.KillLocal == nil {
 		d.deps.KillLocal = func(pid, pgid int, scope string) { killLocal(pid, pgid, scope, d.t.KillGrace, d.logf) }
+	}
+	if d.deps.ScopeCgroup == nil {
+		d.deps.ScopeCgroup = scopeCgroup
 	}
 	d.ctx, d.cancel = context.WithCancel(context.Background())
 	d.bus = newBus(d.now)

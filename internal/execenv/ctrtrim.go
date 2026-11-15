@@ -48,6 +48,9 @@ type cacheTrim struct {
 	diskFree, diskTotal int64
 	diskAt              time.Time
 	slotCheck           time.Time // last volume slot check (slotreclaim.go)
+	// vmPipePages: fs.pipe-user-pages-soft in the Docker VM, read with the
+	// slot check (0 = not read yet).
+	vmPipePages int64
 }
 
 func (m *manager) trimName() string { return m.ns + "-cache-trim" }

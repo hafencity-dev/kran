@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -161,18 +162,39 @@ func (d *Daemon) selfLoop(ctx context.Context) {
 	}
 }
 
-// sampleLocalJobs updates Live for local jobs from their process groups.
+// sampleLocalJobs updates Live for local jobs. A job in its own systemd
+// scope (Linux) is measured by the scope's cgroup: everything it started,
+// whatever process group or session it moved to, and its page cache, the
+// same quantity its memory estimate was learned from. Without a scope (no
+// systemd user session, macOS) its process group is measured, which
+// misses children that left the group. Live is what the scheduler takes
+// off a job's reservation as already used (SPEC §6.3): measured too low,
+// the job's reservation is counted again on top of the memory it already
+// uses, and its CPU load as load beside its CPUs.
 func (d *Daemon) sampleLocalJobs() {
 	for _, e := range d.jobs.list() {
 		e.mu.Lock()
-		pgid, started, local := e.pgid, e.started, e.job.Local
+		pid, pgid, scope, cg, started, local := e.pid, e.pgid, e.scope, e.cgroup, e.started, e.job.Local
 		e.mu.Unlock()
 		if !local || !started || pgid <= 1 {
 			continue
 		}
-		r, err := d.deps.Prober.JobUsage(metrics.UsageRef{PGID: pgid})
+		if scope != "" && cg == "" && pid > 1 {
+			if cg = d.deps.ScopeCgroup(pid, scope); cg != "" {
+				e.mu.Lock()
+				e.cgroup = cg
+				e.mu.Unlock()
+			}
+		}
+		var r proto.Resources
+		err := errors.New("no scope")
+		if cg != "" {
+			r, err = d.deps.Prober.JobUsage(metrics.UsageRef{CgroupPath: cg})
+		}
 		if err != nil {
-			continue
+			if r, err = d.deps.Prober.JobUsage(metrics.UsageRef{PGID: pgid}); err != nil {
+				continue
+			}
 		}
 		d.deps.Sched.UpdateJobUsage(e.id, r)
 		e.update(func(j *proto.Job) { j.Live = &r })

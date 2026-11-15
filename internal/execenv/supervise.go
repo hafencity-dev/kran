@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -71,6 +72,7 @@ type supervisor struct {
 	container  string // container of the running step (docker)
 	killReason string // "lost" | "canceled" | "oom"; first wins
 	killing    bool
+	sent       map[string]bool // signals passed on to the job on request (job.signal)
 
 	statMu   sync.Mutex
 	peakMem  int64
@@ -792,8 +794,11 @@ func (s *supervisor) setupExit(res stepResult) proto.Exit {
 		exit.State = proto.JobCanceled
 		exit.Code = res.code
 		exit.Reason = "canceled during setup"
-	case res.oom:
+	case res.oom && s.spec.MemMax > 0:
 		exit.Reason = fmt.Sprintf("setup `%s` hit the job's %s memory cap on %s", s.spec.Setup.Run, fmtGiB(s.spec.MemMax), s.spec.Node)
+	case res.oom:
+		exit.Reason = fmt.Sprintf("the kernel's out-of-memory killer ended setup `%s` on %s: %s ran out of memory (the job has no memory cap of its own)",
+			s.spec.Setup.Run, s.spec.Node, s.memWhere())
 	case res.err != nil:
 		exit.Reason = fmt.Sprintf("setup `%s` could not start on %s: %v", s.spec.Setup.Run, s.spec.Node, res.err)
 	default:
@@ -817,7 +822,16 @@ func (s *supervisor) mainExit(res stepResult) proto.Exit {
 			exit.Code = proto.ExitSignalBase + int(syscall.SIGKILL)
 		}
 		exit.Signal = "KILL"
-		exit.Reason = fmt.Sprintf("job hit its %s memory cap on %s — rerun with --mem %s", fmtGiB(s.spec.MemMax), s.spec.Node, suggestMem(s.spec.MemMax))
+		// Only an explicit --mem sets a cap (SPEC §6.8).
+		exit.Reason = fmt.Sprintf("job hit its %s memory cap on %s (from --mem) — rerun with --mem %s", fmtGiB(s.spec.MemMax), s.spec.Node, suggestMem(s.spec.MemMax))
+	case res.oom && r == "":
+		// No cap of its own: the node (or its Linux VM) ran out of memory
+		// and the kernel's OOM killer picked a process of this job. The
+		// job's own exit (often a TERM from the rest of the tree being
+		// stopped) would not say so.
+		exit.State = proto.JobFailed
+		exit.Reason = fmt.Sprintf("the kernel's out-of-memory killer ended a process of the job on %s: %s ran out of memory (the job has no memory cap of its own)",
+			s.spec.Node, s.memWhere())
 	case r == killCanceled:
 		exit.State = proto.JobCanceled
 		exit.Reason = "canceled"
@@ -845,9 +859,29 @@ func (s *supervisor) mainExit(res stepResult) proto.Exit {
 		exit.State = proto.JobFailed
 		if r := s.diskShortReason(); r != "" {
 			exit.DiskShort, exit.Reason = true, r
+		} else if res.signal != "" && res.signal != "PIPE" && !s.passedOn(res.signal) {
+			// Nobody asked for it through kran: someone or something on
+			// the node killed the job (SPEC §6.8).
+			exit.Reason = fmt.Sprintf("job ended by signal %s on %s", res.signal, s.spec.Node)
 		}
 	}
 	return exit
+}
+
+// passedOn reports whether the origin asked for sig (job.signal).
+func (s *supervisor) passedOn(sig string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sent[sig]
+}
+
+// memWhere names what ran out of memory for a job without a cap of its
+// own: the node, or the Linux VM its containers run in.
+func (s *supervisor) memWhere() string {
+	if s.spec.Docker != nil && runtime.GOOS != "linux" {
+		return s.spec.Node + "'s Linux VM"
+	}
+	return s.spec.Node
 }
 
 func (s *supervisor) lostReason() string {
@@ -999,6 +1033,10 @@ func (s *supervisor) signal(name string) {
 	}
 	s.mu.Lock()
 	cmd, pgid, ptmx, container := s.cmd, s.pgid, s.ptmx, s.container
+	if s.sent == nil {
+		s.sent = map[string]bool{}
+	}
+	s.sent[sigName(sig)] = true
 	s.mu.Unlock()
 	if cmd == nil {
 		return
@@ -1035,6 +1073,9 @@ func sigName(sig syscall.Signal) string {
 		if s == sig {
 			return n
 		}
+	}
+	if n := unix.SignalName(sig); n != "" {
+		return strings.TrimPrefix(n, "SIG") // SEGV, ABRT, …
 	}
 	return fmt.Sprintf("%d", int(sig))
 }

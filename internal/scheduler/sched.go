@@ -115,6 +115,11 @@ type allocation struct {
 	vmKnown bool // vm was derived from the node's runtimes (false: restored before they were known)
 	repo    string
 	pl      Placement
+	// passed is the held job this one went ahead of (backfill.go), "" when
+	// it was placed in turn; passedFirst: because it ends before that one
+	// can start (else it fits in room that one does not need).
+	passed      string
+	passedFirst bool
 }
 
 type breaker struct {

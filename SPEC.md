@@ -242,7 +242,7 @@ Flags: `-l/--local`, `-r/--remote`, `-n/--node NAME`, `--gpu`, `--cpus N`,
 5. **Local placement:** daemon replies `decision{mode:"local", envelope}`.
    The CLI executes the command itself as a child (on a pty that mirrors
    the terminal, so colors/progress and interactive programs work), inside a transient systemd scope in `kran.slice`
-   on Linux (memory cap from envelope) or its own process group on macOS,
+   on Linux (with a memory cap only from an explicit `--mem`, §6.8) or its own process group on macOS,
    reports `started{pid, scope}` and later `exit{code, usage}`, and copies
    the output to the daemon for the history (§8.2). If the CLI
    dies, the socket closes, the daemon kills the scope/process group and
@@ -439,9 +439,19 @@ Eligibility filters, each failing filter gives a reason string:
 
 Admission (resources): `need = estimate(cpu, mem)` (§6.6). A runtime admits
 when `need.mem <= free_mem` and `need.cpu <= free_cpu × 1.25` where
-`free_mem = min(capacity_mem - reserve - Σ allocated_mem, live_available - reserve)`
+`free_mem = min(capacity_mem - reserve - Σ allocated_mem, live_available - reserve - Σ max(0, allocated_mem - used_mem))`
 and `free_cpu = capacity_cpu - reserve_cpus - Σ allocated_cpu` adjusted down
-by live non-kran CPU busy. Memory is never overcommitted. A job larger than
+by live non-kran CPU busy (`busy - Σ used_cpu`). `live_available` already
+lacks what running jobs use, so of a running job's reservation only the
+part it has not used yet is taken off again (a job placed after the last
+sample, or without a reading for its first 10 s here, 60 s elsewhere,
+counts in full). A job's use is measured where it runs: a local Linux job
+by its systemd scope's cgroup (`memory.current`, `cpu.stat`: every process
+it started, in whatever process group, and its page cache, the quantity its
+memory estimate is learned from), a remote native Linux job by its job
+cgroup, a container job by Docker's stats; a local job without a scope (no
+systemd user session, macOS) by its process group, which misses children
+that left the group. Memory is never overcommitted. A job larger than
 any node's total schedulable memory is admitted alone on the largest node
 (reason shown) rather than queued forever.
 
@@ -500,9 +510,25 @@ Queue: per-owner FIFO, owners served round-robin (weighted by priority:
 high 4, normal 2, low 1). Interactive (tty) jobs default to `high`. Every
 queued job carries a live `reason`. No job waits behind a job that cannot be
 admitted anywhere (no head-of-line blocking). Starvation guard: a job queued
-> 2 min gets priority boost. A queued job is placed again on every
+> 2 min goes first and holds its best node: later jobs see the room it
+needs as taken ("gx10 is held for a job that has waited longer"; its own
+reason ends "next in line on gx10"). **Backfill**: a later job still starts
+on a held node when that cannot delay the held job by the estimates: it
+fits beside the running jobs with the hold left out, and either ends (sync,
+setup and run) before the held job can start, the earliest time enough
+running jobs end as estimated (an overdue job counts as ending in 5 s), or
+fits in the room left beside the held job once that one starts, so it never
+takes what the held job waits for. With no known end that frees enough (non-kran
+load, jobs of other origins) only the first rule applies. Its placement
+reason is its own; the daemon log says it went ahead of which job and why.
+**Aging bound**: once the held job would fit if the jobs that passed it by
+ending first were gone, no job passes it any more except into room it does
+not need; from then on only fewer jobs stand in its way, so it starts at the
+latest when those end, however late their estimates were and however many
+small jobs keep coming. A queued job is placed again on every
 scheduler tick: a failed start excludes the node for that job only for a
-bounded backoff (§6.1 step 6), never for the rest of the job's life.
+bounded backoff (§6.1 step 6), never for the rest of the job's life. Jobs
+other origins offer this node (`Admit`) do not pass a hold.
 
 ### 6.4 Owner detection (CLI)
 
@@ -556,7 +582,8 @@ counts as 2 runs, 5 for memory):
   used, at least 0.5; a container run that used ≥ 85% of its `--cpus` cap
   counts as 1.5 × its use, so a low allocation can grow;
 * memory: the largest peak (p90 from 10 runs) × 1.25, and at least 0.6 ×
-  the largest peak, so every peak seen stays under the job's cap (§6.8).
+  the largest peak, so every peak seen stays within what the job books
+  (§6.3; an estimate never caps a job, §6.8).
 
 Which runs teach what: successful runs everything; failed runs memory, and
 duration/cpu only when they ran at least half the expected duration (the
@@ -695,7 +722,7 @@ pass, anything that holds the memory is stopped).
   version is set". Pinned tools kran has no shims for run via `mise exec
   tool@ver --`. Caches in volume `kran-cache` (GOCACHE, GOMODCACHE, pnpm
   store, npm cache, uv cache, mise), trimmed to a budget (§6.2). Job = `docker run --rm --init --network
-  host --name kran-job-<id> --label kran.job=<id> --memory <cap> --cpus <n>
+  host --name kran-job-<id> --label kran.job=<id> [--memory <cap>] --cpus <n>
   --shm-size <cap/2, 2 GiB uncapped> --ulimit nofile=65536:524288 (not on
   rootless Docker) -v /var/run/docker.sock:/run/kran/docker-host.sock -e …
   -w <origin cwd> --user 0:0
@@ -781,14 +808,50 @@ pass, anything that holds the memory is stopped).
   hours old) is below the node's floor (5% of that disk, 10–20 GiB, or
   `DiskFloor`), container slots are refused with reason `disk` and the
   next reaper pass trims caches and idle slots at once.
-* Resource caps: memory cap = admitted memory × 2, at least 8 GiB for an
-  estimate (a first compile or link of a large package needs more than its
-  siblings' estimate; the cap reserves nothing) and 2 GiB for an explicit
-  `--mem`, at most free memory at start (`proto.MemCap`); on cap breach the job is OOM-killed and the exit
-  reason says so (`kran: job hit its 6 GiB memory cap on devmac — rerun with
-  --mem 12G`); the estimate learns the peak, so the next run gets more.
-  Linux local jobs: same via scope. macOS native: watchdog kills the job
-  tree on cap breach.
+* Resource caps: only memory asked for explicitly (`--mem`, or a
+  `.kran.toml` rule's `mem`) caps a job: cap = that × 2, at least 2 GiB, at
+  most free memory at start, never below what was asked (`proto.MemCap`).
+  A learned or default estimate never caps a job: it places and books it
+  (§6.3), and a command whose needs grew since (a precheck that runs more
+  tests than last time) must not be killed for it. Never `MemoryHigh` either:
+  a throttled unit raises memory pressure for the whole user slice, which
+  systemd-oomd answers by killing the slice's largest cgroup (a whole agent
+  session, a land gate). On cap breach the job is OOM-killed and the exit
+  reason says so (`kran: job hit its 6 GiB memory cap on devmac (from --mem)
+  — rerun with --mem 12G`); the estimate learns the peak. Linux local jobs:
+  `MemoryMax` (with `MemorySwapMax=0`) on their scope, only with a cap; the
+  scope itself (with `TasksMax`) exists whenever the daemon names a slice,
+  so the job is measured and killed whole. macOS native: watchdog kills the
+  job tree on cap breach. kran run without a daemon keeps its guard of 3/4
+  of physical memory. Without a cap, memory the machine really lacks is the
+  kernel's (and kran.slice's) business, and kran says when it struck:
+* Why a job ended: a job whose scope, job cgroup or container saw the
+  kernel's OOM killer end a process (systemd's `Result=oom-kill` of a local
+  scope, read at every ending since systemd then stops the rest of the scope
+  with TERM; `memory.events` `oom_kill` of a remote job cgroup; Docker's
+  `OOMKilled`) gets the reason `the kernel's out-of-memory killer ended a
+  process of the job on gx10: the machine ran out of memory (the job has no
+  memory cap of its own); journalctl --user -u kran-local-<id>.scope shows
+  more` (on a Mac: `devmac's Linux VM ran out of memory`); with a cap, the
+  cap message above. A job ended by a signal kran run (or the origin, for a
+  remote job) did not pass on gets `job ended by signal TERM on gx10` (not
+  for `PIPE`, nor `INT`, `QUIT` or `HUP` of a job on a terminal). The reason
+  is `kran run`'s `kran:` line, `kran jobs --why`'s column and the line
+  `kran logs` prints after the output of a job that did not succeed. A local
+  scope that failed is reset so no failed unit stays behind.
+* Pipe limit: every job of a node runs as one user. Once that user's pipes
+  hold `fs.pipe-user-pages-soft` pages (the kernel default 16384, 64 MiB),
+  every new pipe gets a single page, and a program writing more than 4 KiB
+  into a pipe nobody reads yet blocks until its time limit. Each Linux
+  runtime reports the value of the kernel its jobs run under
+  (`Runtime.pipe_user_pages_soft`: the host's; on macOS the Docker VM's,
+  read through the sync helper with the 5-minute slot check, 0 until one
+  ran) and `kran doctor` shows it per node, warning at the default with
+  where to raise it to 262144 (a Linux host: a file in `/etc/sysctl.d`; a
+  Docker VM: its own start-up, e.g. Colima's `provision` in
+  `colima.yaml`). kran never changes a kernel setting itself: it does not
+  own the Docker VM (Colima, Docker Desktop do), and its job containers get
+  no privilege to set a non-namespaced sysctl.
 * Disk short: a remote job that fails (exit ≠ 0) while a disk it writes to
   was full keeps its exit code, but the supervisor marks it
   (`Exit.DiskShort`, `disk_short` in the job and the `exit` event) and the

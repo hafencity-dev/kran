@@ -67,6 +67,25 @@ func (m *manager) reclaimVolumeSlots(ctx context.Context, now bool) {
 		}
 		return free, total, err
 	})
+	m.readVMPipePages(ctx, dk)
+}
+
+// readVMPipePages reads fs.pipe-user-pages-soft of the Docker VM's kernel
+// through the running sync helper (any container sees the kernel's value),
+// for kran doctor. kran does not configure that VM (Colima, Docker Desktop
+// and the like own it), so it only reports the value.
+func (m *manager) readVMPipePages(ctx context.Context, dk *dockerEnv) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	out, err := dk.run(ctx, nil, "exec", m.syncName(), "cat", "/proc/sys/fs/pipe-user-pages-soft")
+	if err != nil {
+		return
+	}
+	if n, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64); err == nil {
+		m.ct.mu.Lock()
+		m.ct.vmPipePages = n
+		m.ct.mu.Unlock()
+	}
 }
 
 // volumeDiskSpace asks the running sync helper how full the Docker disk

@@ -230,7 +230,17 @@ func (m *manager) Runtimes(ctx context.Context) []proto.Runtime {
 	rts := append([]proto.Runtime(nil), m.runtimes...)
 	m.rtMu.Unlock()
 	paused := m.cachePaused()
+	host := hostPipePages()
+	m.ct.mu.Lock()
+	vmPipes := m.ct.vmPipePages
+	m.ct.mu.Unlock()
 	for i := range rts {
+		if rts[i].OS == "linux" {
+			rts[i].PipeUserPagesSoft = host // the host's kernel (Linux)
+			if m.useVolume() && rts[i].Kind == proto.RuntimeContainer {
+				rts[i].PipeUserPagesSoft = vmPipes // the Docker VM's kernel
+			}
+		}
 		if rts[i].Kind == proto.RuntimeContainer {
 			rts[i].Caches = m.cacheStatus()
 			if paused && rts[i].Available {

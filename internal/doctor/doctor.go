@@ -56,6 +56,8 @@ type Options struct {
 	DiskFree func(path string) (free, total int64, err error)
 	Now      func() time.Time
 	GOOS     string
+	// PipePages reads this machine's fs.pipe-user-pages-soft (0 = unknown).
+	PipePages func() int64
 	// Paths (defaults from internal/paths and config).
 	Peers func() (*config.Peers, error)
 }
@@ -85,6 +87,9 @@ func (o *Options) defaults() {
 	if o.GOOS == "" {
 		o.GOOS = runtime.GOOS
 	}
+	if o.PipePages == nil {
+		o.PipePages = readPipePages
+	}
 	if o.Peers == nil {
 		o.Peers = func() (*config.Peers, error) { return config.LoadPeers("") }
 	}
@@ -109,6 +114,7 @@ func Run(ctx context.Context, o Options) []Result {
 	c.checkVersion(ctx)
 	c.checkLocalResources(ctx)
 	c.checkRuntimes(ctx)
+	c.checkPipeLimits(ctx)
 	c.checkToolchains(ctx)
 	c.checkPeers(ctx)
 	if o.Fix {

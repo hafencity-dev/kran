@@ -2,6 +2,16 @@
 
 All notable changes to kran. Versions follow [semantic versioning](https://semver.org/).
 
+## Unreleased
+
+### Fixes
+
+- A learned estimate no longer caps a job's memory (15.11.2026, gx10: five times since 13.11. a local job without `--mem` ran in a scope with `MemoryMax` from its estimate, at least 8 GiB, no swap; a precheck that had started running more tests outgrew it, the kernel killed a compiler, systemd stopped the rest with TERM, and the job ended with no reason). Only an explicit `--mem` (or a `.kran.toml` rule's `mem`) sets a cap now, locally and on every target; the estimate places and books the job. Never `MemoryHigh`: a throttled unit raises memory pressure for the whole user slice and systemd-oomd then kills its largest cgroup. A local job still runs in its own scope (with `TasksMax`), cap or not.
+- kran says how a job ended when its own output does not: `kran: the kernel's out-of-memory killer ended a process of the job on gx10: the machine ran out of memory (the job has no memory cap of its own); journalctl --user -u kran-local-<id>.scope shows more`, `kran: job hit its 40.0 GiB memory cap on gx10 (from --mem 20.0 GiB) — rerun with --mem 80G`, `kran: job ended by signal KILL on gx10`. A local scope's systemd result is read at every ending, not only after a KILL (an OOM kill shows as TERM for the rest of the scope), and a failed scope is reset. The line is `kran run`'s, `kran jobs --why`'s and is repeated by `kran logs` after the output. Signals kran run passed on (Ctrl-C) and `PIPE` stay quiet; uncommon signals are named (`SEGV`, not `segmentation fault` or `11`).
+- Small jobs no longer wait behind a job that has waited longer (15.11.2026: with two prechecks running and a third of 20 GiB holding gx10, six tests of 1–3 s waited 30–60 minutes with 13 of 20 CPUs idle). A job may pass a held one when, by the estimates, it ends before the held job can start, or fits in the room left beside it once it starts. The held job cannot starve: once only jobs that passed it stand in its way, nothing passes it any more except into room it does not need, so it starts when those end. Waiting reasons are unchanged; the daemon log names the job a placement went ahead of.
+- Running local jobs are measured by their systemd scope's cgroup instead of their process group (15.11.2026: two prechecks that used gigabytes read as 160 MiB each, because their tools run in process groups of their own; the scheduler then took their whole 20 GiB reservations off the 58 GiB gx10 had available again, `kran status` showed 8.5 GiB free, and a 14 GiB job waited). Free memory is what the machine has available minus the part of each running job's reservation it has not used yet; the same measurement stops a local job's own CPU load from counting as load beside its CPUs. Without a scope (macOS, no systemd user session) the process group is measured as before.
+- `kran doctor` reports `fs.pipe-user-pages-soft` of every kernel kran's jobs run under (a Linux node's own, a Mac's Docker VM's) and warns at the kernel default 16384: all jobs of a node run as one user, and once its pipes hold that many pages every new pipe gets one page and a writer that fills it blocks (a Go test helper hung 45 minutes that way). It says where to raise it to 262144; kran never changes it itself and does not configure the Docker VM.
+
 ## 0.1.12
 
 ### Fixes

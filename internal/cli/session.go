@@ -302,7 +302,7 @@ func defaultEnvelope() *proto.LocalEnvelope {
 
 func (r *runner) localJob(env *proto.LocalEnvelope) localJob {
 	j := localJob{JobID: r.jobID, Node: r.localNode, Argv: r.spec.Argv, Dir: r.spec.Cwd, Env: withEnvSet(r.env, r.envSet), Envelope: env,
-		Stdio: r.stdio, ScopeProbe: r.probe}
+		Stdio: r.stdio, ScopeProbe: r.probe, AskedMem: r.spec.Req.Mem, Interactive: r.stdio.In != nil && isTerminal(r.stdio.In)}
 	if r.tee != nil {
 		j.Tee = r.tee.push
 	}
@@ -312,6 +312,7 @@ func (r *runner) localJob(env *proto.LocalEnvelope) localJob {
 // standalone runs the command locally with no daemon involvement.
 func (r *runner) standalone(ctx context.Context) int {
 	job := r.localJob(defaultEnvelope())
+	job.AskedMem = 0 // the guard's cap is 3/4 of this machine, not --mem
 	// No daemon will kill the job if kran run dies: it must die with us.
 	job.Watcher = r.watcher
 	if job.Watcher == nil {

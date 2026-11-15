@@ -280,6 +280,7 @@ func (a *App) logsCommand() *cobra.Command {
 				if cw.n == 0 {
 					a.explainEmptyLog(cmd, cl, id)
 				}
+				a.explainEnd(cmd, cl, id)
 				return nil
 			})
 		},
@@ -297,6 +298,22 @@ func (c *countWriter) Write(p []byte) (int, error) {
 	n, err := c.w.Write(p)
 	c.n += int64(n)
 	return n, err
+}
+
+// explainEnd repeats, after the output, kran's word on how a job that did
+// not succeed ended (a memory cap, the OOM killer, a signal, a cancel), as
+// `kran run` said it on its stderr: the output alone may not say.
+func (a *App) explainEnd(cmd *cobra.Command, cl client.Client, id string) {
+	jobs, err := cl.Jobs(cmd.Context(), 1000)
+	if err != nil {
+		return
+	}
+	for _, j := range jobs {
+		if j.Spec.ID == id && j.State.Terminal() && j.State != proto.JobSucceeded && j.Reason != "" && j.Reason != j.PlaceReason {
+			a.errorf("%s", j.Reason)
+			return
+		}
+	}
 }
 
 // explainEmptyLog says why there is nothing to show for a local job (whose

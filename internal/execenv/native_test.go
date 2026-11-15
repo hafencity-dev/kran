@@ -144,14 +144,19 @@ func TestMemCapAndUnits(t *testing.T) {
 	if c := memCap(512<<20, 100*gib, true); c != 2*gib {
 		t.Errorf("explicit floor: memCap = %d", c)
 	}
-	if c := memCap(512<<20, 100*gib, false); c != 8*gib {
-		t.Errorf("estimate floor: memCap = %d", c)
+	// A learned or default estimate never caps a job (SPEC §6.8): on
+	// 2026-11-15 an 8 GiB cap from an estimate killed a compiler of a
+	// precheck that had started running more tests than before.
+	for _, alloc := range []int64{512 << 20, 6 * gib, 20 * gib} {
+		if c := memCap(alloc, 100*gib, false); c != 0 {
+			t.Errorf("estimate of %d: memCap = %d, want no cap", alloc, c)
+		}
 	}
-	if c := memCap(6*gib, 100*gib, false); c != 12*gib {
-		t.Errorf("estimate: memCap = %d", c)
-	}
-	if c := memCap(4*gib, 5*gib, false); c != 5*gib {
+	if c := memCap(4*gib, 5*gib, true); c != 5*gib {
 		t.Errorf("bounded by free memory: memCap = %d", c)
+	}
+	if c := memCap(6*gib, 5*gib, true); c != 6*gib {
+		t.Errorf("never below what was asked: memCap = %d", c)
 	}
 	if c := memCap(0, 5*gib, false); c != 0 {
 		t.Errorf("no estimate, no cap: %d", c)

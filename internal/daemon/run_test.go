@@ -42,7 +42,9 @@ func TestLocalRun(t *testing.T) {
 		t.Fatalf("decisions %+v", res.decisions)
 	}
 	env := res.decisions[0].Envelope
-	if env.MemMax < 2<<30 || env.Env["KRAN_JOB_ID"] != res.jobID {
+	// No --mem: the estimate places and books the job but never caps it
+	// (SPEC §6.8).
+	if env.MemMax != 0 || env.Env["KRAN_JOB_ID"] != res.jobID {
 		t.Fatalf("envelope %+v", env)
 	}
 	j := storedJob(t, a, res.jobID)
@@ -310,5 +312,30 @@ func TestOutputFramesOfARemoteJobsCLIAreIgnored(t *testing.T) {
 	var log strings.Builder
 	if err := cl.Log(ctx, res.jobID, false, &log); err != nil || log.String() != "remote\n" {
 		t.Fatalf("history %q %v", log.String(), err)
+	}
+}
+
+// TestLocalEnvelopeCapsOnlyAnExplicitMem: --mem caps a local job (twice
+// what was asked, at least 2 GiB); without it the envelope carries no cap.
+func TestLocalEnvelopeCapsOnlyAnExplicitMem(t *testing.T) {
+	c := newCluster(t, "a")
+	a := c.nodes["a"]
+	a.start()
+	ws := workspaceDir(t, map[string]string{"f.txt": "hi"})
+	ctx, cancel := testContext(20 * time.Second)
+	defer cancel()
+	spec := shSpec(ws, "true")
+	spec.Req.Mem = 3 << 30
+	res, err := runCLI(ctx, a.sock(), spec, cliOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.decisions) != 1 || res.decisions[0].Envelope == nil {
+		t.Fatalf("decisions %+v", res.decisions)
+	}
+	// (The fake scheduler books 1 GiB whatever was asked: twice that, at
+	// least 2 GiB.)
+	if env := res.decisions[0].Envelope; env.MemMax < 2<<30 {
+		t.Fatalf("--mem: envelope %+v, want a cap", env)
 	}
 }

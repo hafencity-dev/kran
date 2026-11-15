@@ -62,6 +62,7 @@ type jobEntry struct {
 	pid     int
 	pgid    int
 	scope   string
+	cgroup  string // the scope's cgroup directory, found once (sampleLocalJobs)
 
 	outbox       *outbox // remote: frames for the target
 	in           inFlow  // remote: input flow control

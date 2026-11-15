@@ -40,3 +40,6 @@ func memAvailable() int64 {
 	}
 	return pages * page
 }
+
+// hostPipePages: macOS has no fs.pipe-user-pages-soft.
+func hostPipePages() int64 { return 0 }

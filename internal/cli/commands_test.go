@@ -129,6 +129,28 @@ func TestLogsDefaultsToLatest(t *testing.T) {
 	}
 }
 
+// TestLogsSayHowAFailedJobEnded: kran logs repeats kran's word on a job
+// that did not succeed (here the OOM killer); a placement rationale or a
+// successful job adds nothing.
+func TestLogsSayHowAFailedJobEnded(t *testing.T) {
+	oom := "the kernel's out-of-memory killer ended a process of the job on gx10: the machine ran out of memory (the job has no memory cap of its own)"
+	cl := &stateClient{log: "building\n", jobs: []proto.Job{
+		{Spec: proto.JobSpec{ID: "j1"}, State: proto.JobFailed, Reason: oom, PlaceReason: "here (--local)"},
+		{Spec: proto.JobSpec{ID: "j2"}, State: proto.JobFailed, Reason: "here (--local)", PlaceReason: "here (--local)"},
+		{Spec: proto.JobSpec{ID: "j3"}, State: proto.JobSucceeded, Reason: "here (--local)"},
+	}}
+	a, out, errb := testApp(cl)
+	if code := a.Execute(context.Background(), []string{"logs", "j1"}); code != 0 || out.String() != "building\n" || errb.String() != "kran: "+oom+"\n" {
+		t.Fatalf("%d out=%q err=%q", code, out, errb)
+	}
+	for _, id := range []string{"j2", "j3"} {
+		errb.Reset()
+		if code := a.Execute(context.Background(), []string{"logs", id}); code != 0 || errb.Len() != 0 {
+			t.Errorf("%s: %d err=%q", id, code, errb)
+		}
+	}
+}
+
 func TestUsageErrors(t *testing.T) {
 	a, _, errb := testApp(nil)
 	for _, args := range [][]string{{"run", "--local", "--remote", "x"}, {"run", "--sh", "a", "b"}, {"status", "--nope"}, {"cancel"}, {"serve"}} {

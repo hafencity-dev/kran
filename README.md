@@ -53,10 +53,10 @@ Exit codes: the command's own; `125` kran failed after your command started (or 
 
 1. **Describe the job.** Command, working tree, environment, who asked (you, Claude, Codex, CI) and what it needs, from flags, `.kran.toml` rules or what kran learned from earlier runs of the same command.
 2. **Keep local what must stay local.** Working directory outside a project, a command that mentions `localhost`, `--local`, a `.kran.toml` rule, or no other machine linked.
-3. **Check every machine.** Online, accepting jobs, same OS (a Mac offers a Linux container when Docker is running), GPU if asked, toolchains, disk, and free CPU and memory after that machine's owner reserve. Memory is never overcommitted.
+3. **Check every machine.** Online, accepting jobs, same OS (a Mac offers a Linux container when Docker is running), GPU if asked, toolchains, disk, and free CPU and memory after that machine's owner reserve. Free memory is what the machine has available minus the part of each running job's reservation it has not used yet. Memory is never overcommitted. What kran learned about a command books room for it but never caps it: only `--mem` sets a memory cap.
 4. **Pick the earliest finish.** Wait + upload + setup + the duration scaled by that machine's learned speed. Short jobs, and jobs that cost more to upload than they save, stay local.
 5. **Run it.** Changed files are synced into a slot on the target (content-addressed, so repeats are cheap), the command runs under a supervisor, output streams back, and you get the exit code. `.env` files, keys and secret-looking environment variables are never sent unless you ask (`--env NAME` or `.kran.toml`).
-6. **Say so when waiting.** A job that has to wait says why on one line (`kran: waiting: needs 6 GiB, devmac has 3.1 GiB free`), only after two seconds. `kran jobs --why` shows the reason behind every past placement.
+6. **Say so when waiting.** A job that has to wait says why on one line (`kran: waiting: needs 6 GiB, devmac has 3.1 GiB free`), only after two seconds. A job that has waited over two minutes holds its machine; smaller jobs still go ahead when they cannot delay it. `kran jobs --why` shows the reason behind every past placement, and how a job ended when its output does not say (a memory cap, the kernel's OOM killer, a signal).
 
 Per-repository hints go in `.kran.toml`, machine settings in `~/.config/kran/config.toml`; see [docs/config.md](docs/config.md).
 
