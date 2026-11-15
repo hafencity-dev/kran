@@ -848,6 +848,26 @@ pass, anything that holds the memory is stopped).
   cap breach. kran run without a daemon keeps its guard of 3/4 of physical
   memory. Without a cap, memory the machine really lacks is the kernel's
   (and kran.slice's) business, and kran says when it struck:
+* Kill order (container jobs): when a Linux VM (a Mac's Docker VM) or a
+  Linux host runs out of memory as a whole, its kernel ends the process
+  with the highest badness: resident memory plus `oom_score_adj`
+  thousandths of the VM's or host's memory. kran starts every job container
+  (and its setup container) with `--oom-score-adj`: 1000 for a job without
+  `--mem`, 500 for one with `--mem` (`ctrLimitArgs`). Everything else on
+  the machine (the owner's own containers, a database a job started) sits
+  at Docker's 0, so kran's jobs go first, a job without `--mem` before one
+  that asked for its memory. In a 39.1 GiB VM, 1000 adds 39.1 GiB and 500
+  adds 19.6 GiB to a job's own size. kran's helpers (the sync helper, the
+  cache trim) stay at 0 and so come after every job. On rootless Docker
+  kran sets no score. The score is given only in the `docker run` of a job
+  container kran creates: never with `docker update`, never through
+  `/proc`, never to a container kran finds or did not start. A container
+  the OOM killer ended while its measured peak was below half its cap is
+  reported as `the kernel's out-of-memory killer ended the job on devmac:
+  devmac's Linux VM ran out of memory and took this job (its highest
+  measured use was 1 GiB of its 8 GiB cap)`, exit 137, not as a cap breach.
+  Local and native jobs on Linux keep the score they inherit (a systemd
+  scope takes no `OOMScoreAdjust`).
 * Why a job ended: a job whose scope, job cgroup or container saw the
   kernel's OOM killer end a process (systemd's `Result=oom-kill` of a local
   scope, read at every ending since systemd then stops the rest of the scope

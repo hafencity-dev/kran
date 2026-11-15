@@ -315,12 +315,16 @@ func (s *supervisor) reason() string {
 
 // stepResult is how one step (setup or main command) ended.
 type stepResult struct {
-	code       int
-	signal     string
-	err        error // the step could not be started
-	oom        bool
-	cpu        float64
-	peak       int64
+	code   int
+	signal string
+	err    error // the step could not be started
+	oom    bool
+	cpu    float64
+	peak   int64
+	// peakSeen: peak is the job's own measured use (cgroup memory.peak,
+	// docker stats or the process-tree sampler), not only the rusage of
+	// the process kran waited for (the docker CLI for a container job).
+	peakSeen   bool
 	notStarted bool   // container never started (docker reports why)
 	detail     string // runtime's own explanation
 }
@@ -460,13 +464,16 @@ func (s *supervisor) runStep(setup bool) stepResult {
 		u := s.cg.usage()
 		res.cpu = u.cpu - cgBefore.cpu
 		res.peak = max(u.peak, s.sampledPeak())
+		res.peakSeen = res.peak > 0
 		if u.oomKills > cgBefore.oomKills {
 			res.oom = true
 		}
 	case name != "":
+		res.peakSeen = s.sampledPeak() > 0
 		res.peak = max(res.peak, s.sampledPeak())
 		res.cpu = max(res.cpu, s.sampledCPU())
 	default:
+		res.peakSeen = s.sampledPeak() > 0
 		res.peak = max(res.peak, s.sampledPeak())
 		res.cpu = max(res.cpu, s.sampledCPU())
 	}
@@ -825,6 +832,14 @@ func (s *supervisor) mainExit(res stepResult) proto.Exit {
 			exit.Code = proto.ExitSignalBase + int(syscall.SIGKILL)
 		}
 		exit.Signal = "KILL"
+		if r != killOOM && res.peakSeen && res.peak < s.spec.MemMax/2 {
+			// Killed far below its cap: not the cap but the VM or host
+			// ran out of memory, and the kernel picked this job (kran's
+			// jobs rank first in its kill order: ctrOOMScoreDefault).
+			exit.Reason = fmt.Sprintf("the kernel's out-of-memory killer ended the job on %s: %s ran out of memory and took this job (its highest measured use was %s of its %s cap)",
+				s.spec.Node, s.memWhere(), fmtGiB(res.peak), fmtGiB(s.spec.MemMax))
+			break
+		}
 		exit.Reason = fmt.Sprintf("job hit its %s memory cap on %s (%s) — rerun with --mem %s", fmtGiB(s.spec.MemMax), s.spec.Node, s.capSource(), suggestMem(s.spec.MemMax))
 	case res.oom && r == "":
 		// No cap of its own: the node (or its Linux VM) ran out of memory

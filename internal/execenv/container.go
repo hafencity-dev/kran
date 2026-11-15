@@ -428,11 +428,7 @@ func (m *manager) ensureSync(ctx context.Context, dk *dockerEnv) error {
 			return err
 		}
 		dk.run(ctx, nil, "rm", "--force", name)
-		_, err := dk.run(ctx, nil, "run", "--detach", "--name", name, "--label", "kran.ns="+m.ns, "--label", "kran.role=sync",
-			"--restart", "unless-stopped", "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
-			"--network", "none",
-			"--mount", "type=volume,src="+m.volume("slots")+",dst="+ctrSlots,
-			"--entrypoint", "/bin/sh", m.imageTag(), "-c", "trap 'exit 0' TERM INT; while :; do sleep 3600 & wait $!; done")
+		_, err := dk.run(ctx, nil, m.syncHelperArgs(name)...)
 		if err != nil {
 			return fmt.Errorf("%w: starting the sync helper: %v", ErrRuntimeUnavailable, err)
 		}
@@ -710,11 +706,6 @@ func (m *manager) containerSpec(ctx context.Context, spec *superSpec, req *Start
 			a = append(a, "--mount", "type=volume,src="+m.volume("cache")+",dst="+home+",volume-subpath=home,volume-nocopy=true")
 		}
 		a = append(a, "--mount", slotMount)
-		if !dk.info.rootless() {
-			// Docker's default soft limit of 1024 open files breaks file
-			// watchers and big test runs; the hard limit stays Docker's.
-			a = append(a, "--ulimit", "nofile=65536:524288")
-		}
 		// The Docker socket lets testcontainers and docker compose work in
 		// jobs; it is root-equivalent on rootful Docker (SPEC §9), so a
 		// project can opt out. kran-init puts the bind-mount proxy in
@@ -722,15 +713,7 @@ func (m *manager) containerSpec(ctx context.Context, spec *superSpec, req *Start
 		if !req.Spec.Req.NoDocker {
 			a = append(a, "-v", "/var/run/docker.sock:"+ctrDockerHost)
 		}
-		if spec.MemMax > 0 {
-			a = append(a, "--memory", strconv.FormatInt(spec.MemMax, 10), "--memory-swap", strconv.FormatInt(spec.MemMax, 10))
-		}
-		if spec.CPUs > 0 {
-			a = append(a, "--cpus", strconv.FormatFloat(spec.CPUs, 'f', 2, 64))
-		}
-		if spec.Nice > 0 {
-			a = append(a, "--cpu-shares", "256") // niced relative to the owner's own containers (1024)
-		}
+		a = append(a, ctrLimitArgs(spec, dk.info.rootless())...)
 		return append(a, envArgs...)
 	}
 	name := m.ns + "-job-" + req.Spec.ID
@@ -835,4 +818,67 @@ func (m *manager) dockerMaps(ctx context.Context, dk *dockerEnv, s *slot, root, 
 		add(ctrTools, tools)
 	}
 	return maps
+}
+
+// Kill order in a full Linux VM or host (SPEC §6.8). The kernel's OOM
+// killer ends the process with the highest badness: its resident memory
+// (plus swap and page tables) plus oom_score_adj thousandths of the
+// memory it may use (RAM + swap of the VM or host). Everything that is
+// not kran's sits at 0 (Docker's default; dockerd -500, containerd -999),
+// so a positive score puts kran's job containers first, and a larger one
+// puts a job without --mem before one that asked for its memory (the land
+// gate's sides do). In devmac's 39.1 GiB VM, 1000 adds 39.1 GiB (a job
+// without --mem goes before any other process of any size) and 500 adds
+// 19.6 GiB (a job with --mem goes before any non-kran process up to
+// 19.6 GiB larger than itself, a 6 GiB Postgres or Qdrant easily, and
+// after a job without --mem unless it is 19.6 GiB larger than that one).
+// kran's helpers (sync helper, cache trim) stay at 0: they are small, so
+// they come after every job, and a negative score would rank them above
+// the machine's own containers and fail on rootless Docker. Raising a
+// score needs no privilege; on rootless Docker kran leaves it to the
+// daemon's own (inherited) score, as it does the nofile limit. The score
+// is set only here, when kran creates its own job container: never with
+// `docker update`, never through /proc, never on a container kran finds.
+const (
+	ctrOOMScoreDefault  = 1000 // a job without --mem: the node's default cap
+	ctrOOMScoreExplicit = 500  // a job whose memory was asked for (--mem)
+)
+
+// ctrLimitArgs are a job container's resource arguments: open files, the
+// memory cap, CPUs, priority and its place in the kernel's kill order.
+// Never --oom-kill-disable: a job over its cap must die, not hang.
+func ctrLimitArgs(spec *superSpec, rootless bool) []string {
+	var a []string
+	if !rootless {
+		// Docker's default soft limit of 1024 open files breaks file
+		// watchers and big test runs; the hard limit stays Docker's.
+		a = append(a, "--ulimit", "nofile=65536:524288")
+	}
+	if spec.MemMax > 0 {
+		a = append(a, "--memory", strconv.FormatInt(spec.MemMax, 10), "--memory-swap", strconv.FormatInt(spec.MemMax, 10))
+	}
+	if spec.CPUs > 0 {
+		a = append(a, "--cpus", strconv.FormatFloat(spec.CPUs, 'f', 2, 64))
+	}
+	if spec.Nice > 0 {
+		a = append(a, "--cpu-shares", "256") // niced relative to the owner's own containers (1024)
+	}
+	if !rootless {
+		score := ctrOOMScoreDefault
+		if spec.MemMax > 0 && !spec.MemDefault {
+			score = ctrOOMScoreExplicit
+		}
+		a = append(a, "--oom-score-adj", strconv.Itoa(score))
+	}
+	return a
+}
+
+// syncHelperArgs starts the long-lived sync helper (macOS volume layout).
+// No --oom-score-adj: it stays at Docker's 0 (see ctrOOMScoreDefault).
+func (m *manager) syncHelperArgs(name string) []string {
+	return []string{"run", "--detach", "--name", name, "--label", "kran.ns=" + m.ns, "--label", "kran.role=sync",
+		"--restart", "unless-stopped", "--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
+		"--network", "none",
+		"--mount", "type=volume,src=" + m.volume("slots") + ",dst=" + ctrSlots,
+		"--entrypoint", "/bin/sh", m.imageTag(), "-c", "trap 'exit 0' TERM INT; while :; do sleep 3600 & wait $!; done"}
 }
