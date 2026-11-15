@@ -303,6 +303,9 @@ func defaultEnvelope() *proto.LocalEnvelope {
 func (r *runner) localJob(env *proto.LocalEnvelope) localJob {
 	j := localJob{JobID: r.jobID, Node: r.localNode, Argv: r.spec.Argv, Dir: r.spec.Cwd, Env: withEnvSet(r.env, r.envSet), Envelope: env,
 		Stdio: r.stdio, ScopeProbe: r.probe, AskedMem: r.spec.Req.Mem, Interactive: r.stdio.In != nil && isTerminal(r.stdio.In)}
+	if r.spec.Req.Mem <= 0 {
+		j.CapNote = "this node's default for a job without --mem: twice its estimate, at least 8 GiB, as no kran.slice bounds it; give it more with --mem"
+	}
 	if r.tee != nil {
 		j.Tee = r.tee.push
 	}
@@ -313,6 +316,7 @@ func (r *runner) localJob(env *proto.LocalEnvelope) localJob {
 func (r *runner) standalone(ctx context.Context) int {
 	job := r.localJob(defaultEnvelope())
 	job.AskedMem = 0 // the guard's cap is 3/4 of this machine, not --mem
+	job.CapNote = "kran's guard without a daemon: 3/4 of this machine"
 	// No daemon will kill the job if kran run dies: it must die with us.
 	job.Watcher = r.watcher
 	if job.Watcher == nil {

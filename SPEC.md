@@ -446,10 +446,12 @@ lacks what running jobs use, so of a running job's reservation only the
 part it has not used yet is taken off again (a job placed after the last
 sample, or without a reading for its first 10 s here, 60 s elsewhere,
 counts in full). A job's use is measured where it runs: a local Linux job
-by its systemd scope's cgroup (`memory.current`, `cpu.stat`: every process
-it started, in whatever process group, and its page cache, the quantity its
-memory estimate is learned from), a remote native Linux job by its job
-cgroup, a container job by Docker's stats; a local job without a scope (no
+by its systemd scope's cgroup (every process it started, in whatever
+process group; `cpu.stat`, and `memory.current` without the file page
+cache, `memory.stat` `active_file` + `inactive_file`, which the kernel can
+give back and `live_available` already counts as available; anonymous
+memory, shmem/tmpfs and kernel memory stay counted), a remote native Linux
+job by its job cgroup the same way, a container job by Docker's stats; a local job without a scope (no
 systemd user session, macOS) by its process group, which misses children
 that left the group. Memory is never overcommitted. A job larger than
 any node's total schedulable memory is admitted alone on the largest node
@@ -518,8 +520,12 @@ fits beside the running jobs with the hold left out, and either ends (sync,
 setup and run) before the held job can start, the earliest time enough
 running jobs end as estimated (an overdue job counts as ending in 5 s), or
 fits in the room left beside the held job once that one starts, so it never
-takes what the held job waits for. With no known end that frees enough (non-kran
-load, jobs of other origins) only the first rule applies. Its placement
+takes what the held job waits for (CPUs: at most `free − held / 1.25`,
+compared without the overcommit factor, since the held job gets that factor
+when it starts). With no known end that frees enough (non-kran load, jobs
+of other origins, a job larger than any node, which holds the whole node)
+the held job's start is unknown: then only the second rule applies, and
+nothing passes it by ending first. Its placement
 reason is its own; the daemon log says it went ahead of which job and why.
 **Aging bound**: once the held job would fit if the jobs that passed it by
 ending first were gone, no job passes it any more except into room it does
@@ -808,23 +814,40 @@ pass, anything that holds the memory is stopped).
   hours old) is below the node's floor (5% of that disk, 10–20 GiB, or
   `DiskFloor`), container slots are refused with reason `disk` and the
   next reaper pass trims caches and idle slots at once.
-* Resource caps: only memory asked for explicitly (`--mem`, or a
-  `.kran.toml` rule's `mem`) caps a job: cap = that × 2, at least 2 GiB, at
-  most free memory at start, never below what was asked (`proto.MemCap`).
-  A learned or default estimate never caps a job: it places and books it
-  (§6.3), and a command whose needs grew since (a precheck that runs more
-  tests than last time) must not be killed for it. Never `MemoryHigh` either:
-  a throttled unit raises memory pressure for the whole user slice, which
-  systemd-oomd answers by killing the slice's largest cgroup (a whole agent
-  session, a land gate). On cap breach the job is OOM-killed and the exit
-  reason says so (`kran: job hit its 6 GiB memory cap on devmac (from --mem)
-  — rerun with --mem 12G`); the estimate learns the peak. Linux local jobs:
-  `MemoryMax` (with `MemorySwapMax=0`) on their scope, only with a cap; the
-  scope itself (with `TasksMax`) exists whenever the daemon names a slice,
-  so the job is measured and killed whole. macOS native: watchdog kills the
-  job tree on cap breach. kran run without a daemon keeps its guard of 3/4
-  of physical memory. Without a cap, memory the machine really lacks is the
-  kernel's (and kran.slice's) business, and kran says when it struck:
+* Resource caps (`proto.MemCap`, `proto.DefaultMemCap`), by job kind:
+  * any job with memory asked for explicitly (`--mem`, or a `.kran.toml`
+    rule's `mem`): cap = that × 2, at least 2 GiB, at most free memory at
+    start, never below what was asked;
+  * without `--mem`, a job that kran.slice bounds together with every other
+    kran job gets **no cap**: a Linux local job in its scope while the
+    daemon names kran.slice (its `MemoryMax` follows what the machine can
+    spare), and a remote native job on a Linux target that runs jobs in
+    scopes under the same slice. A learned estimate places and books such a
+    job (§6.3), and a command whose needs grew since (a precheck that runs
+    more tests than last time) must not be killed for it;
+  * without `--mem`, a job nothing above bounds keeps the node's **default
+    cap** from its estimate: twice the estimate, at least 8 GiB, at most free
+    memory at start. That is every container job (on macOS its Docker VM
+    has no limit per kran job, on Linux Docker's cgroup is outside
+    kran.slice), a native job on macOS (watchdog), and a native or local
+    job on Linux without a systemd user session. One runaway job could
+    otherwise fill the VM or the machine, whose kernel then kills what it
+    picks: another job, a test database, kran's sync helper.
+
+  Never `MemoryHigh`: a throttled unit raises memory pressure for the whole
+  user slice, which systemd-oomd answers by killing the slice's largest
+  cgroup (a whole agent session, a land gate). On a cap breach the job is
+  OOM-killed and the reason says which cap it was: `kran: job hit its 6 GiB
+  memory cap on devmac (from --mem) — rerun with --mem 12G`, or `(the
+  node's default for a job without --mem: twice its estimate, at least 8
+  GiB, as nothing above it bounds its memory; give it more with --mem)`;
+  the estimate learns the peak. Linux local jobs: `MemoryMax` (with
+  `MemorySwapMax=0`) on their scope, only with a cap; the scope itself
+  (with `TasksMax`) exists whenever the daemon names a slice, so the job is
+  measured and killed whole. macOS native: watchdog kills the job tree on
+  cap breach. kran run without a daemon keeps its guard of 3/4 of physical
+  memory. Without a cap, memory the machine really lacks is the kernel's
+  (and kran.slice's) business, and kran says when it struck:
 * Why a job ended: a job whose scope, job cgroup or container saw the
   kernel's OOM killer end a process (systemd's `Result=oom-kill` of a local
   scope, read at every ending since systemd then stops the rest of the scope

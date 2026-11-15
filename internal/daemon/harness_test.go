@@ -120,6 +120,8 @@ type testNode struct {
 	logs *logCapture
 	// netSig overrides the network signature (nil: a constant).
 	netSig func() string
+	// slice is the kran.slice controller (nil: none, as without systemd).
+	slice SliceController
 
 	mu     sync.Mutex
 	d      *Daemon
@@ -222,6 +224,7 @@ func (n *testNode) start() *Daemon {
 
 		ClientAlive:  n.clientAlive,
 		NetSignature: n.netSignature(),
+		Slice:        n.slice,
 	})
 	if err != nil {
 		n.t.Fatal(err)

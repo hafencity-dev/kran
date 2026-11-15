@@ -39,6 +39,26 @@ func MemCap(alloc, avail int64, explicit bool) int64 {
 	return c
 }
 
+// DefaultMemCap is the cap of a job without --mem where nothing above it
+// bounds the memory of kran's jobs together (SPEC §6.8): a container job
+// (its Docker VM on macOS, Docker's own cgroup on Linux) and a native job
+// on a node without kran.slice (macOS, Linux without a systemd user
+// session). There one runaway job could fill the machine or the VM, whose
+// kernel then kills whatever it picks: another job, a test database, the
+// sync helper. Twice the estimate, at least 8 GiB, at most what is free
+// when it starts. A local or native job inside kran.slice gets no cap
+// without --mem: the slice bounds them all.
+func DefaultMemCap(alloc, avail int64) int64 {
+	if alloc <= 0 {
+		return 0
+	}
+	c := max(2*alloc, 8<<30)
+	if avail > 0 && c > avail {
+		c = max(avail, alloc)
+	}
+	return c
+}
+
 // Process caps on Linux (systemd TasksMax, threads included). A job's scope
 // and kran.slice as a whole stop a runaway fork loop at the cap instead of
 // letting it take the machine down; a parallel build with threaded test

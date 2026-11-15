@@ -527,9 +527,12 @@ func (m *manager) Start(ctx context.Context, req StartRequest) (Process, error) 
 		JobID: id, Node: m.opts.NodeName, Namespace: m.ns, Runtime: req.Runtime,
 		TTY: req.Spec.TTY, Stdin: req.Spec.Stdin, Nice: req.Nice,
 		LeaseTTL: m.tun.leaseTTL, KillGrace: m.tun.killGrace, SampleEvery: m.tun.sampleEvery,
-		MemMax: memCap(req.Alloc.Mem, memAvailable(), req.Spec.Req.Mem > 0), CPUs: req.Alloc.CPUs,
-		CtlPath: ctlPath(dir, id), Slot: req.Slot,
+		CPUs: req.Alloc.CPUs, CtlPath: ctlPath(dir, id), Slot: req.Slot,
 	}
+	// A native job goes into its own scope under kran.slice when systemd
+	// user scopes work here (below); a container job never does.
+	inSlice := (req.Runtime == proto.RuntimeNative || req.Runtime == "") && m.systemdRun != ""
+	spec.MemMax, spec.MemDefault = jobMemCap(req.Alloc.Mem, memAvailable(), req.Spec.Req.Mem > 0, req.Runtime, inSlice)
 	if m.tun.memMax > 0 {
 		spec.MemMax = m.tun.memMax
 	}

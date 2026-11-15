@@ -413,14 +413,19 @@ func (d *Daemon) localEnvelope(e *jobEntry, p scheduler.Placement) *proto.LocalE
 			"KRAN_NODE":   d.self,
 		},
 	}
-	// SPEC §6.8 (proto.MemCap).
+	// SPEC §6.8: --mem caps a job; without it only a job that kran.slice
+	// does not bound (no systemd user session here) keeps the node's
+	// default cap from its estimate (proto.DefaultMemCap).
 	e.mu.Lock()
 	explicit := e.job.Spec.Req.Mem > 0
 	e.mu.Unlock()
-	env.MemMax = proto.MemCap(p.Alloc.Mem, d.deps.Prober.Sample().MemAvailable, explicit)
+	avail := d.deps.Prober.Sample().MemAvailable
+	env.MemMax = proto.MemCap(p.Alloc.Mem, avail, explicit)
 	if s := d.deps.Slice; s != nil && s.Available() {
 		env.Slice = s.Name()
 		s.Refresh()
+	} else if !explicit {
+		env.MemMax = proto.DefaultMemCap(p.Alloc.Mem, avail)
 	}
 	return env
 }

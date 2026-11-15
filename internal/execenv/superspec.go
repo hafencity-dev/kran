@@ -23,9 +23,12 @@ type superSpec struct {
 	TTY   *proto.TTY `json:"tty,omitempty"`
 	Stdin bool       `json:"stdin"`
 
-	MemMax int64   `json:"mem_max"` // 0 = no cap
-	CPUs   float64 `json:"cpus"`
-	Nice   int     `json:"nice"`
+	MemMax int64 `json:"mem_max"` // 0 = no cap
+	// MemDefault: MemMax is the node's default cap for a job without --mem
+	// (proto.DefaultMemCap), not one asked for.
+	MemDefault bool    `json:"mem_default,omitempty"`
+	CPUs       float64 `json:"cpus"`
+	Nice       int     `json:"nice"`
 
 	LeaseTTL    time.Duration `json:"lease_ttl"`
 	KillGrace   time.Duration `json:"kill_grace"`

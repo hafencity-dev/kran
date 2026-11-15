@@ -37,8 +37,10 @@ type localJob struct {
 	// (0 = none) can be created. nil uses the real probe.
 	ScopeProbe func(memMax int64) bool
 	// AskedMem is the explicit --mem (or .kran.toml rule) behind a memory
-	// cap, for the message when the job hits it (0 = none asked).
+	// cap, for the message when the job hits it (0 = none asked); CapNote
+	// says where a cap without one came from.
 	AskedMem int64
+	CapNote  string
 	// Interactive: the job reads a terminal, so INT, QUIT or HUP that end
 	// it came from its user and need no word from kran.
 	Interactive bool
@@ -59,6 +61,7 @@ type localProc struct {
 	scope    string
 	memMax   int64  // the scope's MemoryMax (0 = none)
 	asked    int64  // the --mem behind memMax (0 = none asked)
+	capNote  string // where memMax came from without --mem
 	node     string // for the memory cap message
 	interact bool   // the job reads a terminal (localJob.Interactive)
 	sigMu    sync.Mutex
@@ -254,7 +257,7 @@ func startLocal(j localJob) (*localProc, *localError) {
 		resultCh: make(chan proto.Exit, 1),
 	}
 	if scope != "" {
-		p.memMax, p.asked = j.Envelope.MemMax, j.AskedMem
+		p.memMax, p.asked, p.capNote = j.Envelope.MemMax, j.AskedMem, j.CapNote
 	}
 	go p.wait()
 	return p, nil
@@ -324,8 +327,11 @@ func (p *localProc) endReason(ex proto.Exit, result string) string {
 	if result == "oom-kill" {
 		if p.memMax > 0 {
 			from := ""
-			if p.asked > 0 {
+			switch {
+			case p.asked > 0:
 				from = " (from --mem " + humanBytes(p.asked) + ")"
+			case p.capNote != "":
+				from = " (" + p.capNote + ")"
 			}
 			return fmt.Sprintf("job hit its %s memory cap %s%s — rerun with --mem %dG", humanBytes(p.memMax), where, from, max(2, (2*p.memMax+(1<<30)-1)>>30))
 		}

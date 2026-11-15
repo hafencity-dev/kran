@@ -16,7 +16,12 @@ const CgroupRoot = "/sys/fs/cgroup"
 
 // CgroupUsage is the cumulative accounting of a cgroup v2 group.
 type CgroupUsage struct {
-	MemCurrent int64   // memory.current
+	MemCurrent int64 // memory.current
+	// MemFile is the group's page cache on the file LRUs (memory.stat
+	// active_file + inactive_file): memory the kernel can take back, which
+	// MemAvailable already counts as available. shmem/tmpfs is not in it
+	// (it sits on the anon LRUs and cannot simply be dropped).
+	MemFile    int64
 	MemPeak    int64   // memory.peak (0 when the kernel lacks it, < 5.19)
 	CPUSeconds float64 // cpu.stat usage_usec
 }
@@ -32,6 +37,9 @@ func CgroupStats(path string) (CgroupUsage, error) {
 		return u, fmt.Errorf("cgroup %s: %w", dir, err)
 	}
 	u.MemCurrent = cur
+	if b, err := os.ReadFile(filepath.Join(dir, "memory.stat")); err == nil {
+		u.MemFile = statKey(string(b), "active_file") + statKey(string(b), "inactive_file")
+	}
 	if peak, err := readInt(filepath.Join(dir, "memory.peak")); err == nil {
 		u.MemPeak = peak
 	}
@@ -69,7 +77,25 @@ func (p *prober) cgroupUsage(path string, now time.Time) (proto.Resources, error
 		}
 	}
 	cores := p.rates.cores("cg:"+path, u.CPUSeconds, now, age)
-	return proto.Resources{CPUs: cores, Mem: u.MemCurrent}, nil
+	return proto.Resources{CPUs: cores, Mem: u.MemUsed()}, nil
+}
+
+// MemUsed is what the group holds that the kernel cannot simply give back:
+// memory.current without its file page cache (anonymous memory, shmem,
+// kernel memory). The scheduler takes a running job's use off its
+// reservation (SPEC §6.3); counting a build's page cache as use would book
+// it as using what MemAvailable already shows as available.
+func (u CgroupUsage) MemUsed() int64 { return max(0, u.MemCurrent-u.MemFile) }
+
+// statKey reads one "key value" line of a cgroup stat file (0 if absent).
+func statKey(s, key string) int64 {
+	for _, line := range strings.Split(s, "\n") {
+		if v, ok := strings.CutPrefix(line, key+" "); ok {
+			n, _ := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+			return n
+		}
+	}
+	return 0
 }
 
 func readInt(path string) (int64, error) {

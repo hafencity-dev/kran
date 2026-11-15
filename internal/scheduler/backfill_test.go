@@ -192,3 +192,141 @@ func TestFreeMemoryCountsOnlyTheUnusedPartOfReservations(t *testing.T) {
 		t.Fatalf("%+v", pl)
 	}
 }
+
+// The four tests below are review 117's probes A-D (2026-11-15), red on
+// 5b559777 and green since: an unknown start must not let anything pass the
+// held job by "ending first", and "room the held job does not need" must
+// count CPUs as the held job's own admission will.
+
+var localOnly = withReq(func(r *proto.Requirements) { r.Prefer = proto.PreferLocal })
+
+// TestBackfillUnknownStartLetsNoLongJobPassInvariant (probe A): non-kran
+// memory stands in the held job's way, so when it can start is unknown. A
+// 2-hour job must not pass it as if it ended first; when the load drops
+// and pre1 ends, the held job starts.
+func TestBackfillUnknownStartLetsNoLongJobPassInvariant(t *testing.T) {
+	clk := &fakeClock{t0}
+	g := self(gx10(t0))
+	g.Metrics.MemAvailable = 44 * gib // 44 − 8 reserve − 20 pre1 = 16 free
+	s := newTestSched(t, clk, g)
+	placed(t, s.Submit(newJob("pre1", "b1", 2, 20*gib, 25*60, localOnly)))
+	head := s.Submit(newJob("head", "b2", 2, 40*gib, 600, localOnly))
+	pending(t, head)
+	clk.Advance(3 * time.Minute)
+	s.Tick(clk.Now())
+	pending(t, head)
+	long := s.Submit(newJob("long", "c", 1, 16*gib, 2*3600, localOnly))
+	if pl, ok := isPlaced(long); ok {
+		t.Fatalf("a 2-hour job passed a held job whose start is unknown: %q", pl.Reason)
+	}
+	clk.Advance(time.Minute)
+	s.Release("pre1", nil)
+	g.Metrics.Time = clk.Now()
+	g.Metrics.MemAvailable = 56 * gib // non-kran load dropped
+	s.UpdateNode(g)
+	s.Tick(clk.Now())
+	if _, ok := isPlaced(head); !ok {
+		t.Fatalf("the held job still waits once its room is free: %q", reason(s, "head"))
+	}
+}
+
+// TestBackfillSpareRoomCPUWithoutOvercommitInvariant (probe B): an
+// hour-long 16-CPU job must not pass into "room the held job does not
+// need" that the held job then lacks: when A ends on time the held job
+// (4 CPUs) starts.
+func TestBackfillSpareRoomCPUWithoutOvercommitInvariant(t *testing.T) {
+	clk := &fakeClock{t0}
+	g := self(gx10(t0))
+	g.Metrics.MemAvailable = 60 * gib // 60 − 8 − 30 = 22 free
+	s := newTestSched(t, clk, g)
+	placed(t, s.Submit(newJob("A", "b1", 1, 30*gib, 10*60, localOnly)))
+	head := s.Submit(newJob("head", "b2", 4, 40*gib, 600, localOnly))
+	pending(t, head)
+	clk.Advance(3 * time.Minute)
+	s.Tick(clk.Now())
+	pending(t, head)
+	s.Submit(newJob("cpu", "c", 16, gib, 3600, localOnly))
+	clk.Advance(7 * time.Minute)
+	s.Release("A", nil)
+	g.Metrics.Time = clk.Now()
+	g.Metrics.MemAvailable = 90 * gib
+	s.UpdateNode(g)
+	s.Tick(clk.Now())
+	if _, ok := isPlaced(head); !ok {
+		t.Fatalf("the held job waits for CPUs a job that passed it took: %q", reason(s, "head"))
+	}
+}
+
+// TestBackfillForeignJobsUnknownStartInvariant (probe C): devmac is held
+// for a starving --remote job, and devmac's own jobs (another origin, ends
+// unknown) are in its way. An hour-long job from here must not pass it
+// there.
+func TestBackfillForeignJobsUnknownStartInvariant(t *testing.T) {
+	clk := &fakeClock{t0}
+	g := self(gx10(t0))
+	g.Metrics.MemAvailable = 20 * gib
+	d := devmac(t0)
+	d.Allocated = proto.Resources{CPUs: 8, Mem: 60 * gib}
+	d.AllocatedJobs = []string{"dm1", "dm2"}
+	d.Running = 2
+	d.Metrics.MemAvailable = 36 * gib
+	s := newTestSched(t, clk, g, d)
+	remote := withReq(func(r *proto.Requirements) { r.Prefer = proto.PreferRemote; r.OS = proto.OSAny })
+	head := s.Submit(newJob("head", "b2", 2, 30*gib, 600, remote))
+	pending(t, head)
+	clk.Advance(3 * time.Minute)
+	g.Metrics.Time, d.Metrics.Time = clk.Now(), clk.Now()
+	s.UpdateNode(g)
+	s.UpdateNode(d)
+	s.Tick(clk.Now())
+	pending(t, head)
+	long := s.Submit(newJob("long", "c", 2, 12*gib, 3600, remote))
+	if pl, ok := isPlaced(long); ok && pl.Node == "devmac" {
+		t.Fatalf("an hour-long job passed a hold on devmac whose start is unknown: %q", pl.Reason)
+	}
+}
+
+// TestBackfillOversizeJobNotStarvedInvariant (probe D): a job larger than
+// any node holds the whole node and runs alone once it is empty; 10-second
+// jobs arriving every 5 s must not keep it from ever starting.
+func TestBackfillOversizeJobNotStarvedInvariant(t *testing.T) {
+	clk := &fakeClock{t0}
+	g := self(gx10(t0))
+	g.Metrics.MemAvailable = 100 * gib
+	s := newTestSched(t, clk, g)
+	placed(t, s.Submit(newJob("r0", "b1", 1, 4*gib, 60, localOnly)))
+	big := s.Submit(newJob("big", "b2", 4, 200*gib, 600, localOnly))
+	pending(t, big)
+	ends := map[string]time.Time{"r0": t0.Add(60 * time.Second)}
+	var q []Ticket
+	for sec := 1; sec <= 30*60; sec++ {
+		clk.Advance(time.Second)
+		now := clk.Now()
+		for id, e := range ends {
+			if !now.Before(e) {
+				s.Release(id, nil)
+				delete(ends, id)
+			}
+		}
+		if sec%5 == 0 {
+			q = append(q, s.Submit(newJob(fmt.Sprintf("s%04d", sec), fmt.Sprintf("a%d", sec%5), 1, 2*gib, 10, localOnly)))
+		}
+		g.Metrics.Time = now
+		s.UpdateNode(g)
+		s.Tick(now)
+		w := q[:0]
+		for _, tk := range q {
+			if _, ok := isPlaced(tk); ok {
+				ends[tk.JobID()] = now.Add(20 * time.Second)
+				continue
+			}
+			w = append(w, tk)
+		}
+		q = w
+		if _, ok := isPlaced(big); ok {
+			t.Logf("big started after %s", now.Sub(t0))
+			return
+		}
+	}
+	t.Fatalf("the job larger than any node never started in 30 min behind 10-s jobs every 5 s: %q", reason(s, "big"))
+}

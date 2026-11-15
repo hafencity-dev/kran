@@ -76,9 +76,10 @@ func fakeSystemd(t *testing.T, result string) (argsFile, resetFile string) {
 // for a KILL, and names the OOM killer (with or without a cap of its own).
 func TestLocalScopeOOMKillThenTERMSaysSo(t *testing.T) {
 	_, resetFile := fakeSystemd(t, "oom-kill")
+	note := ""
 	run := func(id string, env *proto.LocalEnvelope, asked int64) proto.Exit {
 		p, lerr := startLocal(localJob{JobID: id, Node: "gx10", Argv: []string{"sh", "-c", "kill -TERM $$"}, Dir: t.TempDir(), Env: os.Environ(),
-			Envelope: env, AskedMem: asked, ScopeProbe: func(int64) bool { return true },
+			Envelope: env, AskedMem: asked, CapNote: note, ScopeProbe: func(int64) bool { return true },
 			Stdio: localStdio{Out: tmpFile(t, "o"), Err: tmpFile(t, "e")}})
 		if lerr != nil {
 			t.Fatal(lerr)
@@ -97,6 +98,12 @@ func TestLocalScopeOOMKillThenTERMSaysSo(t *testing.T) {
 	// --mem 1G: the cap of 2 GiB was hit.
 	ex = run("toomcap", &proto.LocalEnvelope{MemMax: 2 << 30, Slice: "kran.slice"}, 1<<30)
 	if !strings.Contains(ex.Reason, "job hit its 2.0 GiB memory cap on gx10 (from --mem 1.0 GiB)") || !strings.Contains(ex.Reason, "--mem 4G") {
+		t.Fatalf("%+v", ex)
+	}
+	// No --mem, no kran.slice above it: the node's default cap, not --mem.
+	note = "this node's default for a job without --mem"
+	ex = run("toomdef", &proto.LocalEnvelope{MemMax: 8 << 30}, 0)
+	if strings.Contains(ex.Reason, "from --mem") || !strings.Contains(ex.Reason, "job hit its 8.0 GiB memory cap on gx10 (this node's default for a job without --mem)") {
 		t.Fatalf("%+v", ex)
 	}
 	if b, _ := os.ReadFile(resetFile); !strings.Contains(string(b), "kran-local-toomterm.scope") || !strings.Contains(string(b), "kran-local-toomcap.scope") {

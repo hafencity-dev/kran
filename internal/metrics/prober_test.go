@@ -269,6 +269,12 @@ func TestCgroupUsage(t *testing.T) {
 	if err != nil || r.Mem != 1<<30 || r.CPUs <= 0 {
 		t.Fatalf("usage = %+v %v", r, err)
 	}
+	// Page cache is not use (review 117): 1 GiB current of which 384 MiB
+	// file pages, 64 MiB shmem (stays counted).
+	write("memory.stat", "anon 603979776\nfile 469762048\nshmem 67108864\nactive_file 134217728\ninactive_file 268435456\n")
+	if r, err := p.cgroupUsage(dir, now.Add(4*time.Second)); err != nil || r.Mem != 1<<30-384<<20 {
+		t.Fatalf("usage without page cache = %+v %v, want %d", r, err, int64(1<<30-384<<20))
+	}
 	if _, err := CgroupStats(filepath.Join(dir, "missing")); err == nil {
 		t.Fatal("want error for missing group")
 	}

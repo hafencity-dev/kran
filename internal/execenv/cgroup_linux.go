@@ -143,13 +143,17 @@ func (c *jobCgroup) kill(wait time.Duration) {
 
 type cgUsage struct {
 	mem, peak int64
-	cpu       float64 // seconds
-	oomKills  int64
+	// file: page cache on the file LRUs (memory.stat active_file +
+	// inactive_file), which the kernel can give back.
+	file     int64
+	cpu      float64 // seconds
+	oomKills int64
 }
 
 func (c *jobCgroup) usage() cgUsage {
 	u := cgUsage{cpu: float64(c.keyed("cpu.stat", "usage_usec")) / 1e6}
 	u.mem, _ = strconv.ParseInt(c.read("memory.current"), 10, 64)
+	u.file = c.keyed("memory.stat", "active_file") + c.keyed("memory.stat", "inactive_file")
 	u.peak, _ = strconv.ParseInt(c.read("memory.peak"), 10, 64)
 	u.oomKills = c.keyed("memory.events", "oom_kill") + c.keyed("memory.events", "oom_group_kill")
 	return u

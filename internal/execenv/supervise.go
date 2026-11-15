@@ -730,6 +730,7 @@ func (s *supervisor) sample() {
 		}
 		var mem int64
 		var cpu float64
+		cache := int64(0) // page cache in mem: peak, not live use
 		switch {
 		case container != "":
 			st, ok := s.dockerStats(container)
@@ -739,7 +740,7 @@ func (s *supervisor) sample() {
 			mem, cpu = st.mem, st.cpu
 		case s.cg != nil:
 			u := s.cg.usage()
-			mem, cpu = u.mem, u.cpu
+			mem, cpu, cache = u.mem, u.cpu, min(u.file, u.mem)
 		default:
 			mem, cpu = treeUsage(jobProcs(pgid, pgid, s.spec.JobID, false))
 			if s.spec.MemMax > 0 && mem > s.spec.MemMax {
@@ -757,7 +758,9 @@ func (s *supervisor) sample() {
 		}
 		s.lastCPU, s.lastTime = cpu, now
 		s.statMu.Unlock()
-		writeJSONAtomic(filepath.Join(s.dir, fileLive), liveSample{Time: now.UTC(), CPUs: rate, Mem: mem})
+		// Live use for the books (SPEC §6.3) leaves out page cache the
+		// kernel can give back; the peak above keeps it, as memory.peak does.
+		writeJSONAtomic(filepath.Join(s.dir, fileLive), liveSample{Time: now.UTC(), CPUs: rate, Mem: mem - cache})
 	}
 }
 
@@ -795,7 +798,7 @@ func (s *supervisor) setupExit(res stepResult) proto.Exit {
 		exit.Code = res.code
 		exit.Reason = "canceled during setup"
 	case res.oom && s.spec.MemMax > 0:
-		exit.Reason = fmt.Sprintf("setup `%s` hit the job's %s memory cap on %s", s.spec.Setup.Run, fmtGiB(s.spec.MemMax), s.spec.Node)
+		exit.Reason = fmt.Sprintf("setup `%s` hit the job's %s memory cap on %s (%s)", s.spec.Setup.Run, fmtGiB(s.spec.MemMax), s.spec.Node, s.capSource())
 	case res.oom:
 		exit.Reason = fmt.Sprintf("the kernel's out-of-memory killer ended setup `%s` on %s: %s ran out of memory (the job has no memory cap of its own)",
 			s.spec.Setup.Run, s.spec.Node, s.memWhere())
@@ -822,8 +825,7 @@ func (s *supervisor) mainExit(res stepResult) proto.Exit {
 			exit.Code = proto.ExitSignalBase + int(syscall.SIGKILL)
 		}
 		exit.Signal = "KILL"
-		// Only an explicit --mem sets a cap (SPEC §6.8).
-		exit.Reason = fmt.Sprintf("job hit its %s memory cap on %s (from --mem) — rerun with --mem %s", fmtGiB(s.spec.MemMax), s.spec.Node, suggestMem(s.spec.MemMax))
+		exit.Reason = fmt.Sprintf("job hit its %s memory cap on %s (%s) — rerun with --mem %s", fmtGiB(s.spec.MemMax), s.spec.Node, s.capSource(), suggestMem(s.spec.MemMax))
 	case res.oom && r == "":
 		// No cap of its own: the node (or its Linux VM) ran out of memory
 		// and the kernel's OOM killer picked a process of this job. The
@@ -866,6 +868,14 @@ func (s *supervisor) mainExit(res stepResult) proto.Exit {
 		}
 	}
 	return exit
+}
+
+// capSource says where the job's memory cap came from (SPEC §6.8).
+func (s *supervisor) capSource() string {
+	if s.spec.MemDefault {
+		return "the node's default for a job without --mem: twice its estimate, at least 8 GiB, as nothing above it bounds its memory; give it more with --mem"
+	}
+	return "from --mem"
 }
 
 // passedOn reports whether the origin asked for sig (job.signal).

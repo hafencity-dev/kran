@@ -164,8 +164,9 @@ func (d *Daemon) selfLoop(ctx context.Context) {
 
 // sampleLocalJobs updates Live for local jobs. A job in its own systemd
 // scope (Linux) is measured by the scope's cgroup: everything it started,
-// whatever process group or session it moved to, and its page cache, the
-// same quantity its memory estimate was learned from. Without a scope (no
+// whatever process group or session it moved to, without the page cache
+// the kernel can give back (metrics.CgroupUsage.MemUsed: MemAvailable
+// already counts that as available). Without a scope (no
 // systemd user session, macOS) its process group is measured, which
 // misses children that left the group. Live is what the scheduler takes
 // off a job's reservation as already used (SPEC §6.3): measured too low,

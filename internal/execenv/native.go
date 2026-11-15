@@ -509,3 +509,19 @@ func nativeArgv(argv []string, path string, tp toolPlan, mise string) []string {
 
 // memCap derives the job's memory cap (proto.MemCap).
 func memCap(alloc, avail int64, explicit bool) int64 { return proto.MemCap(alloc, avail, explicit) }
+
+// jobMemCap is a target-side job's memory cap (SPEC §6.8) and whether it is
+// the node's default for a job without --mem: an explicit --mem always caps;
+// without it only a job that kran.slice does not bound (a container job, or
+// a native job when no systemd scope puts it under the slice) keeps the
+// estimate-based default cap.
+func jobMemCap(alloc, avail int64, explicit bool, rt proto.RuntimeKind, inSlice bool) (int64, bool) {
+	if explicit {
+		return memCap(alloc, avail, true), false
+	}
+	if rt != proto.RuntimeContainer && inSlice {
+		return 0, false
+	}
+	c := proto.DefaultMemCap(alloc, avail)
+	return c, c > 0
+}

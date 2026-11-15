@@ -14,9 +14,9 @@ type jobCgroup struct {
 }
 
 type cgUsage struct {
-	mem, peak int64
-	cpu       float64
-	oomKills  int64
+	mem, peak, file int64
+	cpu             float64
+	oomKills        int64
 }
 
 func setupJobCgroup(string, int64) (*jobCgroup, error) {

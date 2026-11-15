@@ -42,9 +42,9 @@ func TestLocalRun(t *testing.T) {
 		t.Fatalf("decisions %+v", res.decisions)
 	}
 	env := res.decisions[0].Envelope
-	// No --mem: the estimate places and books the job but never caps it
-	// (SPEC §6.8).
-	if env.MemMax != 0 || env.Env["KRAN_JOB_ID"] != res.jobID {
+	// No --mem and no kran.slice above local jobs (no systemd here): the
+	// node's default cap from the estimate (SPEC §6.8; the fake books 1 GiB).
+	if env.MemMax != 8<<30 || env.Slice != "" || env.Env["KRAN_JOB_ID"] != res.jobID {
 		t.Fatalf("envelope %+v", env)
 	}
 	j := storedJob(t, a, res.jobID)
@@ -337,5 +337,39 @@ func TestLocalEnvelopeCapsOnlyAnExplicitMem(t *testing.T) {
 	// least 2 GiB.)
 	if env := res.decisions[0].Envelope; env.MemMax < 2<<30 {
 		t.Fatalf("--mem: envelope %+v, want a cap", env)
+	}
+}
+
+type fakeSlice struct{}
+
+func (fakeSlice) Name() string    { return "kran.slice" }
+func (fakeSlice) Available() bool { return true }
+func (fakeSlice) Refresh()        {}
+
+// TestLocalEnvelopeNoCapUnderKranSlice: with kran.slice above local jobs
+// (it bounds them all), a job without --mem gets no cap of its own; with
+// --mem it does.
+func TestLocalEnvelopeNoCapUnderKranSlice(t *testing.T) {
+	c := newCluster(t, "a")
+	a := c.nodes["a"]
+	a.slice = fakeSlice{}
+	a.start()
+	ws := workspaceDir(t, map[string]string{"f.txt": "hi"})
+	ctx, cancel := testContext(20 * time.Second)
+	defer cancel()
+	for _, mem := range []int64{0, 3 << 30} {
+		spec := shSpec(ws, "true")
+		spec.Req.Mem = mem
+		res, err := runCLI(ctx, a.sock(), spec, cliOpts{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.decisions) != 1 || res.decisions[0].Envelope == nil {
+			t.Fatalf("decisions %+v", res.decisions)
+		}
+		env := res.decisions[0].Envelope
+		if env.Slice != "kran.slice" || (mem == 0) != (env.MemMax == 0) {
+			t.Errorf("--mem %d: envelope %+v", mem, env)
+		}
 	}
 }

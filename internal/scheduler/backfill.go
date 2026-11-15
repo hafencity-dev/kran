@@ -16,9 +16,15 @@ import (
 // cannot delay it:
 //
 //   - it ends before the held job can start (the earliest time enough
-//     running jobs end for it to fit), or
+//     running jobs end for it to fit); only when that time is known: with
+//     non-kran load, jobs of other origins, or a job larger than any node
+//     (which holds the whole node) in the way there is no bound, and a
+//     long job that "ends before never" would delay the held job by all
+//     of its run; or
 //   - it fits in the room that is left beside the held job once that one
-//     starts, so it never takes what the held job waits for.
+//     starts, so it never takes what the held job waits for. CPU room: the
+//     held job fits when its CPUs ≤ (free − passer's) × 1.25, so a passer
+//     may take at most free − held/1.25, compared without the factor.
 //
 // Aging bound: once the held job would fit if the jobs that passed it by
 // ending first were gone, nothing passes it any more except into room it
@@ -66,7 +72,9 @@ func (v *nodeView) shadowOf(h hold, now time.Time) shadow {
 	extra := func(r []room) map[*pool]proto.Resources {
 		out := make(map[*pool]proto.Resources, len(ps))
 		for i, p := range ps {
-			out[p] = proto.Resources{CPUs: r[i].cpu - h.res.CPUs, Mem: r[i].mem - h.res.Mem}
+			// The held job fits when h ≤ (r − c)·overcommit, so a passer may
+			// take at most r − h/overcommit CPUs (no overcommit on its side).
+			out[p] = proto.Resources{CPUs: r[i].cpu - h.res.CPUs/cpuOvercommit, Mem: r[i].mem - h.res.Mem}
 		}
 		return out
 	}
@@ -124,13 +132,11 @@ func (s *sched) mayPass(j *sjob, c *cand, holds map[string]hold, now time.Time, 
 		return false
 	}
 	sh := c.v.shadowOf(h, now)
-	if !sh.frozen && c.total() <= sh.start {
-		when := "can start"
-		if !math.IsInf(sh.start, 1) {
-			when += " (~" + fmtDur(sh.start) + ")"
-		}
+	// An unknown start (+Inf: non-kran load, jobs of other origins, a job
+	// that holds a whole node) gives no bound: nothing passes first then.
+	if !sh.frozen && !math.IsInf(sh.start, 1) && c.total() <= sh.start {
 		c.passes, c.passFirst = h.job, true
-		c.passNote = fmt.Sprintf("ends in ~%s, before %s %s", fmtDur(c.total()), h.job, when)
+		c.passNote = fmt.Sprintf("ends in ~%s, before %s can start (~%s)", fmtDur(c.total()), h.job, fmtDur(sh.start))
 		return true
 	}
 	if sh.extra == nil || c.v.e.st.MaxJobs > 0 {
@@ -141,7 +147,7 @@ func (s *sched) mayPass(j *sjob, c *cand, holds map[string]hold, now time.Time, 
 		if !ok {
 			continue // a pool the held job does not use
 		}
-		if c.mem > e.Mem || c.cpu > e.CPUs*cpuOvercommit+1e-9 {
+		if c.mem > e.Mem || c.cpu > e.CPUs+1e-9 {
 			return false
 		}
 	}
